@@ -36,29 +36,37 @@ chrome.commands.onCommand.addListener((command) => {
 let offscreenCreating = null; // 作成中のPromise
 
 async function setupOffscreen() {
-    // すでに存在するか確認
-    const existingContexts = await chrome.runtime.getContexts({
-        contextTypes: ['OFFSCREEN_DOCUMENT']
-    });
+    try {
+        // すでに存在するか確認
+        const existingContexts = await chrome.runtime.getContexts({
+            contextTypes: ['OFFSCREEN_DOCUMENT']
+        });
 
-    if (existingContexts.length > 0) {
-        return;
-    }
+        if (existingContexts.length > 0) {
+            return;
+        }
 
-    // 作成中なら待機
-    if (offscreenCreating) {
+        // 作成中なら待機
+        if (offscreenCreating) {
+            await offscreenCreating;
+            return;
+        }
+
+        // 新規作成
+        console.log("Background: Offscreen Document を作成します");
+        offscreenCreating = chrome.offscreen.createDocument({
+            url: 'offscreen.html',
+            reasons: ['AUDIO_PLAYBACK'],
+            justification: '音声再生によるアクセシビリティ向上のため（CSP制限サイト回避）'
+        });
+        
         await offscreenCreating;
-        return;
+        offscreenCreating = null;
+    } catch (err) {
+        offscreenCreating = null;
+        console.error("Background: setupOffscreen 失敗:", err.name, err.message);
+        throw err;
     }
-
-    // 新規作成
-    offscreenCreating = chrome.offscreen.createDocument({
-        url: 'offscreen.html',
-        reasons: ['AUDIO_PLAYBACK'],
-        justification: '音声再生によるアクセシビリティ向上のため（CSP制限サイト回避）'
-    });
-    await offscreenCreating;
-    offscreenCreating = null;
 }
 
 // Content Scriptからのメッセージを処理するリスナー
@@ -81,24 +89,43 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
-    // 音声生成リクエスト
+    // スピーカー一覧取得
+    if (request.type === "GET_SPEAKERS") {
+        fetch(`${VOICEVOX_BASE_URL}/speakers`)
+            .then(res => res.json())
+            .then(speakers => sendResponse({ success: true, speakers: speakers }))
+            .catch(err => sendResponse({ success: false, error: err.message }));
+        return true;
+    }
+
+    // 音声生成リクエスト（分割して Offscreen へ送信）
     if (request.type === "GENERATE_VOICE") {
         chrome.storage.local.get(['speakerId', 'speedScale']).then(async (result) => {
             const speakerId = result.speakerId || 1;
             const speedScale = result.speedScale || 1.0;
+            const chunks = splitText(request.text);
             
             try {
-                const data = await generateVoice(request.text, speakerId, speedScale);
                 await setupOffscreen();
+                // 新しい読み上げの前に以前の再生を停止しキューをクリアする
                 chrome.runtime.sendMessage({
-                    type: 'PLAY_AUDIO',
-                    target: 'offscreen',
-                    data: data,
-                    text: request.text
+                    type: 'STOP_AUDIO',
+                    target: 'offscreen'
                 });
+
+                // チャンクを順次送信（Offscreen 側のキューで管理）
+                for (const chunk of chunks) {
+                    chrome.runtime.sendMessage({
+                        type: 'ENQUEUE_TEXT',
+                        target: 'offscreen',
+                        text: chunk,
+                        speakerId: speakerId,
+                        speedScale: speedScale
+                    });
+                }
                 sendResponse({ success: true });
             } catch (err) {
-                console.error("Background: 生成/再生エラー:", err);
+                console.error("Background: 準備エラー:", err);
                 sendResponse({ success: false, error: err.message });
             }
         });
@@ -130,40 +157,31 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 /**
- * VOICEVOX APIを使用して音声を生成し、Base64文字列として返す
+ * テキストを適切な長さ（文単位）に分割する
  */
-async function generateVoice(text, speakerId, speedScale) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); 
-
-    try {
-        const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speakerId}&text=${encodeURIComponent(text)}`;
-        const queryResponse = await fetch(queryUrl, { method: "POST", signal: controller.signal });
-        if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
+function splitText(text) {
+    if (!text) return [];
+    
+    // 句読点や改行で分割
+    // 。、！？\n など
+    const sentences = text.split(/([。！？\n])/);
+    
+    const chunks = [];
+    let currentChunk = "";
+    
+    for (let i = 0; i < sentences.length; i++) {
+        currentChunk += sentences[i];
         
-        const queryJson = await queryResponse.json();
-        queryJson.prePhonemeLength = 0.1;
-        queryJson.speedScale = speedScale;
-
-        const synthUrl = `${VOICEVOX_BASE_URL}/synthesis?speaker=${speakerId}`;
-        const synthResponse = await fetch(synthUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(queryJson),
-            signal: controller.signal
-        });
-        if (!synthResponse.ok) throw new Error(`Synthesis失敗(${synthResponse.status})`);
-
-        const audioBlob = await synthResponse.blob();
-        
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error("Base64変換失敗"));
-            reader.readAsDataURL(audioBlob);
-        });
-
-    } finally {
-        clearTimeout(timeoutId);
+        // 区切り文字を含めて一定の長さになったか、区切り文字そのものの場合はチャンク確定
+        if (i % 2 === 1 || i === sentences.length - 1) {
+            const trimmed = currentChunk.trim();
+            if (trimmed) {
+                chunks.push(trimmed);
+            }
+            currentChunk = "";
+        }
     }
+    
+    // 空の配列にならないようガード
+    return chunks.length > 0 ? chunks : [text];
 }
