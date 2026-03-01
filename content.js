@@ -119,7 +119,7 @@ class VVRadioReader {
         });
     }
 
-    // --- 音声再生エンジン ---
+    // --- 音声再生リクエスト ---
 
     async speakText(text) {
         if (!text) return;
@@ -129,22 +129,16 @@ class VVRadioReader {
 
         console.log("Web Reader for VOICEVOX: 読み上げ依頼送信:", cleanText);
 
-        // API通信待ち時間を利用して無音再生を行い、オーディオデバイスのレイテンシを解消する
-        this.warmUpAudio();
-
         try {
             chrome.runtime.sendMessage({
                 type: "GENERATE_VOICE",
                 text: cleanText
             }, (response) => {
                 if (chrome.runtime.lastError || !response || !response.success) {
-                    console.error("Web Reader for VOICEVOX: 音声生成失敗:", chrome.runtime.lastError || (response && response.error) || "応答なし");
+                    console.error("Web Reader for VOICEVOX: 依頼失敗:", chrome.runtime.lastError || (response && response.error) || "応答なし");
                     this.updateUIState('error');
                     return;
                 }
-                console.log("Web Reader for VOICEVOX: 音声生成成功、キューに追加します");
-                this.audioQueue.push({ url: response.audioData, text: cleanText });
-                this.processQueue();
             });
         } catch (error) {
             console.error("Web Reader for VOICEVOX: 通信重大エラー:", error.message);
@@ -152,96 +146,36 @@ class VVRadioReader {
         }
     }
 
-    // オーディオコンテキストのウォームアップ処理
-    warmUpAudio() {
-        // 再生中であればドライバはアクティブなので処理不要
-        if (this.isPlaying || this.currentAudio) return;
-
-        // すでにウォームアップ用Audioがあれば再利用（重複防止）
-        if (!this.warmUpAudioElement) {
-            this.warmUpAudioElement = new Audio(this.SILENT_WAV);
-            this.warmUpAudioElement.volume = 0.01;
-        }
-        
-        this.warmUpAudioElement.play().catch(e => {});
-    }
-
-    // 再生キューの処理（順次再生）
-    async processQueue() {
-        if (this.isPlaying || this.audioQueue.length === 0) return;
-
-        this.isPlaying = true;
-        this.updateUIState('reading');
-        const current = this.audioQueue.shift();
-        console.log("Web Reader for VOICEVOX: 再生開始:", current.text);
-        
-        const audio = new Audio(current.url);
-        this.currentAudio = audio;
-
-        let isCleanedUp = false;
-
-        // 再生終了時またはエラー時のクリーンアップ処理
-        const cleanup = (reason = "unknown") => {
-            if (isCleanedUp) return;
-            isCleanedUp = true;
-
-            console.log(`Web Reader for VOICEVOX: クリーンアップ実行 (理由: ${reason})`);
-
-            // イベントリスナーを解除してメモリリークと二重実行を防止
-            audio.onended = null;
-            audio.onerror = null;
-
-            if (current.url.startsWith('blob:')) {
-                URL.revokeObjectURL(current.url); // メモリ解放
-            }
-            // src属性を削除してload()を呼ぶことでBase64のメモリを破棄
-            audio.removeAttribute('src');
-            audio.load();
-
-            if (this.currentAudio === audio) {
-                this.currentAudio = null;
-            }
-            this.isPlaying = false;
-            
-            if (this.audioQueue.length === 0) {
-                this.updateUIState('idle');
-            }
-            
-            console.log("Web Reader for VOICEVOX: 再生工程終了 / 次をチェック");
-            this.processQueue(); // 次のキューを処理
-        };
-
-        audio.onended = () => cleanup("ended");
-        audio.onerror = (e) => {
-            const errorInfo = audio.error ? `Code: ${audio.error.code}, Message: ${audio.error.message}` : "Details unavailable";
-            console.error(`Web Reader for VOICEVOX: Audio要素再生エラー [${errorInfo}]`, e);
-            cleanup("error");
-        };
-
-        try {
-            await audio.play();
-        } catch (err) {
-            console.error("Web Reader for VOICEVOX: 再生失敗 (play()失敗):", err.name, err.message);
-            cleanup("play_failed");
-        }
-    }
-
-    // 再生の完全停止とキューのクリア
+    // 再生の完全停止とキューのクリア要求
     stopAll() {
-        console.log("Web Reader for VOICEVOX: 全ての再生とキューを停止します");
-        if (this.currentAudio) {
-            // cleanupが呼ばれないようにリスナーを即座に削除
-            this.currentAudio.onended = null;
-            this.currentAudio.onerror = null;
-            
-            this.currentAudio.pause();
-            this.currentAudio.removeAttribute('src');
-            this.currentAudio.load();
-            this.currentAudio = null;
-        }
-        this.clearQueue();
+        console.log("Web Reader for VOICEVOX: 停止リクエスト送信");
+        chrome.runtime.sendMessage({ type: "STOP_ALL" });
         this.isPlaying = false;
         this.updateUIState('idle');
+    }
+
+    // バックグラウンドからの再生状態通知のリスナー（各タブ共通）
+    setupPlaybackStateListener() {
+        chrome.runtime.onMessage.addListener((message) => {
+            if (message.target !== 'background') return;
+
+            switch (message.type) {
+                case 'PLAYBACK_STARTED':
+                    this.isPlaying = true;
+                    this.updateUIState('reading');
+                    break;
+                case 'PLAYBACK_ENDED':
+                case 'PLAYBACK_STOPPED':
+                    this.isPlaying = false;
+                    this.updateUIState('idle');
+                    break;
+                case 'PLAYBACK_ERROR':
+                    console.error("Web Reader for VOICEVOX: 再生エラー通知受信:", message.error);
+                    this.isPlaying = false;
+                    this.updateUIState('error');
+                    break;
+            }
+        });
     }
 
     // メッセージの整形（不要な情報の削除・置換）
@@ -252,11 +186,7 @@ class VVRadioReader {
             .replace(/\n+/g, " ")
             .trim();
     }
-
-    clearQueue() {
-        this.audioQueue.forEach(item => URL.revokeObjectURL(item.url));
-        this.audioQueue = [];
-    }
 }
 
-new VVRadioReader();
+const reader = new VVRadioReader();
+reader.setupPlaybackStateListener();

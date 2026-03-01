@@ -13,7 +13,8 @@
     "activeTab",
     "scripting",
     "storage",
-    "contextMenus"
+    "contextMenus",
+    "offscreen"
   ],
   "commands": {
     "toggle-reading": {
