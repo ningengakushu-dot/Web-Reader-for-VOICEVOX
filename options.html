@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Reader for VOICEVOX 設定</title>
+    <link rel="stylesheet" href="options.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Web Reader for VOICEVOX Settings</h1>
+            <p class="subtitle">VOICEVOX ボイスキャラクター設定</p>
+        </header>
+
+        <main>
+            <section class="settings-section">
+                <label for="speaker-select">読み上げキャラクター</label>
+                <div class="select-wrapper">
+                    <select id="speaker-select">
+                        <option value="">キャラクターを取得中...</option>
+                    </select>
+                    <div class="loader" id="loader"></div>
+                </div>
+                <p class="hint">VOICEVOXエンジンが起動している必要があります。</p>
+            </section>
+            
+            <section class="settings-section">
+                <label for="speed-slider">読み上げ速度: <span id="speed-value">1.0</span>x</label>
+                <div class="slider-wrapper">
+                    <input type="range" id="speed-slider" min="0.5" max="2.0" step="0.1" value="1.0">
+                </div>
+            </section>
+
+            <div class="actions">
+                <button id="save-btn" class="primary-btn">設定を保存</button>
+                <span id="status-msg" class="status-msg"></span>
+            </div>
+        </main>
+
+        <footer>
+            <p>Web Reader for VOICEVOX v1.1.0</p>
+        </footer>
+    </div>
+    <script src="options.js"></script>
+</body>
+</html>
