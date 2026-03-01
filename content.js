@@ -178,8 +178,19 @@ class VVRadioReader {
         const audio = new Audio(current.url);
         this.currentAudio = audio;
 
+        let isCleanedUp = false;
+
         // 再生終了時またはエラー時のクリーンアップ処理
-        const cleanup = () => {
+        const cleanup = (reason = "unknown") => {
+            if (isCleanedUp) return;
+            isCleanedUp = true;
+
+            console.log(`Web Reader for VOICEVOX: クリーンアップ実行 (理由: ${reason})`);
+
+            // イベントリスナーを解除してメモリリークと二重実行を防止
+            audio.onended = null;
+            audio.onerror = null;
+
             if (current.url.startsWith('blob:')) {
                 URL.revokeObjectURL(current.url); // メモリ解放
             }
@@ -196,21 +207,22 @@ class VVRadioReader {
                 this.updateUIState('idle');
             }
             
-            console.log("Web Reader for VOICEVOX: 再生終了 / 次をチェック");
+            console.log("Web Reader for VOICEVOX: 再生工程終了 / 次をチェック");
             this.processQueue(); // 次のキューを処理
         };
 
-        audio.onended = cleanup;
+        audio.onended = () => cleanup("ended");
         audio.onerror = (e) => {
-            console.error("Web Reader for VOICEVOX: Audio要素再生エラー:", e);
-            cleanup();
+            const errorInfo = audio.error ? `Code: ${audio.error.code}, Message: ${audio.error.message}` : "Details unavailable";
+            console.error(`Web Reader for VOICEVOX: Audio要素再生エラー [${errorInfo}]`, e);
+            cleanup("error");
         };
 
         try {
             await audio.play();
         } catch (err) {
-            console.error("Web Reader for VOICEVOX: 再生失敗:", err);
-            cleanup();
+            console.error("Web Reader for VOICEVOX: 再生失敗 (play()失敗):", err.name, err.message);
+            cleanup("play_failed");
         }
     }
 
@@ -218,6 +230,10 @@ class VVRadioReader {
     stopAll() {
         console.log("Web Reader for VOICEVOX: 全ての再生とキューを停止します");
         if (this.currentAudio) {
+            // cleanupが呼ばれないようにリスナーを即座に削除
+            this.currentAudio.onended = null;
+            this.currentAudio.onerror = null;
+            
             this.currentAudio.pause();
             this.currentAudio.removeAttribute('src');
             this.currentAudio.load();
