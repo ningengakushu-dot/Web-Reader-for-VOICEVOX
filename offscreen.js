@@ -1,30 +1,90 @@
-// Offscreen Document: 実際の音声再生を担当
+// Offscreen Document: 実際の音声再生と合成を担当
+const VOICEVOX_BASE_URL = "http://127.0.0.1:50021";
 
-let audioQueue = [];
-let isPlaying = false;
-let currentAudio = null;
+let textQueue = [];  // 合成待ちのテキスト
+let audioQueue = []; // 再生待ちの音声（Blob URL）
+let isSynthesizing = false; // 現在合成中か
+let isPlaying = false;      // 現在再生中か
+let currentAudio = null;    // 現在再生中のAudioオブジェクト
 
 // メッセージリスナー
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.target !== 'offscreen') return;
 
     switch (message.type) {
-        case 'PLAY_AUDIO':
-            playAudio(message.data, message.text);
+        case 'ENQUEUE_TEXT':
+            enqueueText(message.text, message.speakerId, message.speedScale);
             break;
         case 'STOP_AUDIO':
             stopAll();
             break;
     }
+    return false; // 非同期応答不要
 });
 
-function playAudio(url, text) {
-    console.log("Offscreen: 再生待ちに追加:", text);
-    audioQueue.push({ url, text });
-    processQueue();
+/**
+ * テキストを合成待ちキューに追加し、合成プロセスを開始する
+ */
+function enqueueText(text, speakerId, speedScale) {
+    console.log("Offscreen: 合成待ちに追加:", text);
+    textQueue.push({ text, speakerId, speedScale });
+    processSynthesis();
 }
 
-async function processQueue() {
+/**
+ * 合成待ちキューを処理し、音声を生成する
+ */
+async function processSynthesis() {
+    if (isSynthesizing || textQueue.length === 0) return;
+
+    isSynthesizing = true;
+    const item = textQueue.shift();
+
+    try {
+        console.log("Offscreen: 合成開始:", item.text);
+        const blobUrl = await generateVoiceBlob(item.text, item.speakerId, item.speedScale);
+        audioQueue.push({ url: blobUrl, text: item.text });
+        
+        // 音声ができたら再生プロセスも回す
+        processPlayback();
+    } catch (err) {
+        console.error("Offscreen: 合成失敗:", err);
+        notifyBackground("PLAYBACK_ERROR", { error: `合成失敗: ${err.message}` });
+    } finally {
+        isSynthesizing = false;
+        // 次の合成へ
+        processSynthesis();
+    }
+}
+
+/**
+ * VOICEVOX APIを使用して音声を合成し、Blob URLを返す
+ */
+async function generateVoiceBlob(text, speakerId, speedScale) {
+    const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speakerId}&text=${encodeURIComponent(text)}`;
+    const queryResponse = await fetch(queryUrl, { method: "POST" });
+    if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
+    
+    const queryJson = await queryResponse.json();
+    queryJson.prePhonemeLength = 0.1;
+    queryJson.speedScale = speedScale;
+
+    const synthUrl = `${VOICEVOX_BASE_URL}/synthesis?speaker=${speakerId}`;
+    const synthResponse = await fetch(synthUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(queryJson)
+    });
+    if (!synthResponse.ok) throw new Error(`Synthesis失敗(${synthResponse.status})`);
+
+    const audioBlob = await synthResponse.blob();
+    return URL.createObjectURL(audioBlob);
+}
+
+/**
+ * 再生待ちキューを処理する
+ */
+async function processPlayback() {
     if (isPlaying || audioQueue.length === 0) return;
 
     isPlaying = true;
@@ -47,9 +107,7 @@ async function processQueue() {
         audio.onended = null;
         audio.onerror = null;
 
-        if (current.url.startsWith('blob:')) {
-            URL.revokeObjectURL(current.url);
-        }
+        URL.revokeObjectURL(current.url);
         audio.removeAttribute('src');
         audio.load();
 
@@ -58,11 +116,11 @@ async function processQueue() {
         }
         isPlaying = false;
 
-        if (audioQueue.length === 0) {
+        if (audioQueue.length === 0 && textQueue.length === 0) {
             notifyBackground("PLAYBACK_ENDED");
         }
         
-        processQueue();
+        processPlayback();
     };
 
     audio.onended = () => cleanup("ended");
@@ -84,6 +142,8 @@ async function processQueue() {
 
 function stopAll() {
     console.log("Offscreen: 全停止");
+    
+    // 現在の再生を停止
     if (currentAudio) {
         currentAudio.onended = null;
         currentAudio.onerror = null;
@@ -92,11 +152,17 @@ function stopAll() {
         currentAudio.load();
         currentAudio = null;
     }
+
+    // キューをクリア
+    textQueue = [];
     audioQueue.forEach(item => {
-        if (item.url.startsWith('blob:')) URL.revokeObjectURL(item.url);
+        URL.revokeObjectURL(item.url);
     });
     audioQueue = [];
+    
+    isSynthesizing = false;
     isPlaying = false;
+    
     notifyBackground("PLAYBACK_STOPPED");
 }
 
