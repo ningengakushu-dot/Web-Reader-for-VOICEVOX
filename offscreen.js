@@ -13,7 +13,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     switch (message.type) {
         case 'ENQUEUE_TEXT':
-            enqueueText(message.text, message.speakerId, message.speedScale);
+            enqueueText(message.text, message.speakerId, message.speedScale, message.pitchScale, message.intonationScale, message.volumeScale, message.pauseLength);
             break;
         case 'STOP_AUDIO':
             stopAll();
@@ -25,9 +25,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 /**
  * テキストを合成待ちキューに追加し、合成プロセスを開始する
  */
-function enqueueText(text, speakerId, speedScale) {
+function enqueueText(text, speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLength) {
     console.log("Offscreen: 合成待ちに追加:", text);
-    textQueue.push({ text, speakerId, speedScale });
+    textQueue.push({ text, speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLength });
     processSynthesis();
 }
 
@@ -42,7 +42,7 @@ async function processSynthesis() {
 
     try {
         console.log("Offscreen: 合成開始:", item.text);
-        const blobUrl = await generateVoiceBlob(item.text, item.speakerId, item.speedScale);
+        const blobUrl = await generateVoiceBlob(item.text, item.speakerId, item.speedScale, item.pitchScale, item.intonationScale, item.volumeScale, item.pauseLength);
         audioQueue.push({ url: blobUrl, text: item.text });
         
         // 音声ができたら再生プロセスも回す
@@ -60,14 +60,18 @@ async function processSynthesis() {
 /**
  * VOICEVOX APIを使用して音声を合成し、Blob URLを返す
  */
-async function generateVoiceBlob(text, speakerId, speedScale) {
+async function generateVoiceBlob(text, speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLength) {
     const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speakerId}&text=${encodeURIComponent(text)}`;
     const queryResponse = await fetch(queryUrl, { method: "POST" });
     if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
     
     const queryJson = await queryResponse.json();
     queryJson.prePhonemeLength = 0.1;
-    queryJson.speedScale = speedScale;
+    queryJson.postPhonemeLength = pauseLength !== undefined ? pauseLength : 1.0;
+    queryJson.speedScale = speedScale !== undefined ? speedScale : 1.0;
+    queryJson.pitchScale = pitchScale !== undefined ? pitchScale : 0.0;
+    queryJson.intonationScale = intonationScale !== undefined ? intonationScale : 1.0;
+    queryJson.volumeScale = volumeScale !== undefined ? volumeScale : 1.0;
 
     const synthUrl = `${VOICEVOX_BASE_URL}/synthesis?speaker=${speakerId}`;
     const synthResponse = await fetch(synthUrl, {

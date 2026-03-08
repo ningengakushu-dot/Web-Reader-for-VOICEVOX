@@ -17,7 +17,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
         chrome.tabs.sendMessage(tab.id, {
             type: "READ_SELECTED_TEXT",
             text: info.selectionText
-        });
+        }).catch(() => {});
     }
 });
 
@@ -26,7 +26,7 @@ chrome.commands.onCommand.addListener((command) => {
     if (command === "toggle-reading") {
         chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
             if (tabs.length > 0) {
-                chrome.tabs.sendMessage(tabs[0].id, { type: "TOGGLE_READING" });
+                chrome.tabs.sendMessage(tabs[0].id, { type: "TOGGLE_READING" }).catch(() => {});
             }
         });
     }
@@ -100,9 +100,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     // 音声生成リクエスト（分割して Offscreen へ送信）
     if (request.type === "GENERATE_VOICE") {
-        chrome.storage.local.get(['speakerId', 'speedScale']).then(async (result) => {
+        chrome.storage.local.get(['speakerId', 'speedScale', 'pitchScale', 'intonationScale', 'volumeScale', 'pauseLength']).then(async (result) => {
             const speakerId = result.speakerId || 1;
-            const speedScale = result.speedScale || 1.0;
+            const speedScale = result.speedScale !== undefined ? result.speedScale : 1.0;
+            const pitchScale = result.pitchScale !== undefined ? result.pitchScale : 0.0;
+            const intonationScale = result.intonationScale !== undefined ? result.intonationScale : 1.0;
+            const volumeScale = result.volumeScale !== undefined ? result.volumeScale : 1.0;
+            const pauseLength = result.pauseLength !== undefined ? result.pauseLength : 1.0;
+            
             const chunks = splitText(request.text);
             
             try {
@@ -111,7 +116,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 chrome.runtime.sendMessage({
                     type: 'STOP_AUDIO',
                     target: 'offscreen'
-                });
+                }).catch(() => {});
 
                 // チャンクを順次送信（Offscreen 側のキューで管理）
                 for (const chunk of chunks) {
@@ -120,8 +125,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         target: 'offscreen',
                         text: chunk,
                         speakerId: speakerId,
-                        speedScale: speedScale
-                    });
+                        speedScale: speedScale,
+                        pitchScale: pitchScale,
+                        intonationScale: intonationScale,
+                        volumeScale: volumeScale,
+                        pauseLength: pauseLength
+                    }).catch(() => {});
                 }
                 sendResponse({ success: true });
             } catch (err) {
@@ -138,7 +147,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             chrome.runtime.sendMessage({
                 type: 'STOP_AUDIO',
                 target: 'offscreen'
-            });
+            }).catch(() => {});
         });
         sendResponse({ success: true });
         return false;
@@ -148,7 +157,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (["PLAYBACK_STARTED", "PLAYBACK_ENDED", "PLAYBACK_ERROR", "PLAYBACK_STOPPED"].includes(request.type)) {
         chrome.tabs.query({active: true}, (tabs) => {
             tabs.forEach(tab => {
-                chrome.tabs.sendMessage(tab.id, request);
+                chrome.tabs.sendMessage(tab.id, request).catch(() => {});
             });
         });
     }
