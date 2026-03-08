@@ -6,9 +6,33 @@ document.addEventListener('DOMContentLoaded', () => {
     const speedSlider = document.getElementById('speed-slider');
     const speedValue = document.getElementById('speed-value');
 
+    const pitchSlider = document.getElementById('pitch-slider');
+    const pitchValue = document.getElementById('pitch-value');
+
+    const intonationSlider = document.getElementById('intonation-slider');
+    const intonationValue = document.getElementById('intonation-value');
+
+    const volumeSlider = document.getElementById('volume-slider');
+    const volumeValue = document.getElementById('volume-value');
+
+    const pauseSlider = document.getElementById('pause-slider');
+    const pauseValue = document.getElementById('pause-value');
+
     // スライダー操作時のリアルタイム反映
     speedSlider.addEventListener('input', (e) => {
         speedValue.textContent = Number(e.target.value).toFixed(1);
+    });
+    pitchSlider.addEventListener('input', (e) => {
+        pitchValue.textContent = Number(e.target.value).toFixed(2);
+    });
+    intonationSlider.addEventListener('input', (e) => {
+        intonationValue.textContent = Number(e.target.value).toFixed(1);
+    });
+    volumeSlider.addEventListener('input', (e) => {
+        volumeValue.textContent = Number(e.target.value).toFixed(1);
+    });
+    pauseSlider.addEventListener('input', (e) => {
+        pauseValue.textContent = Number(e.target.value).toFixed(1);
     });
 
     // 初期化処理: スピーカー一覧の取得と保存済み設定の反映を行う
@@ -20,13 +44,29 @@ document.addEventListener('DOMContentLoaded', () => {
             renderSpeakers(speakers);
 
             // Chromeストレージから保存済みの設定を取得
-            const result = await chrome.storage.local.get(['speakerId', 'speedScale']);
+            const result = await chrome.storage.local.get(['speakerId', 'speedScale', 'pitchScale', 'intonationScale', 'volumeScale', 'pauseLength']);
             if (result.speakerId) {
                 speakerSelect.value = result.speakerId;
             }
-            if (result.speedScale) {
+            if (result.speedScale !== undefined) {
                 speedSlider.value = result.speedScale;
                 speedValue.textContent = Number(result.speedScale).toFixed(1);
+            }
+            if (result.pitchScale !== undefined) {
+                pitchSlider.value = result.pitchScale;
+                pitchValue.textContent = Number(result.pitchScale).toFixed(2);
+            }
+            if (result.intonationScale !== undefined) {
+                intonationSlider.value = result.intonationScale;
+                intonationValue.textContent = Number(result.intonationScale).toFixed(1);
+            }
+            if (result.volumeScale !== undefined) {
+                volumeSlider.value = result.volumeScale;
+                volumeValue.textContent = Number(result.volumeScale).toFixed(1);
+            }
+            if (result.pauseLength !== undefined) {
+                pauseSlider.value = result.pauseLength;
+                pauseValue.textContent = Number(result.pauseLength).toFixed(1);
             }
         } catch (error) {
             console.error('Error during init:', error);
@@ -70,11 +110,22 @@ document.addEventListener('DOMContentLoaded', () => {
     saveBtn.addEventListener('click', async () => {
         const speakerId = parseInt(speakerSelect.value);
         const speedScale = parseFloat(speedSlider.value);
-        if (isNaN(speakerId) || isNaN(speedScale)) return;
+        const pitchScale = parseFloat(pitchSlider.value);
+        const intonationScale = parseFloat(intonationSlider.value);
+        const volumeScale = parseFloat(volumeSlider.value);
+        const pauseLength = parseFloat(pauseSlider.value);
+        if (isNaN(speakerId) || isNaN(speedScale) || isNaN(pitchScale) || isNaN(intonationScale) || isNaN(volumeScale) || isNaN(pauseLength)) return;
 
         try {
             // 設定値をChromeのローカルストレージに永続化
-            await chrome.storage.local.set({ speakerId: speakerId, speedScale: speedScale });
+            await chrome.storage.local.set({ 
+                speakerId: speakerId, 
+                speedScale: speedScale,
+                pitchScale: pitchScale,
+                intonationScale: intonationScale,
+                volumeScale: volumeScale,
+                pauseLength: pauseLength
+            });
             showStatus('設定を保存しました！', 'success');
         } catch (error) {
             showStatus('保存に失敗しました。', 'error');

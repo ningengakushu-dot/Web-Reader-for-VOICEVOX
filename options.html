@@ -32,6 +32,34 @@
                 </div>
             </section>
 
+            <section class="settings-section">
+                <label for="pitch-slider">声の高さ(ピッチ): <span id="pitch-value">0.00</span></label>
+                <div class="slider-wrapper">
+                    <input type="range" id="pitch-slider" min="-0.15" max="0.15" step="0.01" value="0.00">
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <label for="intonation-slider">抑揚: <span id="intonation-value">1.0</span></label>
+                <div class="slider-wrapper">
+                    <input type="range" id="intonation-slider" min="0.0" max="2.0" step="0.1" value="1.0">
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <label for="volume-slider">音量: <span id="volume-value">1.0</span></label>
+                <div class="slider-wrapper">
+                    <input type="range" id="volume-slider" min="0.0" max="2.0" step="0.1" value="1.0">
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <label for="pause-slider">文と文の間の長さ(秒): <span id="pause-value">1.0</span></label>
+                <div class="slider-wrapper">
+                    <input type="range" id="pause-slider" min="0.0" max="2.0" step="0.1" value="1.0">
+                </div>
+            </section>
+
             <div class="actions">
                 <button id="save-btn" class="primary-btn">設定を保存</button>
                 <span id="status-msg" class="status-msg"></span>
