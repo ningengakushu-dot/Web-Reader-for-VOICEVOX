@@ -1,8 +1,5 @@
-console.log("Web Reader for VOICEVOX: Content Script 読み込み完了");
-
 class VVRadioReader {
     constructor() {
-        console.log("Web Reader for VOICEVOX: クラス初期化開始");
         this.isPlaying = false;
         this.indicator = null;
         this.init();
@@ -12,7 +9,6 @@ class VVRadioReader {
         this.injectIndicator();
         this.checkVoicevoxConnection();
         this.setupMessageListener();
-        console.log("Web Reader for VOICEVOX: 起動");
     }
 
     // 画面にインジケーターアイコンを注入
@@ -71,9 +67,7 @@ class VVRadioReader {
             this.indicator.classList.add("reading");
         } else if (state === 'error') {
             this.indicator.classList.add("error");
-            setTimeout(() => {
-                this.indicator.classList.remove("error");
-            }, 3000);
+            setTimeout(() => this.indicator.classList.remove("error"), 3000);
         }
     }
 
@@ -92,7 +86,6 @@ class VVRadioReader {
                         if (text) this.speakText(text);
                     }
                     break;
-                // バックグラウンドから転送された再生状態通知
                 case "PLAYBACK_STARTED":
                     this.isPlaying = true;
                     this.updateUIState('reading');
@@ -103,7 +96,7 @@ class VVRadioReader {
                     this.updateUIState('idle');
                     break;
                 case "PLAYBACK_ERROR":
-                    console.error("Web Reader for VOICEVOX: 再生エラー通知受信:", request.error);
+                    console.error("Web Reader for VOICEVOX: 再生エラー:", request.error);
                     this.isPlaying = false;
                     this.updateUIState('error');
                     break;
@@ -115,10 +108,8 @@ class VVRadioReader {
     checkVoicevoxConnection() {
         chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
             if (chrome.runtime.lastError || !res || !res.success) {
-                console.error("Web Reader for VOICEVOX: VOICEVOX に接続できません。");
+                console.warn("Web Reader for VOICEVOX: VOICEVOXに接続できません。");
                 this.updateUIState('error');
-            } else {
-                console.log("Web Reader for VOICEVOX: VOICEVOX 接続OK (Port: 50021)");
             }
         });
     }
@@ -130,14 +121,13 @@ class VVRadioReader {
         const cleanText = this.cleanMessage(text);
         if (!cleanText) return;
 
-        console.log("Web Reader for VOICEVOX: 読み上げ依頼送信:", cleanText);
-
         chrome.runtime.sendMessage({
             type: "GENERATE_VOICE",
             text: cleanText
         }, (response) => {
             if (chrome.runtime.lastError || !response || !response.success) {
-                console.error("Web Reader for VOICEVOX: 依頼失敗:", chrome.runtime.lastError || (response && response.error) || "応答なし");
+                console.error("Web Reader for VOICEVOX: 依頼失敗:",
+                    chrome.runtime.lastError?.message || response?.error || "応答なし");
                 this.updateUIState('error');
             }
         });
@@ -145,7 +135,6 @@ class VVRadioReader {
 
     // 再生の完全停止とキューのクリア要求
     stopAll() {
-        console.log("Web Reader for VOICEVOX: 停止リクエスト送信");
         chrome.runtime.sendMessage({ type: "STOP_ALL" });
         this.isPlaying = false;
         this.updateUIState('idle');
