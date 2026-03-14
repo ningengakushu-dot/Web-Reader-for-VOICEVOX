@@ -1,15 +1,4 @@
-// VOICEVOXエンジンのベースURL（ローカルサーバー）
-const VOICEVOX_BASE_URL = "http://127.0.0.1:50021";
-
-// 設定のデフォルト値
-const SETTING_DEFAULTS = {
-    speakerId: 1,
-    speedScale: 1.0,
-    pitchScale: 0.0,
-    intonationScale: 1.0,
-    volumeScale: 1.0,
-    pauseLengthScale: 1.0
-};
+importScripts('constants.js');
 
 // 拡張機能インストール時にコンテキストメニューを作成
 chrome.runtime.onInstalled.addListener(() => {
@@ -26,7 +15,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
         chrome.tabs.sendMessage(tab.id, {
             type: "READ_SELECTED_TEXT",
             text: info.selectionText
-        }).catch(() => {});
+        }).catch(warn("コンテキストメニューからのメッセージ送信失敗"));
     }
 });
 
@@ -35,7 +24,8 @@ chrome.commands.onCommand.addListener((command) => {
     if (command === "toggle-reading") {
         chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
             if (tabs.length > 0) {
-                chrome.tabs.sendMessage(tabs[0].id, { type: "TOGGLE_READING" }).catch(() => {});
+                chrome.tabs.sendMessage(tabs[0].id, { type: "TOGGLE_READING" })
+                    .catch(warn("ショートカットキーのメッセージ送信失敗"));
             }
         });
     }
@@ -57,7 +47,6 @@ async function setupOffscreen() {
             return;
         }
 
-        console.log("Background: Offscreen Document を作成します");
         offscreenCreating = chrome.offscreen.createDocument({
             url: 'offscreen.html',
             reasons: ['AUDIO_PLAYBACK'],
@@ -75,7 +64,13 @@ async function setupOffscreen() {
 
 // Offscreen にメッセージを送信するヘルパー
 function sendToOffscreen(message) {
-    chrome.runtime.sendMessage({ ...message, target: 'offscreen' }).catch(() => {});
+    chrome.runtime.sendMessage({ ...message, target: 'offscreen' })
+        .catch(warn("Offscreenへのメッセージ送信失敗"));
+}
+
+// 警告ログを出力するヘルパー（.catch() 用）
+function warn(context) {
+    return (err) => console.warn(`Background: ${context}:`, err.message);
 }
 
 // Content Scriptからのメッセージを処理するリスナー
@@ -116,7 +111,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         case "PLAYBACK_STOPPED":
             chrome.tabs.query({active: true}, (tabs) => {
                 tabs.forEach(tab => {
-                    chrome.tabs.sendMessage(tab.id, request).catch(() => {});
+                    chrome.tabs.sendMessage(tab.id, request)
+                        .catch(warn("再生状態の転送失敗"));
                 });
             });
             return false;
@@ -155,19 +151,9 @@ async function handleGenerateVoice(text, sendResponse) {
 function splitText(text) {
     if (!text) return [];
 
-    const sentences = text.split(/([。！？\n])/);
-    const chunks = [];
-    let currentChunk = "";
+    const chunks = text.match(/[^。！？\n]+[。！？\n]?/g);
+    if (!chunks) return [text];
 
-    for (let i = 0; i < sentences.length; i++) {
-        currentChunk += sentences[i];
-
-        if (i % 2 === 1 || i === sentences.length - 1) {
-            const trimmed = currentChunk.trim();
-            if (trimmed) chunks.push(trimmed);
-            currentChunk = "";
-        }
-    }
-
-    return chunks.length > 0 ? chunks : [text];
+    const result = chunks.map(s => s.trim()).filter(Boolean);
+    return result.length > 0 ? result : [text];
 }

@@ -1,5 +1,4 @@
 // Offscreen Document: 実際の音声再生と合成を担当
-const VOICEVOX_BASE_URL = "http://127.0.0.1:50021";
 
 let textQueue = [];
 let audioQueue = [];
@@ -26,7 +25,6 @@ chrome.runtime.onMessage.addListener((message) => {
  * テキストを合成待ちキューに追加し、合成プロセスを開始する
  */
 function enqueueText(text, settings) {
-    console.log("Offscreen: 合成待ちに追加:", text);
     textQueue.push({ text, settings });
     processSynthesis();
 }
@@ -41,7 +39,6 @@ async function processSynthesis() {
     const item = textQueue.shift();
 
     try {
-        console.log("Offscreen: 合成開始:", item.text);
         const blobUrl = await generateVoiceBlob(item.text, item.settings);
         audioQueue.push({ url: blobUrl, text: item.text });
         processPlayback();
@@ -56,7 +53,6 @@ async function processSynthesis() {
 
 /**
  * VOICEVOX APIを使用して音声を合成し、Blob URLを返す
- * ポーズの長さはVOICEVOXのpauseLengthScaleで制御する
  */
 async function generateVoiceBlob(text, settings) {
     const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
@@ -97,18 +93,14 @@ async function processPlayback() {
     notifyBackground("PLAYBACK_STARTED");
 
     const current = audioQueue.shift();
-    console.log("Offscreen: 再生開始:", current.text);
-
     const audio = new Audio(current.url);
     currentAudio = audio;
 
     let isCleanedUp = false;
 
-    const cleanup = (reason = "unknown") => {
+    const cleanup = () => {
         if (isCleanedUp) return;
         isCleanedUp = true;
-
-        console.log(`Offscreen: クリーンアップ (理由: ${reason})`);
 
         audio.onended = null;
         audio.onerror = null;
@@ -126,12 +118,14 @@ async function processPlayback() {
         processPlayback();
     };
 
-    audio.onended = () => cleanup("ended");
+    audio.onended = cleanup;
     audio.onerror = (e) => {
-        const errorInfo = audio.error ? `Code: ${audio.error.code}, Message: ${audio.error.message}` : "Details unavailable";
+        const errorInfo = audio.error
+            ? `Code: ${audio.error.code}, Message: ${audio.error.message}`
+            : "Details unavailable";
         console.error(`Offscreen: Audioエラー [${errorInfo}]`, e);
         notifyBackground("PLAYBACK_ERROR", { error: errorInfo });
-        cleanup("error");
+        cleanup();
     };
 
     try {
@@ -139,13 +133,11 @@ async function processPlayback() {
     } catch (err) {
         console.error("Offscreen: play()失敗:", err.name, err.message);
         notifyBackground("PLAYBACK_ERROR", { error: `${err.name}: ${err.message}` });
-        cleanup("play_failed");
+        cleanup();
     }
 }
 
 function stopAll() {
-    console.log("Offscreen: 全停止");
-
     if (currentAudio) {
         currentAudio.onended = null;
         currentAudio.onerror = null;
