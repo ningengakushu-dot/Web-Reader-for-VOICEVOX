@@ -154,7 +154,8 @@ async function handleGenerateVoice(text, sendResponse) {
 }
 
 /**
- * テキストを句読点・改行で文単位に分割する
+ * テキストを文末記号（。！？）と改行で分割する
+ * 読点（、）等はVOICEVOXが自然なポーズで処理するため分割しない
  */
 function splitText(text) {
     if (!text) return [];
