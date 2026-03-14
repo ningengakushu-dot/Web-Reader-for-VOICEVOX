@@ -52,8 +52,8 @@
 本アプリを使用する前に、必ず以下のドキュメントをご確認ください。
 本アプリを使用した時点で、これらに同意したものとみなされます。
 
-- [利用規約](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/TERMS.md)
-- [プライバシーポリシー](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/PRIVACY.md)
+- [利用規約](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/docs/TERMS.md)
+- [プライバシーポリシー](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/docs/PRIVACY.md)
 
 **【重要：自己責任の原則】**
 
@@ -63,4 +63,4 @@
 **【ライセンス・権利関係】**
 - ソースコードの利用はMIT Licenseに準じます。
 - 音声の生成には[VOICEVOX](https://voicevox.hiroshiba.jp/)を使用しています。生成された音声の利用（動画への使用など）については、必ずVOICEVOXおよび各ボイスキャラクターの利用規約を遵守してください。
-- **【重要】** 本ツールで生成した音声を公開する場合、必ず「VOICEVOX:（使用キャラクター名）」のようなクレジット表記が必要です。詳細は[利用規約](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/TERMS.md)をご確認ください。
+- **【重要】** 本ツールで生成した音声を公開する場合、必ず「VOICEVOX:（使用キャラクター名）」のようなクレジット表記が必要です。詳細は[利用規約](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/docs/TERMS.md)をご確認ください。
