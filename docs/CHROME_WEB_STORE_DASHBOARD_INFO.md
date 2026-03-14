@@ -31,5 +31,5 @@ This extension is designed to provide text-to-speech functionality using the loc
 
 ## 3. プライバシーポリシーの連絡先
 `PRIVACY.md` に記載されているURLと同じものを設定してください。
-`https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/PRIVACY.md`
+`https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/docs/PRIVACY.md`
 （※公開時はGitHubリポジトリの直リンクが便利です）
