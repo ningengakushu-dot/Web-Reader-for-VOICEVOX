@@ -1,33 +1,33 @@
 // Offscreen Document: 実際の音声再生と合成を担当
 const VOICEVOX_BASE_URL = "http://127.0.0.1:50021";
 
-let textQueue = [];  // 合成待ちのテキスト
-let audioQueue = []; // 再生待ちの音声（Blob URL）
-let isSynthesizing = false; // 現在合成中か
-let isPlaying = false;      // 現在再生中か
-let currentAudio = null;    // 現在再生中のAudioオブジェクト
+let textQueue = [];
+let audioQueue = [];
+let isSynthesizing = false;
+let isPlaying = false;
+let currentAudio = null;
 
 // メッセージリスナー
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message) => {
     if (message.target !== 'offscreen') return;
 
     switch (message.type) {
         case 'ENQUEUE_TEXT':
-            enqueueText(message.text, message.speakerId, message.speedScale, message.pitchScale, message.intonationScale, message.volumeScale, message.pauseLength);
+            enqueueText(message.text, message.settings);
             break;
         case 'STOP_AUDIO':
             stopAll();
             break;
     }
-    return false; // 非同期応答不要
+    return false;
 });
 
 /**
  * テキストを合成待ちキューに追加し、合成プロセスを開始する
  */
-function enqueueText(text, speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLength) {
+function enqueueText(text, settings) {
     console.log("Offscreen: 合成待ちに追加:", text);
-    textQueue.push({ text, speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLength });
+    textQueue.push({ text, settings });
     processSynthesis();
 }
 
@@ -42,17 +42,14 @@ async function processSynthesis() {
 
     try {
         console.log("Offscreen: 合成開始:", item.text);
-        const blobUrl = await generateVoiceBlob(item.text, item.speakerId, item.speedScale, item.pitchScale, item.intonationScale, item.volumeScale, item.pauseLength);
-        audioQueue.push({ url: blobUrl, text: item.text });
-        
-        // 音声ができたら再生プロセスも回す
+        const blobUrl = await generateVoiceBlob(item.text, item.settings);
+        audioQueue.push({ url: blobUrl, text: item.text, pauseLength: item.settings.pauseLength });
         processPlayback();
     } catch (err) {
         console.error("Offscreen: 合成失敗:", err);
         notifyBackground("PLAYBACK_ERROR", { error: `合成失敗: ${err.message}` });
     } finally {
         isSynthesizing = false;
-        // 次の合成へ
         processSynthesis();
     }
 }
@@ -60,18 +57,21 @@ async function processSynthesis() {
 /**
  * VOICEVOX APIを使用して音声を合成し、Blob URLを返す
  */
-async function generateVoiceBlob(text, speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLength) {
+async function generateVoiceBlob(text, settings) {
+    const { speakerId, speedScale, pitchScale, intonationScale, volumeScale } = settings;
+
     const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speakerId}&text=${encodeURIComponent(text)}`;
     const queryResponse = await fetch(queryUrl, { method: "POST" });
     if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
-    
+
     const queryJson = await queryResponse.json();
-    queryJson.prePhonemeLength = 0.1;
-    queryJson.postPhonemeLength = pauseLength !== undefined ? pauseLength : 1.0;
-    queryJson.speedScale = speedScale !== undefined ? speedScale : 1.0;
-    queryJson.pitchScale = pitchScale !== undefined ? pitchScale : 0.0;
-    queryJson.intonationScale = intonationScale !== undefined ? intonationScale : 1.0;
-    queryJson.volumeScale = volumeScale !== undefined ? volumeScale : 1.0;
+
+    queryJson.prePhonemeLength = 0.1 * speedScale;
+    queryJson.postPhonemeLength = 0.1 * speedScale;
+    queryJson.speedScale = speedScale;
+    queryJson.pitchScale = pitchScale;
+    queryJson.intonationScale = intonationScale;
+    queryJson.volumeScale = volumeScale;
 
     const synthUrl = `${VOICEVOX_BASE_URL}/synthesis?speaker=${speakerId}`;
     const synthResponse = await fetch(synthUrl, {
@@ -107,24 +107,27 @@ async function processPlayback() {
         isCleanedUp = true;
 
         console.log(`Offscreen: クリーンアップ (理由: ${reason})`);
-        
+
         audio.onended = null;
         audio.onerror = null;
-
         URL.revokeObjectURL(current.url);
         audio.removeAttribute('src');
         audio.load();
 
-        if (currentAudio === audio) {
-            currentAudio = null;
-        }
+        if (currentAudio === audio) currentAudio = null;
         isPlaying = false;
 
-        if (audioQueue.length === 0 && textQueue.length === 0) {
+        if (audioQueue.length === 0 && textQueue.length === 0 && !isSynthesizing) {
             notifyBackground("PLAYBACK_ENDED");
         }
-        
-        processPlayback();
+
+        const waitMs = (reason === "ended" && current.pauseLength > 0) ? current.pauseLength * 1000 : 0;
+
+        if (waitMs > 0) {
+            setTimeout(() => processPlayback(), waitMs);
+        } else {
+            processPlayback();
+        }
     };
 
     audio.onended = () => cleanup("ended");
@@ -146,8 +149,7 @@ async function processPlayback() {
 
 function stopAll() {
     console.log("Offscreen: 全停止");
-    
-    // 現在の再生を停止
+
     if (currentAudio) {
         currentAudio.onended = null;
         currentAudio.onerror = null;
@@ -157,23 +159,16 @@ function stopAll() {
         currentAudio = null;
     }
 
-    // キューをクリア
     textQueue = [];
-    audioQueue.forEach(item => {
-        URL.revokeObjectURL(item.url);
-    });
+    audioQueue.forEach(item => URL.revokeObjectURL(item.url));
     audioQueue = [];
-    
+
     isSynthesizing = false;
     isPlaying = false;
-    
+
     notifyBackground("PLAYBACK_STOPPED");
 }
 
 function notifyBackground(type, payload = {}) {
-    chrome.runtime.sendMessage({
-        type,
-        target: 'background',
-        ...payload
-    });
+    chrome.runtime.sendMessage({ type, target: 'background', ...payload });
 }
