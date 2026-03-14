@@ -10,7 +10,7 @@ document.addEventListener('DOMContentLoaded', () => {
         { key: 'pitchScale',      id: 'pitch',      defaultVal: 0.0,  decimals: 2 },
         { key: 'intonationScale', id: 'intonation',  defaultVal: 1.0,  decimals: 1 },
         { key: 'volumeScale',     id: 'volume',     defaultVal: 1.0,  decimals: 1 },
-        { key: 'pauseLength',    id: 'pause',      defaultVal: 1.0,  decimals: 1 },
+        { key: 'pauseLengthScale', id: 'pause',     defaultVal: 1.0,  decimals: 1 },
     ];
 
     // 各スライダーのDOM参照を取得し、inputイベントを設定
