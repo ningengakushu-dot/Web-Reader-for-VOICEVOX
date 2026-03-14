@@ -5,6 +5,8 @@ let textQueue = [];
 let audioQueue = [];
 let isSynthesizing = false;
 let isPlaying = false;
+let isPausing = false;
+let pauseTimerId = null;
 let currentAudio = null;
 
 // メッセージリスナー
@@ -89,7 +91,7 @@ async function generateVoiceBlob(text, settings) {
  * 再生待ちキューを処理する
  */
 async function processPlayback() {
-    if (isPlaying || audioQueue.length === 0) return;
+    if (isPlaying || isPausing || audioQueue.length === 0) return;
 
     isPlaying = true;
     notifyBackground("PLAYBACK_STARTED");
@@ -124,7 +126,13 @@ async function processPlayback() {
         const waitMs = (reason === "ended" && current.pauseLength > 0) ? current.pauseLength * 1000 : 0;
 
         if (waitMs > 0) {
-            setTimeout(() => processPlayback(), waitMs);
+            // ポーズ中は processPlayback の呼び出しをブロックする
+            isPausing = true;
+            pauseTimerId = setTimeout(() => {
+                isPausing = false;
+                pauseTimerId = null;
+                processPlayback();
+            }, waitMs);
         } else {
             processPlayback();
         }
@@ -150,6 +158,12 @@ async function processPlayback() {
 function stopAll() {
     console.log("Offscreen: 全停止");
 
+    // ポーズ中のタイマーをキャンセル
+    if (pauseTimerId) {
+        clearTimeout(pauseTimerId);
+        pauseTimerId = null;
+    }
+
     if (currentAudio) {
         currentAudio.onended = null;
         currentAudio.onerror = null;
@@ -165,6 +179,7 @@ function stopAll() {
 
     isSynthesizing = false;
     isPlaying = false;
+    isPausing = false;
 
     notifyBackground("PLAYBACK_STOPPED");
 }
