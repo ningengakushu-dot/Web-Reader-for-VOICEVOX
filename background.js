@@ -8,7 +8,7 @@ const SETTING_DEFAULTS = {
     pitchScale: 0.0,
     intonationScale: 1.0,
     volumeScale: 1.0,
-    pauseLength: 1.0
+    pauseLengthScale: 1.0
 };
 
 // 拡張機能インストール時にコンテキストメニューを作成
@@ -114,7 +114,6 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         case "PLAYBACK_ENDED":
         case "PLAYBACK_ERROR":
         case "PLAYBACK_STOPPED":
-            // 再生状態をアクティブなタブに転送
             chrome.tabs.query({active: true}, (tabs) => {
                 tabs.forEach(tab => {
                     chrome.tabs.sendMessage(tab.id, request).catch(() => {});
@@ -135,15 +134,11 @@ async function handleGenerateVoice(text, sendResponse) {
         await setupOffscreen();
         sendToOffscreen({ type: 'STOP_AUDIO' });
 
-        for (let i = 0; i < chunks.length; i++) {
+        for (const chunk of chunks) {
             sendToOffscreen({
                 type: 'ENQUEUE_TEXT',
-                text: chunks[i],
-                settings: {
-                    ...settings,
-                    // 最後の文の後はポーズを挿入しない
-                    pauseLength: (i === chunks.length - 1) ? 0.0 : settings.pauseLength
-                }
+                text: chunk,
+                settings
             });
         }
         sendResponse({ success: true });
