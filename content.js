@@ -3,16 +3,8 @@ console.log("Web Reader for VOICEVOX: Content Script 読み込み完了");
 class VVRadioReader {
     constructor() {
         console.log("Web Reader for VOICEVOX: クラス初期化開始");
-        this.VOICEVOX_BASE_URL = "http://127.0.0.1:50021";
-        
-        this.audioQueue = [];   // 再生待ち音声データのキュー
-        this.isPlaying = false; // 現在再生中かどうかのフラグ
-        this.currentAudio = null; // 現在再生中のAudioオブジェクト
-        this.indicator = null;    // 画面上のUIアイコン
-
-        // オーディオドライバのスリープ復帰用無音WAVデータ（ヘッダーのみ）
-        this.SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABmYWN0BAAAAAAAAABkYXRhAAAAAA==";
-
+        this.isPlaying = false;
+        this.indicator = null;
         this.init();
     }
 
@@ -61,7 +53,7 @@ class VVRadioReader {
 
         this.indicator = document.createElement("div");
         this.indicator.id = "vvradio-indicator";
-        
+
         // オプション画面を開くリスナー（右クリック）
         this.indicator.addEventListener("contextmenu", (e) => {
             e.preventDefault();
@@ -87,24 +79,40 @@ class VVRadioReader {
 
     // バックグラウンド等からのメッセージのリスナーを設定
     setupMessageListener() {
-        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-            if (request.type === "READ_SELECTED_TEXT" && request.text) {
-                this.speakText(request.text);
-            } else if (request.type === "TOGGLE_READING") {
-                if (this.isPlaying || this.audioQueue.length > 0) {
-                    this.stopAll();
-                } else {
-                    const text = window.getSelection().toString().trim();
-                    if (text) {
-                        this.speakText(text);
+        chrome.runtime.onMessage.addListener((request) => {
+            switch (request.type) {
+                case "READ_SELECTED_TEXT":
+                    if (request.text) this.speakText(request.text);
+                    break;
+                case "TOGGLE_READING":
+                    if (this.isPlaying) {
+                        this.stopAll();
+                    } else {
+                        const text = window.getSelection().toString().trim();
+                        if (text) this.speakText(text);
                     }
-                }
+                    break;
+                // バックグラウンドから転送された再生状態通知
+                case "PLAYBACK_STARTED":
+                    this.isPlaying = true;
+                    this.updateUIState('reading');
+                    break;
+                case "PLAYBACK_ENDED":
+                case "PLAYBACK_STOPPED":
+                    this.isPlaying = false;
+                    this.updateUIState('idle');
+                    break;
+                case "PLAYBACK_ERROR":
+                    console.error("Web Reader for VOICEVOX: 再生エラー通知受信:", request.error);
+                    this.isPlaying = false;
+                    this.updateUIState('error');
+                    break;
             }
         });
     }
 
     // バックグラウンド経由でVOICEVOXエンジンの接続確認
-    async checkVoicevoxConnection() {
+    checkVoicevoxConnection() {
         chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
             if (chrome.runtime.lastError || !res || !res.success) {
                 console.error("Web Reader for VOICEVOX: VOICEVOX に接続できません。");
@@ -115,9 +123,8 @@ class VVRadioReader {
         });
     }
 
-    // --- 音声再生リクエスト ---
-
-    async speakText(text) {
+    // 音声再生リクエスト
+    speakText(text) {
         if (!text) return;
 
         const cleanText = this.cleanMessage(text);
@@ -125,21 +132,15 @@ class VVRadioReader {
 
         console.log("Web Reader for VOICEVOX: 読み上げ依頼送信:", cleanText);
 
-        try {
-            chrome.runtime.sendMessage({
-                type: "GENERATE_VOICE",
-                text: cleanText
-            }, (response) => {
-                if (chrome.runtime.lastError || !response || !response.success) {
-                    console.error("Web Reader for VOICEVOX: 依頼失敗:", chrome.runtime.lastError || (response && response.error) || "応答なし");
-                    this.updateUIState('error');
-                    return;
-                }
-            });
-        } catch (error) {
-            console.error("Web Reader for VOICEVOX: 通信重大エラー:", error.message);
-            this.updateUIState('error');
-        }
+        chrome.runtime.sendMessage({
+            type: "GENERATE_VOICE",
+            text: cleanText
+        }, (response) => {
+            if (chrome.runtime.lastError || !response || !response.success) {
+                console.error("Web Reader for VOICEVOX: 依頼失敗:", chrome.runtime.lastError || (response && response.error) || "応答なし");
+                this.updateUIState('error');
+            }
+        });
     }
 
     // 再生の完全停止とキューのクリア要求
@@ -148,30 +149,6 @@ class VVRadioReader {
         chrome.runtime.sendMessage({ type: "STOP_ALL" });
         this.isPlaying = false;
         this.updateUIState('idle');
-    }
-
-    // バックグラウンドからの再生状態通知のリスナー（各タブ共通）
-    setupPlaybackStateListener() {
-        chrome.runtime.onMessage.addListener((message) => {
-            if (message.target !== 'background') return;
-
-            switch (message.type) {
-                case 'PLAYBACK_STARTED':
-                    this.isPlaying = true;
-                    this.updateUIState('reading');
-                    break;
-                case 'PLAYBACK_ENDED':
-                case 'PLAYBACK_STOPPED':
-                    this.isPlaying = false;
-                    this.updateUIState('idle');
-                    break;
-                case 'PLAYBACK_ERROR':
-                    console.error("Web Reader for VOICEVOX: 再生エラー通知受信:", message.error);
-                    this.isPlaying = false;
-                    this.updateUIState('error');
-                    break;
-            }
-        });
     }
 
     // メッセージの整形（不要な情報の削除・置換）
@@ -184,5 +161,4 @@ class VVRadioReader {
     }
 }
 
-const reader = new VVRadioReader();
-reader.setupPlaybackStateListener();
+new VVRadioReader();

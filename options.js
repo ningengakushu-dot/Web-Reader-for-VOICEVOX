@@ -3,70 +3,43 @@ document.addEventListener('DOMContentLoaded', () => {
     const saveBtn = document.getElementById('save-btn');
     const statusMsg = document.getElementById('status-msg');
     const loader = document.getElementById('loader');
-    const speedSlider = document.getElementById('speed-slider');
-    const speedValue = document.getElementById('speed-value');
 
-    const pitchSlider = document.getElementById('pitch-slider');
-    const pitchValue = document.getElementById('pitch-value');
+    // スライダー設定定義: [storageKey, elementId, デフォルト値, 小数点桁数]
+    const sliderConfigs = [
+        { key: 'speedScale',      id: 'speed',      defaultVal: 1.0,  decimals: 1 },
+        { key: 'pitchScale',      id: 'pitch',      defaultVal: 0.0,  decimals: 2 },
+        { key: 'intonationScale', id: 'intonation',  defaultVal: 1.0,  decimals: 1 },
+        { key: 'volumeScale',     id: 'volume',     defaultVal: 1.0,  decimals: 1 },
+        { key: 'pauseLength',    id: 'pause',      defaultVal: 1.0,  decimals: 1 },
+    ];
 
-    const intonationSlider = document.getElementById('intonation-slider');
-    const intonationValue = document.getElementById('intonation-value');
-
-    const volumeSlider = document.getElementById('volume-slider');
-    const volumeValue = document.getElementById('volume-value');
-
-    const pauseSlider = document.getElementById('pause-slider');
-    const pauseValue = document.getElementById('pause-value');
-
-    // スライダー操作時のリアルタイム反映
-    speedSlider.addEventListener('input', (e) => {
-        speedValue.textContent = Number(e.target.value).toFixed(1);
-    });
-    pitchSlider.addEventListener('input', (e) => {
-        pitchValue.textContent = Number(e.target.value).toFixed(2);
-    });
-    intonationSlider.addEventListener('input', (e) => {
-        intonationValue.textContent = Number(e.target.value).toFixed(1);
-    });
-    volumeSlider.addEventListener('input', (e) => {
-        volumeValue.textContent = Number(e.target.value).toFixed(1);
-    });
-    pauseSlider.addEventListener('input', (e) => {
-        pauseValue.textContent = Number(e.target.value).toFixed(1);
+    // 各スライダーのDOM参照を取得し、inputイベントを設定
+    const sliders = sliderConfigs.map(config => {
+        const slider = document.getElementById(`${config.id}-slider`);
+        const valueEl = document.getElementById(`${config.id}-value`);
+        slider.addEventListener('input', () => {
+            valueEl.textContent = Number(slider.value).toFixed(config.decimals);
+        });
+        return { ...config, slider, valueEl };
     });
 
-    // 初期化処理: スピーカー一覧の取得と保存済み設定の反映を行う
     async function init() {
         showLoader(true);
         try {
-            // Background Script経由でVOICEVOXからスピーカー情報を取得
             const speakers = await getSpeakers();
             renderSpeakers(speakers);
 
-            // Chromeストレージから保存済みの設定を取得
-            const result = await chrome.storage.local.get(['speakerId', 'speedScale', 'pitchScale', 'intonationScale', 'volumeScale', 'pauseLength']);
+            const storageKeys = ['speakerId', ...sliders.map(s => s.key)];
+            const result = await chrome.storage.local.get(storageKeys);
+
             if (result.speakerId) {
                 speakerSelect.value = result.speakerId;
             }
-            if (result.speedScale !== undefined) {
-                speedSlider.value = result.speedScale;
-                speedValue.textContent = Number(result.speedScale).toFixed(1);
-            }
-            if (result.pitchScale !== undefined) {
-                pitchSlider.value = result.pitchScale;
-                pitchValue.textContent = Number(result.pitchScale).toFixed(2);
-            }
-            if (result.intonationScale !== undefined) {
-                intonationSlider.value = result.intonationScale;
-                intonationValue.textContent = Number(result.intonationScale).toFixed(1);
-            }
-            if (result.volumeScale !== undefined) {
-                volumeSlider.value = result.volumeScale;
-                volumeValue.textContent = Number(result.volumeScale).toFixed(1);
-            }
-            if (result.pauseLength !== undefined) {
-                pauseSlider.value = result.pauseLength;
-                pauseValue.textContent = Number(result.pauseLength).toFixed(1);
+            for (const s of sliders) {
+                if (result[s.key] !== undefined) {
+                    s.slider.value = result[s.key];
+                    s.valueEl.textContent = Number(result[s.key]).toFixed(s.decimals);
+                }
             }
         } catch (error) {
             console.error('Error during init:', error);
@@ -76,7 +49,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Background Scriptへメッセージを送り、スピーカーデータを非同期で取得
     async function getSpeakers() {
         return new Promise((resolve, reject) => {
             chrome.runtime.sendMessage({ type: "GET_SPEAKERS" }, (response) => {
@@ -92,61 +64,47 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 取得したスピーカーデータからセレクトボックスのオプション要素を生成
     function renderSpeakers(speakers) {
         speakerSelect.innerHTML = '';
-        speakers.forEach(speaker => {
-            // 各スピーカーのスタイル（ノーマル、あまあま等）ごとに選択肢を作成
-            speaker.styles.forEach(style => {
+        for (const speaker of speakers) {
+            for (const style of speaker.styles) {
                 const option = document.createElement('option');
                 option.value = style.id;
                 option.textContent = `${speaker.name} (${style.name})`;
                 speakerSelect.appendChild(option);
-            });
-        });
+            }
+        }
     }
 
-    // 保存ボタンクリック時のイベントハンドラ
     saveBtn.addEventListener('click', async () => {
         const speakerId = parseInt(speakerSelect.value);
-        const speedScale = parseFloat(speedSlider.value);
-        const pitchScale = parseFloat(pitchSlider.value);
-        const intonationScale = parseFloat(intonationSlider.value);
-        const volumeScale = parseFloat(volumeSlider.value);
-        const pauseLength = parseFloat(pauseSlider.value);
-        if (isNaN(speakerId) || isNaN(speedScale) || isNaN(pitchScale) || isNaN(intonationScale) || isNaN(volumeScale) || isNaN(pauseLength)) return;
+        if (isNaN(speakerId)) return;
+
+        const settings = { speakerId };
+        for (const s of sliders) {
+            const val = parseFloat(s.slider.value);
+            if (isNaN(val)) return;
+            settings[s.key] = val;
+        }
 
         try {
-            // 設定値をChromeのローカルストレージに永続化
-            await chrome.storage.local.set({ 
-                speakerId: speakerId, 
-                speedScale: speedScale,
-                pitchScale: pitchScale,
-                intonationScale: intonationScale,
-                volumeScale: volumeScale,
-                pauseLength: pauseLength
-            });
+            await chrome.storage.local.set(settings);
             showStatus('設定を保存しました！', 'success');
         } catch (error) {
             showStatus('保存に失敗しました。', 'error');
         }
     });
 
-    // ユーザーへのフィードバックメッセージを表示（3秒後に自動消去）
     function showStatus(msg, type) {
         statusMsg.textContent = msg;
         statusMsg.className = `status-msg ${type}`;
-        setTimeout(() => {
-            statusMsg.textContent = '';
-        }, 3000);
+        setTimeout(() => { statusMsg.textContent = ''; }, 3000);
     }
 
-    // 通信中のローディング表示とボタンの無効化制御
     function showLoader(show) {
         loader.style.display = show ? 'inline-block' : 'none';
         saveBtn.disabled = show;
     }
 
-    // 処理開始
     init();
 });
