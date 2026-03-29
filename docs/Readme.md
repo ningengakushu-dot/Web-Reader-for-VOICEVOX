@@ -2,8 +2,8 @@
 
 > **Webサイトのテキスト読み上げを、あなたの好きな声で。**
 > VOICEVOXエンジンの力を借りて、ブラウザ上のテキストを滑らかに読み上げるChrome拡張機能です。
+<img width="1280" height="800" alt="Web-Reader-for-VOICEVOX_1280" src="https://github.com/user-attachments/assets/3c9b676e-6856-4a6a-8f44-957c85c2306e" />
 
----
 
 ## 主な機能
 
