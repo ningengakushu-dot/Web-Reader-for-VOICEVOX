@@ -36,7 +36,6 @@
 ## プライバシーと安全性
    - 読み上げ対象のテキストデータは、ローカル環境で起動しているVOICEVOXエンジンとの通信に使用されます。
 
-
 ## 技術仕様
 
 - **Manifest V3 準拠**: セキュリティとパフォーマンスに優れた最新仕様。
@@ -46,12 +45,6 @@
 - **Visual Isolation**: Shadow DOM (mode: closed) を使用し、サイト側のCSS干渉を完全に遮断。
 
 ---
-
-## 開発支援
-
-このアプリを気に入っていただけた場合は、開発の支援をいただけると嬉しいです。
-
-[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github)](https://github.com/sponsors/ningengakushu-dot)
 
 ## 利用規約・免責事項
 
@@ -70,3 +63,10 @@
 - ソースコードの利用はMIT Licenseに準じます。
 - 音声の生成には[VOICEVOX](https://voicevox.hiroshiba.jp/)を使用しています。生成された音声の利用（動画への使用など）については、必ずVOICEVOXおよび各ボイスキャラクターの利用規約を遵守してください。
 - **【重要】** 本ツールで生成した音声を公開する場合、必ず「VOICEVOX:（使用キャラクター名）」のようなクレジット表記が必要です。詳細は[利用規約](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/docs/TERMS.md)をご確認ください。
+
+
+## 開発支援
+
+このアプリを気に入っていただけた場合は、開発の支援をいただけると嬉しいです。
+
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github)](https://github.com/sponsors/ningengakushu-dot)
