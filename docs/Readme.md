@@ -47,6 +47,12 @@
 
 ---
 
+## 開発支援
+
+このアプリを気に入っていただけた場合は、開発の支援をいただけると嬉しいです。
+
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github)](https://github.com/sponsors/ningengakushu-dot)
+
 ## 利用規約・免責事項
 
 本アプリを使用する前に、必ず以下のドキュメントをご確認ください。
