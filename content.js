@@ -50,6 +50,27 @@ class VVRadioReader {
         this.indicator = document.createElement("div");
         this.indicator.id = "vvradio-indicator";
 
+        // mousedown時のテキスト選択解除を防ぐ（最重要）
+        this.indicator.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+        });
+
+        // 読み上げ開始/停止のトグルリスナー（左クリック）
+        this.indicator.addEventListener("click", () => {
+            if (this.isPlaying) {
+                this.stopAll();
+            } else {
+                const text = window.getSelection().toString().trim();
+                if (text) {
+                    this.speakText(text);
+                } else {
+                    // テキスト未選択時はユーザーにフィードバック（エラーUIを点灯）
+                    this.updateUIState('error');
+                    console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。");
+                }
+            }
+        });
+
         // オプション画面を開くリスナー（右クリック）
         this.indicator.addEventListener("contextmenu", (e) => {
             e.preventDefault();
