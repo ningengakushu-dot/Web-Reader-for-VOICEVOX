@@ -10,5 +10,6 @@ const SETTING_DEFAULTS = {
     pitchScale: 0.0,
     intonationScale: 1.0,
     volumeScale: 1.0,
-    pauseLengthScale: 1.0
+    pauseLengthScale: 1.0,
+    iconSize: 16
 };

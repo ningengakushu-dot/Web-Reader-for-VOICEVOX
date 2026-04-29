@@ -21,10 +21,21 @@ class VVRadioReader {
         });
 
         chrome.storage.onChanged.addListener((changes, namespace) => {
-            if (namespace === 'local' && changes.iconSize) {
-                const newSize = changes.iconSize.newValue;
+            if (namespace !== 'local') return;
+
+            // サイズのリアルタイム反映
+            if (changes.iconSize) {
+                const newSize = changes.iconSize.newValue || 16;
                 this.indicator.style.width = `${newSize}px`;
                 this.indicator.style.height = `${newSize}px`;
+            }
+
+            // 位置リセットのリアルタイム反映（オプション画面からリセットされた場合）
+            if (changes.vvradio_icon_pos && !changes.vvradio_icon_pos.newValue) {
+                this.indicator.style.left = '';
+                this.indicator.style.top = '';
+                this.indicator.style.bottom = '20px';
+                this.indicator.style.right = '20px';
             }
         });
     }
