@@ -7,8 +7,26 @@ class VVRadioReader {
 
     init() {
         this.injectIndicator();
+        this.applyIconSize();
         this.checkVoicevoxConnection();
         this.setupMessageListener();
+    }
+
+    // アイコンサイズをストレージから取得して適用し、変更をリアルタイム監視
+    applyIconSize() {
+        chrome.storage.local.get(["iconSize"], (res) => {
+            const size = res.iconSize || 16;
+            this.indicator.style.width = `${size}px`;
+            this.indicator.style.height = `${size}px`;
+        });
+
+        chrome.storage.onChanged.addListener((changes, namespace) => {
+            if (namespace === 'local' && changes.iconSize) {
+                const newSize = changes.iconSize.newValue;
+                this.indicator.style.width = `${newSize}px`;
+                this.indicator.style.height = `${newSize}px`;
+            }
+        });
     }
 
     // 画面にインジケーターアイコンを注入
@@ -145,12 +163,13 @@ class VVRadioReader {
         this.shadowRoot.appendChild(this.indicator);
 
         // 保存された位置があれば復元
-        chrome.storage.local.get("vvradio_icon_pos", (res) => {
+        chrome.storage.local.get(["vvradio_icon_pos", "iconSize"], (res) => {
             if (res.vvradio_icon_pos) {
                 const { left, top } = res.vvradio_icon_pos;
+                const size = res.iconSize || 16;
                 // 画面サイズ変更などで画面外に出ないように補正
-                const maxLeft = window.innerWidth - 16;
-                const maxTop = window.innerHeight - 16;
+                const maxLeft = window.innerWidth - size;
+                const maxTop = window.innerHeight - size;
                 const safeLeft = Math.max(0, Math.min(maxLeft, left));
                 const safeTop = Math.max(0, Math.min(maxTop, top));
 
