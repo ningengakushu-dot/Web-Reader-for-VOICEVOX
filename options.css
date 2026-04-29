@@ -121,6 +121,23 @@ select:focus {
     transform: scale(0.98);
 }
 
+.secondary-btn {
+    background-color: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    padding: 10px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.secondary-btn:hover {
+    background-color: #f1f1f1;
+    color: var(--text);
+}
+
 .status-msg {
     text-align: center;
     font-size: 14px;
