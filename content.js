@@ -28,9 +28,10 @@ class VVRadioReader {
                 position: fixed; bottom: 20px; right: 20px; width: 16px; height: 16px;
                 background-color: #3498db; border-radius: 50%; z-index: 999999;
                 opacity: 0.4; transition: opacity 0.3s ease, transform 0.2s ease, box-shadow 0.3s ease;
-                cursor: pointer; display: flex; align-items: center; justify-content: center;
+                cursor: grab; display: flex; align-items: center; justify-content: center;
                 box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             }
+            #vvradio-indicator:active { cursor: grabbing; }
             #vvradio-indicator:hover { opacity: 0.8; transform: scale(1.1); }
             #vvradio-indicator.reading {
                 opacity: 1; background-color: #2eb67d; box-shadow: 0 0 15px rgba(46, 182, 125, 0.8);
@@ -50,13 +51,76 @@ class VVRadioReader {
         this.indicator = document.createElement("div");
         this.indicator.id = "vvradio-indicator";
 
-        // mousedown時のテキスト選択解除を防ぐ（最重要）
+        // --- ドラッグ＆ドロップ実装 ---
+        let isDragging = false;
+        let dragMoved = false;
+        let startX, startY, initialLeft, initialTop;
+
+        const onMouseMove = (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+
+            // 意図しない微細なブレをドラッグと判定しないための閾値（3px）
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
+
+            if (dragMoved) {
+                // 画面外への飛び出しを防ぐガードレール
+                const maxLeft = window.innerWidth - this.indicator.offsetWidth;
+                const maxTop = window.innerHeight - this.indicator.offsetHeight;
+                const newLeft = Math.max(0, Math.min(maxLeft, initialLeft + dx));
+                const newTop = Math.max(0, Math.min(maxTop, initialTop + dy));
+
+                this.indicator.style.left = `${newLeft}px`;
+                this.indicator.style.top = `${newTop}px`;
+            }
+        };
+
+        const onMouseUp = () => {
+            if (!isDragging) return;
+            isDragging = false;
+            document.removeEventListener("mousemove", onMouseMove);
+            document.removeEventListener("mouseup", onMouseUp);
+
+            // 移動した場合、その位置を永続化（次回ロード時に復元するため）
+            if (dragMoved) {
+                const rect = this.indicator.getBoundingClientRect();
+                chrome.storage.local.set({ vvradio_icon_pos: { left: rect.left, top: rect.top } });
+            }
+        };
+
         this.indicator.addEventListener("mousedown", (e) => {
-            e.preventDefault();
+            if (e.button !== 0) return; // 左クリックのみ許可
+            e.preventDefault(); // テキスト選択解除を防止
+
+            isDragging = true;
+            dragMoved = false;
+            startX = e.clientX;
+            startY = e.clientY;
+
+            const rect = this.indicator.getBoundingClientRect();
+            initialLeft = rect.left;
+            initialTop = rect.top;
+
+            // デフォルトの bottom/right を解除し、left/top 制御に切り替える
+            this.indicator.style.bottom = "auto";
+            this.indicator.style.right = "auto";
+            this.indicator.style.left = `${initialLeft}px`;
+            this.indicator.style.top = `${initialTop}px`;
+
+            // ドキュメント全体でマウスイベントを捕捉（高速にドラッグしても見失わないため）
+            document.addEventListener("mousemove", onMouseMove);
+            document.addEventListener("mouseup", onMouseUp);
         });
 
         // 読み上げ開始/停止のトグルリスナー（左クリック）
-        this.indicator.addEventListener("click", () => {
+        this.indicator.addEventListener("click", (e) => {
+            // ドラッグ操作だった場合はクリック判定を破棄（競合回避）
+            if (dragMoved) {
+                e.preventDefault();
+                return;
+            }
+
             if (this.isPlaying) {
                 this.stopAll();
             } else {
@@ -64,7 +128,6 @@ class VVRadioReader {
                 if (text) {
                     this.speakText(text);
                 } else {
-                    // テキスト未選択時はユーザーにフィードバック（エラーUIを点灯）
                     this.updateUIState('error');
                     console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。");
                 }
@@ -78,6 +141,23 @@ class VVRadioReader {
         });
 
         this.shadowRoot.appendChild(this.indicator);
+
+        // 保存された位置があれば復元
+        chrome.storage.local.get("vvradio_icon_pos", (res) => {
+            if (res.vvradio_icon_pos) {
+                const { left, top } = res.vvradio_icon_pos;
+                // 画面サイズ変更などで画面外に出ないように補正
+                const maxLeft = window.innerWidth - 16;
+                const maxTop = window.innerHeight - 16;
+                const safeLeft = Math.max(0, Math.min(maxLeft, left));
+                const safeTop = Math.max(0, Math.min(maxTop, top));
+
+                this.indicator.style.bottom = "auto";
+                this.indicator.style.right = "auto";
+                this.indicator.style.left = `${safeLeft}px`;
+                this.indicator.style.top = `${safeTop}px`;
+            }
+        });
     }
 
     // UIのステータス表示を更新
