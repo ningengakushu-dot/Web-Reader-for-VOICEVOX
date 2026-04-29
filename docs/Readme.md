@@ -1,4 +1,4 @@
-# Web Reader for VOICEVOX
+# Web Reader for VOICEVOX [v1.2.0]
 
 > **Webサイトのテキスト読み上げを、あなたの好きな声で。**
 > VOICEVOXエンジンの力を借りて、ブラウザ上のテキストを滑らかに読み上げるChrome拡張機能です。
