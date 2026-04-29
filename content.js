@@ -84,8 +84,9 @@ class VVRadioReader {
 
             // 移動した場合、その位置を永続化（次回ロード時に復元するため）
             if (dragMoved) {
-                const rect = this.indicator.getBoundingClientRect();
-                chrome.storage.local.set({ vvradio_icon_pos: { left: rect.left, top: rect.top } });
+                chrome.storage.local.set({ 
+                    vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop } 
+                });
             }
         };
 
@@ -98,9 +99,10 @@ class VVRadioReader {
             startX = e.clientX;
             startY = e.clientY;
 
-            const rect = this.indicator.getBoundingClientRect();
-            initialLeft = rect.left;
-            initialTop = rect.top;
+            // getBoundingClientRect() は hover (transform: scale) の影響を受けて座標がずれるため、
+            // transform 適用前の絶対座標である offsetLeft / offsetTop を使用する。
+            initialLeft = this.indicator.offsetLeft;
+            initialTop = this.indicator.offsetTop;
 
             // デフォルトの bottom/right を解除し、left/top 制御に切り替える
             this.indicator.style.bottom = "auto";
