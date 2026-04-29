@@ -60,8 +60,16 @@
                 </div>
             </section>
 
+            <section class="settings-section">
+                <label for="iconSize-slider">アイコンサイズ: <span id="iconSize-value">16</span>px</label>
+                <div class="slider-wrapper">
+                    <input type="range" id="iconSize-slider" min="16" max="64" step="1" value="16">
+                </div>
+            </section>
+
             <div class="actions">
                 <button id="save-btn" class="primary-btn">設定を保存</button>
+                <button id="reset-btn" class="secondary-btn">アイコンの位置・サイズを初期化</button>
                 <span id="status-msg" class="status-msg"></span>
             </div>
         </main>

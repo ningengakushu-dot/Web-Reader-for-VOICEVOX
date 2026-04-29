@@ -9,13 +9,13 @@
 This extension is designed to provide text-to-speech functionality using the locally installed VOICEVOX engine. All data processing is performed within the user's local environment. Specifically:
 1. **No Data Collection**: The extension does not collect, store, or transmit any user data to external servers managed by the developer or any third parties.
 2. **Local Processing Only**: Selected text for reading is sent only to the local VOICEVOX engine (`http://127.0.0.1:50021`) on the user's machine.
-3. **Storage**: User settings (e.g., character ID, speech rate) are stored locally in the browser using `chrome.storage.local`.
+3. **Storage**: User settings (e.g., character ID, speech rate, icon position and size) are stored locally in the browser using `chrome.storage.local`.
 
 ### 日本語
 この拡張機能は、ユーザーのローカル環境にインストールされたVOICEVOXエンジンを使用してテキスト読み上げ機能を提供します。
 1. **データ収集なし**: 開発者や第三者のサーバーにユーザーデータを送信・保存することはありません。
 2. **ローカル完結**: 読み上げ用のテキストは、ユーザーのPC内でのみ動作するVOICEVOXエンジン（デフォルト：127.0.0.1:50021）に送信されます。
-3. **ストレージ**: 設定値はブラウザのローカルストレージ（chrome.storage.local）にのみ保存されます。
+3. **ストレージ**: 音声設定やアイコンの位置・サイズなどの設定値は、ブラウザのローカルストレージ（chrome.storage.local）にのみ保存されます。
 
 ---
 
