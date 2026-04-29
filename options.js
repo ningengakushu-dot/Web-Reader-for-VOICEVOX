@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     const speakerSelect = document.getElementById('speaker-select');
     const saveBtn = document.getElementById('save-btn');
+    const resetBtn = document.getElementById('reset-btn');
     const statusMsg = document.getElementById('status-msg');
     const loader = document.getElementById('loader');
 
@@ -11,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
         { key: 'intonationScale', id: 'intonation',  defaultVal: 1.0,  decimals: 1 },
         { key: 'volumeScale',     id: 'volume',     defaultVal: 1.0,  decimals: 1 },
         { key: 'pauseLengthScale', id: 'pause',     defaultVal: 1.0,  decimals: 1 },
+        { key: 'iconSize',        id: 'iconSize',   defaultVal: 16,   decimals: 0 },
     ];
 
     // 各スライダーのDOM参照を取得し、inputイベントを設定
@@ -92,6 +94,25 @@ document.addEventListener('DOMContentLoaded', () => {
             showStatus('設定を保存しました！', 'success');
         } catch (error) {
             showStatus('保存に失敗しました。', 'error');
+        }
+    });
+
+    resetBtn.addEventListener('click', async () => {
+        try {
+            // 位置のクリアとアイコンサイズの初期化を同時に行う
+            await chrome.storage.local.remove('vvradio_icon_pos');
+            await chrome.storage.local.set({ iconSize: 16 });
+
+            // スライダーUIの表示を16pxに同期
+            const iconSlider = sliders.find(s => s.key === 'iconSize');
+            if (iconSlider) {
+                iconSlider.slider.value = 16;
+                iconSlider.valueEl.textContent = '16';
+            }
+
+            showStatus('アイコンを初期化しました', 'success');
+        } catch (error) {
+            showStatus('初期化に失敗しました。', 'error');
         }
     });
 

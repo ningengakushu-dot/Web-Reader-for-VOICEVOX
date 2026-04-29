@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Web Reader for VOICEVOX",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "閲覧中のWEBページの選択しているテキストのみを読み上げてくれるアプリです。(This extension is designed to read Japanese text aloud.)",
   "icons": {
     "16": "images/icon16.png",
