@@ -114,6 +114,19 @@ chrome.commands.onCommand.addListener((command) => {
     }
 });
 
+// 再生状態通知（PLAYBACK_*）の宛先タブ。GENERATE_VOICE を要求したタブの id を記録し、
+// offscreen から届く再生状態を「全アクティブタブ」ではなく要求元タブにのみ転送する。
+// これにより、別ウィンドウ/別タブのアイコンUIが他タブの再生状態で誤更新される問題を防ぐ。
+let playbackTabId = null;
+
+// タブが閉じられたら、保持している状態（再生宛先・ショートカット重複抑制）を掃除する。
+chrome.tabs.onRemoved.addListener((tabId) => {
+    lastShortcut.delete(tabId);
+    if (playbackTabId === tabId) {
+        playbackTabId = null;
+    }
+});
+
 // --- Offscreen Document 管理 ---
 let offscreenCreating = null;
 
@@ -187,9 +200,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 .catch(err => sendResponse({ success: false, error: err.message }));
             return true;
 
-        case "GENERATE_VOICE":
+        case "GENERATE_VOICE": {
+            // 要求元タブを再生状態通知の宛先として記録する。
+            // ショートカット/コンテキストメニュー経由でも content.js から送信されるため
+            // sender.tab.id で正しい要求元タブが取得できる。
+            const requestTabId = sender.tab?.id ?? null;
+            // 別タブからの新しい再生要求なら、前の再生タブへ明示的に停止を通知してから
+            // 宛先を切り替える。前タブのアイコンUIが「再生中」のまま取り残されるのを防ぐ。
+            if (requestTabId != null && playbackTabId != null && playbackTabId !== requestTabId) {
+                chrome.tabs.sendMessage(playbackTabId, { type: "PLAYBACK_STOPPED" })
+                    .catch(warn("旧再生タブへの停止通知失敗"));
+            }
+            if (requestTabId != null) {
+                playbackTabId = requestTabId;
+            }
             handleGenerateVoice(request.text, sendResponse);
             return true;
+        }
 
         case "STOP_ALL":
             setupOffscreen()
@@ -202,12 +229,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case "PLAYBACK_ENDED":
         case "PLAYBACK_ERROR":
         case "PLAYBACK_STOPPED":
-            chrome.tabs.query({active: true}, (tabs) => {
-                tabs.forEach(tab => {
-                    chrome.tabs.sendMessage(tab.id, request)
-                        .catch(warn("再生状態の転送失敗"));
-                });
-            });
+            // 再生を要求したタブにのみ転送する。全アクティブタブへ配信すると、
+            // 別ウィンドウのアクティブタブのUIまで誤って更新されてしまう。
+            if (playbackTabId != null) {
+                chrome.tabs.sendMessage(playbackTabId, request)
+                    .catch(warn("再生状態の転送失敗"));
+            }
             return false;
     }
 
