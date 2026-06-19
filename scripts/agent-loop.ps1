@@ -172,7 +172,7 @@ If REVISE, list concrete issues and exact files/lines when possible.
 
     Invoke-LoggedCommand `
         -FilePath "codex" `
-        -Arguments @("exec", "--disable", "hooks", "--sandbox", "read-only", "--ask-for-approval", "never", "-C", $repoRoot, "-o", $reviewOutputPath, $reviewPrompt) `
+        -Arguments @("--ask-for-approval", "never", "exec", "--disable", "hooks", "--sandbox", "read-only", "-C", $repoRoot, "-o", $reviewOutputPath, $reviewPrompt) `
         -LogPath (Join-Path $iterationDir "codex-exec-events.txt") `
         -AllowFailure | Out-Null
 
