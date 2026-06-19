@@ -1,15 +1,62 @@
+// 再実行（manifest の自動注入と background.js のフォールバック注入の競合等）による
+// 二重生成を防ぐガード。class 宣言自体が再評価で失敗し得るため、ガードを含めた
+// 実装全体を IIFE で包む。
+(() => {
+    // 既存インスタンスが生存していれば再生成しない。拡張機能リロード後は旧フラグが
+    // 残っていてもリスナーは死んでいるため、単純なフラグではなく「生きているか」を
+    // 問い合わせる instance ガードにする。生存確認に失敗・例外する場合は古い
+    // インスタンスを可能な範囲で停止してから新しいリーダーを生成する。
+    const existing = window.__vvRadioReaderInstance;
+    if (existing) {
+        try {
+            if (existing.isAlive()) return;
+        } catch (e) {
+            // 生存確認自体が例外（拡張コンテキスト無効化など）→ stale とみなし再生成
+        }
+        try {
+            existing.deactivate();
+        } catch (e) {
+            // 停止処理の失敗は無視して再生成を続行
+        }
+    }
+
 class VVRadioReader {
     constructor() {
+        this.active = true;
         this.isPlaying = false;
         this.indicator = null;
+        // クロスオリジンの frame プロパティにアクセスせず、window.self/window.top の
+        // 比較のみで安全にトップフレーム判定を行う
+        this.isTopFrame = window.self === window.top;
         this.init();
     }
 
     init() {
-        this.injectIndicator();
-        this.applyIconSize();
-        this.checkVoicevoxConnection();
+        // インジケーター注入・アイコンサイズ適用・接続確認・オプションUIはトップフレームのみ。
+        // サブフレームはメッセージリスナーのみ登録し、TOGGLE_READING で選択テキストを読む。
+        if (this.isTopFrame) {
+            this.injectIndicator();
+            this.applyIconSize();
+            this.checkVoicevoxConnection();
+        }
         this.setupMessageListener();
+    }
+
+    // このインスタンスがまだ機能しているか（＝再注入をスキップしてよいか）を返す。
+    // deactivate 済み、または拡張コンテキスト無効化で chrome.runtime.id が
+    // 失われている場合は false（呼び出し側で例外になる場合もある）。
+    isAlive() {
+        if (!this.active) return false;
+        if (!chrome.runtime || !chrome.runtime.id) return false;
+        return true;
+    }
+
+    // このインスタンスを停止し、注入済みの UI を除去する。
+    // 以降のメッセージは active=false により無視される。
+    deactivate() {
+        this.active = false;
+        const host = document.getElementById("vvradio-host");
+        if (host) host.remove();
     }
 
     // アイコンサイズをストレージから取得して適用し、変更をリアルタイム監視
@@ -42,7 +89,9 @@ class VVRadioReader {
 
     // 画面にインジケーターアイコンを注入
     injectIndicator() {
-        if (document.getElementById("vvradio-host")) return;
+        // 再注入時に古いホストが残っていると UI が二重化するため、生成前に除去する。
+        const stale = document.getElementById("vvradio-host");
+        if (stale) stale.remove();
 
         const host = document.createElement("div");
         host.id = "vvradio-host";
@@ -155,7 +204,7 @@ class VVRadioReader {
             if (this.isPlaying) {
                 this.stopAll();
             } else {
-                const text = window.getSelection().toString().trim();
+                const text = this.getSelectedText();
                 if (text) {
                     this.speakText(text);
                 } else {
@@ -192,6 +241,24 @@ class VVRadioReader {
         });
     }
 
+    // 選択中のテキストを取得する
+    // input/textarea 内の選択（window.getSelection() では取得できない）にも対応する
+    getSelectedText() {
+        const active = document.activeElement;
+        if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+            try {
+                const { selectionStart, selectionEnd, value } = active;
+                // type=number/email など selection 非対応の input では selectionStart が null になる
+                if (selectionStart != null && selectionEnd != null && selectionEnd > selectionStart) {
+                    return value.substring(selectionStart, selectionEnd).trim();
+                }
+            } catch (e) {
+                // selection 非対応の input でのアクセス例外は無視し、通常の選択取得にフォールバック
+            }
+        }
+        return window.getSelection().toString().trim();
+    }
+
     // UIのステータス表示を更新
     updateUIState(state) {
         if (!this.indicator) return;
@@ -204,19 +271,42 @@ class VVRadioReader {
         }
     }
 
+    // TOGGLE_READING を自フレームで処理すべきか判定する。
+    // ショートカットは全フレームに配信されるため、フォーカスを持たないフレームや、
+    // フォーカスが子フレーム（IFRAME/FRAME）にあるフレームでは処理せず、
+    // 実際にフォーカスを持つフレームだけが読み上げを担当することで二重読み上げを防ぐ。
+    shouldHandleToggleReading() {
+        if (!document.hasFocus()) return false;
+        const active = document.activeElement;
+        if (active && (active.tagName === "IFRAME" || active.tagName === "FRAME")) {
+            return false;
+        }
+        return true;
+    }
+
     // バックグラウンド等からのメッセージのリスナーを設定
     setupMessageListener() {
         chrome.runtime.onMessage.addListener((request) => {
+            // 停止済み（stale）インスタンスのリスナーは何もしない
+            if (!this.active) return;
             switch (request.type) {
                 case "READ_SELECTED_TEXT":
                     if (request.text) this.speakText(request.text);
                     break;
                 case "TOGGLE_READING":
+                    // フォーカスを持つフレームのみが処理（全フレーム配信による二重読み上げ防止）
+                    if (!this.shouldHandleToggleReading()) break;
                     if (this.isPlaying) {
                         this.stopAll();
                     } else {
-                        const text = window.getSelection().toString().trim();
-                        if (text) this.speakText(text);
+                        const text = this.getSelectedText();
+                        if (text) {
+                            this.speakText(text);
+                        } else {
+                            // ショートカット起動時に無音で失敗させず、エラー状態とログで可視化する
+                            this.updateUIState('error');
+                            console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。(ショートカット)");
+                        }
                     }
                     break;
                 case "PLAYBACK_STARTED":
@@ -283,4 +373,5 @@ class VVRadioReader {
     }
 }
 
-new VVRadioReader();
+    window.__vvRadioReaderInstance = new VVRadioReader();
+})();

@@ -11,22 +11,78 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // コンテキストメニューがクリックされた時の処理
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-    if (info.menuItemId === "read-selected-text" && info.selectionText) {
-        chrome.tabs.sendMessage(tab.id, {
-            type: "READ_SELECTED_TEXT",
-            text: info.selectionText
-        }).catch(warn("コンテキストメニューからのメッセージ送信失敗"));
+    if (info.menuItemId === "read-selected-text" && info.selectionText && tab?.id) {
+        const options = { frameId: Number.isInteger(info.frameId) ? info.frameId : 0 };
+        sendMessageWithInjection(
+            tab.id,
+            { type: "READ_SELECTED_TEXT", text: info.selectionText },
+            "コンテキストメニューからのメッセージ送信失敗",
+            options
+        );
     }
 });
+
+// content.js が未注入のタブ（拡張のインストール/リロード前から開かれていたタブ等）では
+// tabs.sendMessage が "Receiving end does not exist" で失敗する。
+// その場合は content.js を動的に注入してから元のメッセージを再送し、無言の失敗を防ぐ。
+async function sendMessageWithInjection(tabId, message, context, options = {}) {
+    const messageOptions = Number.isInteger(options.frameId) ? { frameId: options.frameId } : null;
+    const injectionTarget = messageOptions
+        ? { tabId, frameIds: [messageOptions.frameId] }
+        : { tabId, allFrames: true };
+
+    try {
+        if (messageOptions) {
+            await chrome.tabs.sendMessage(tabId, message, messageOptions);
+        } else {
+            await chrome.tabs.sendMessage(tabId, message);
+        }
+    } catch (err) {
+        if (!/Receiving end does not exist/.test(err.message)) {
+            console.warn(`Background: ${context}:`, err.message);
+            return;
+        }
+        try {
+            await chrome.scripting.executeScript({
+                target: injectionTarget,
+                files: ["content.js"]
+            });
+            if (messageOptions) {
+                await chrome.tabs.sendMessage(tabId, message, messageOptions);
+            } else {
+                await chrome.tabs.sendMessage(tabId, message);
+            }
+        } catch (injectErr) {
+            console.warn(`Background: ${context}（content.js 再注入後も失敗）:`, injectErr.message);
+        }
+    }
+}
 
 // ショートカットキーが押された時の処理
 chrome.commands.onCommand.addListener((command) => {
     if (command === "toggle-reading") {
-        chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-            if (tabs.length > 0) {
-                chrome.tabs.sendMessage(tabs[0].id, { type: "TOGGLE_READING" })
-                    .catch(warn("ショートカットキーのメッセージ送信失敗"));
+        chrome.tabs.query({active: true, currentWindow: true}, async (tabs) => {
+            if (tabs.length === 0) return;
+            const tabId = tabs[0].id;
+
+            // TOGGLE_READING は全フレームへ配信され、フォーカスを持つフレームのみが処理する。
+            // 未注入のフレーム（フォーカス中の子フレーム等）が取りこぼされないよう、
+            // 送信前に全フレームへ content.js を事前注入する。
+            // content.js は IIFE ガードを持つため再注入は安全（多重生成しない）。
+            try {
+                await chrome.scripting.executeScript({
+                    target: { tabId, allFrames: true },
+                    files: ["content.js"]
+                });
+            } catch (err) {
+                console.warn("Background: ショートカット用 content.js 事前注入失敗:", err.message);
             }
+
+            sendMessageWithInjection(
+                tabId,
+                { type: "TOGGLE_READING" },
+                "ショートカットキーのメッセージ送信失敗"
+            );
         });
     }
 });
@@ -63,9 +119,9 @@ async function setupOffscreen() {
 }
 
 // Offscreen にメッセージを送信するヘルパー
+// 配信の成否を呼び出し元で扱えるよう Promise をそのまま返す
 function sendToOffscreen(message) {
-    chrome.runtime.sendMessage({ ...message, target: 'offscreen' })
-        .catch(warn("Offscreenへのメッセージ送信失敗"));
+    return chrome.runtime.sendMessage({ ...message, target: 'offscreen' });
 }
 
 // 警告ログを出力するヘルパー（.catch() 用）
@@ -101,7 +157,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             return true;
 
         case "STOP_ALL":
-            setupOffscreen().then(() => sendToOffscreen({ type: 'STOP_AUDIO' }));
+            setupOffscreen()
+                .then(() => sendToOffscreen({ type: 'STOP_AUDIO' }))
+                .catch(warn("再生停止メッセージ送信失敗"));
             sendResponse({ success: true });
             return false;
 
@@ -128,10 +186,11 @@ async function handleGenerateVoice(text, sendResponse) {
 
     try {
         await setupOffscreen();
-        sendToOffscreen({ type: 'STOP_AUDIO' });
+        // Offscreen への配信完了を確認してから成功応答を返す（無音失敗の可視化）
+        await sendToOffscreen({ type: 'STOP_AUDIO' });
 
         for (const chunk of chunks) {
-            sendToOffscreen({
+            await sendToOffscreen({
                 type: 'ENQUEUE_TEXT',
                 text: chunk,
                 settings
