@@ -29,7 +29,20 @@ This extension is designed to provide text-to-speech functionality using the loc
 
 ---
 
-## 3. プライバシーポリシーの連絡先
+## 3. バージョン別 ストア更新テキスト (Version Update Text)
+ダッシュボードの「公開用メモ」やストア掲載の更新内容として使用できます。
+
+### v1.2.1
+
+#### 日本語
+ショートカットキーからの読み上げ起動の安定性を改善しました。あわせて、再生状態の通知を読み上げを要求したタブにのみ送るよう修正し、別タブ・別ウィンドウのアイコン表示が誤って切り替わる不具合を解消しました。ショートカットが効かない場合は `chrome://extensions/shortcuts` で割り当てをご確認ください。
+
+#### English (Recommended)
+Improved the stability of starting read-aloud via the keyboard shortcut. Playback status notifications are now sent only to the tab that requested playback, fixing an issue where the icon state could incorrectly change in other tabs or windows. If the shortcut does not work, please check the assignment at `chrome://extensions/shortcuts`.
+
+---
+
+## 4. プライバシーポリシーの連絡先
 `PRIVACY.md` に記載されているURLと同じものを設定してください。
 `https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/docs/PRIVACY.md`
 （※公開時はGitHubリポジトリの直リンクが便利です）
