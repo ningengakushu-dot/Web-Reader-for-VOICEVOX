@@ -40,6 +40,7 @@ class VVRadioReader {
             this.checkVoicevoxConnection();
         }
         this.setupMessageListener();
+        this.setupKeyboardShortcutFallback();
     }
 
     // このインスタンスがまだ機能しているか（＝再注入をスキップしてよいか）を返す。
@@ -201,17 +202,7 @@ class VVRadioReader {
                 return;
             }
 
-            if (this.isPlaying) {
-                this.stopAll();
-            } else {
-                const text = this.getSelectedText();
-                if (text) {
-                    this.speakText(text);
-                } else {
-                    this.updateUIState('error');
-                    console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。");
-                }
-            }
+            this.toggleReading();
         });
 
         // オプション画面を開くリスナー（右クリック）
@@ -271,6 +262,50 @@ class VVRadioReader {
         }
     }
 
+    setupKeyboardShortcutFallback() {
+        document.addEventListener("keydown", (event) => {
+            if (!this.active || event.repeat || !event.isTrusted) return;
+            if (!this.isShortcutEvent(event)) return;
+            if (!this.shouldHandleToggleReading()) return;
+
+            // Chrome commands が未割当/競合していて background に届かない場合の保険。
+            // content 側では実行せず background に集約し、commands 経路との二重処理を防ぐ。
+            event.preventDefault();
+            event.stopPropagation();
+
+            chrome.runtime.sendMessage({ type: "SHORTCUT_PRESSED" }, () => {
+                if (chrome.runtime.lastError) {
+                    console.warn("Web Reader for VOICEVOX: ショートカット通知に失敗:",
+                        chrome.runtime.lastError.message);
+                }
+            });
+        }, true);
+    }
+
+    isShortcutEvent(event) {
+        const key = (event.key || "").toLowerCase();
+        return event.altKey
+            && event.shiftKey
+            && !event.ctrlKey
+            && !event.metaKey
+            && (event.code === "KeyU" || key === "u");
+    }
+
+    toggleReading() {
+        if (this.isPlaying) {
+            this.stopAll();
+            return;
+        }
+
+        const text = this.getSelectedText();
+        if (text) {
+            this.speakText(text);
+        } else {
+            this.updateUIState('error');
+            console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。(ショートカット)");
+        }
+    }
+
     // TOGGLE_READING を自フレームで処理すべきか判定する。
     // ショートカットは全フレームに配信されるため、フォーカスを持たないフレームや、
     // フォーカスが子フレーム（IFRAME/FRAME）にあるフレームでは処理せず、
@@ -296,18 +331,7 @@ class VVRadioReader {
                 case "TOGGLE_READING":
                     // フォーカスを持つフレームのみが処理（全フレーム配信による二重読み上げ防止）
                     if (!this.shouldHandleToggleReading()) break;
-                    if (this.isPlaying) {
-                        this.stopAll();
-                    } else {
-                        const text = this.getSelectedText();
-                        if (text) {
-                            this.speakText(text);
-                        } else {
-                            // ショートカット起動時に無音で失敗させず、エラー状態とログで可視化する
-                            this.updateUIState('error');
-                            console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。(ショートカット)");
-                        }
-                    }
+                    this.toggleReading();
                     break;
                 case "PLAYBACK_STARTED":
                     this.isPlaying = true;
