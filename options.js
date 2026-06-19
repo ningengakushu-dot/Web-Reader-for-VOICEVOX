@@ -34,7 +34,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const storageKeys = ['speakerId', ...sliders.map(s => s.key)];
             const result = await chrome.storage.local.get(storageKeys);
 
-            if (result.speakerId) {
+            // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
+            // undefined/null を除外する判定にする。
+            if (result.speakerId !== undefined && result.speakerId !== null) {
                 speakerSelect.value = result.speakerId;
             }
             for (const s of sliders) {
