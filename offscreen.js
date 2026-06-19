@@ -5,9 +5,12 @@ let audioQueue = [];
 let isSynthesizing = false;
 let isPlaying = false;
 let currentAudio = null;
+let currentAudioUrl = null;
 // 合成の世代トークン。stopAll() で繰り上げることで、停止前に開始済みの
 // 合成（in-flight）が完了しても、その結果を破棄して状態に反映させない。
 let synthesisGeneration = 0;
+// 再生の世代トークン。stopAll() 直後に古い audio.play() の reject が届いても無視する。
+let playbackGeneration = 0;
 
 // メッセージリスナー
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -109,10 +112,12 @@ async function processPlayback() {
 
     isPlaying = true;
     notifyBackground("PLAYBACK_STARTED");
+    const generation = playbackGeneration;
 
     const current = audioQueue.shift();
     const audio = new Audio(current.url);
     currentAudio = audio;
+    currentAudioUrl = current.url;
 
     let isCleanedUp = false;
 
@@ -123,6 +128,7 @@ async function processPlayback() {
         audio.onended = null;
         audio.onerror = null;
         URL.revokeObjectURL(current.url);
+        if (currentAudioUrl === current.url) currentAudioUrl = null;
         audio.removeAttribute('src');
         audio.load();
 
@@ -149,6 +155,7 @@ async function processPlayback() {
     try {
         await audio.play();
     } catch (err) {
+        if (generation !== playbackGeneration) return;
         console.error("Offscreen: play()失敗:", err.name, err.message);
         notifyBackground("PLAYBACK_ERROR", { error: `${err.name}: ${err.message}` });
         cleanup();
@@ -158,6 +165,8 @@ async function processPlayback() {
 function stopAll() {
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
+    // in-flight の再生開始処理を無効化（停止後の AbortError 等を通知しない）
+    playbackGeneration++;
 
     if (currentAudio) {
         currentAudio.onended = null;
@@ -166,6 +175,10 @@ function stopAll() {
         currentAudio.removeAttribute('src');
         currentAudio.load();
         currentAudio = null;
+    }
+    if (currentAudioUrl) {
+        URL.revokeObjectURL(currentAudioUrl);
+        currentAudioUrl = null;
     }
 
     textQueue = [];
