@@ -1,3 +1,9 @@
-.codex/agent-loop/
-.codex/run-agent-loop.flag
-.codex/agent-loop-request.json
+.codex/
+AGENTS.md
+CLAUDE.md
+docs/agent-workflow.md
+docs/agent-tasks/
+scripts/agent-loop.ps1
+scripts/codex-stop-hook.ps1
+scripts/start-agent-loop.ps1
+audio/
