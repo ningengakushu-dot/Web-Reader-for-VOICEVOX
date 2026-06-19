@@ -5,17 +5,22 @@ let audioQueue = [];
 let isSynthesizing = false;
 let isPlaying = false;
 let currentAudio = null;
+// 合成の世代トークン。stopAll() で繰り上げることで、停止前に開始済みの
+// 合成（in-flight）が完了しても、その結果を破棄して状態に反映させない。
+let synthesisGeneration = 0;
 
 // メッセージリスナー
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.target !== 'offscreen') return;
 
     switch (message.type) {
         case 'ENQUEUE_TEXT':
             enqueueText(message.text, message.settings);
+            sendResponse({ success: true });
             break;
         case 'STOP_AUDIO':
             stopAll();
+            sendResponse({ success: true });
             break;
     }
     return false;
@@ -37,17 +42,30 @@ async function processSynthesis() {
 
     isSynthesizing = true;
     const item = textQueue.shift();
+    // この合成が属する世代を記録。完了時に世代が進んでいれば stale とみなす。
+    const generation = synthesisGeneration;
 
     try {
         const blobUrl = await generateVoiceBlob(item.text, item.settings);
+        // 合成中に stopAll() が走った場合、生成済み Blob を破棄して状態を触らない
+        if (generation !== synthesisGeneration) {
+            URL.revokeObjectURL(blobUrl);
+            return;
+        }
         audioQueue.push({ url: blobUrl, text: item.text });
         processPlayback();
     } catch (err) {
+        // stale な世代のエラーは通知も状態変更もしない
+        if (generation !== synthesisGeneration) return;
         console.error("Offscreen: 合成失敗:", err);
         notifyBackground("PLAYBACK_ERROR", { error: `合成失敗: ${err.message}` });
     } finally {
-        isSynthesizing = false;
-        processSynthesis();
+        // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
+        // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。
+        if (generation === synthesisGeneration) {
+            isSynthesizing = false;
+            processSynthesis();
+        }
     }
 }
 
@@ -138,6 +156,9 @@ async function processPlayback() {
 }
 
 function stopAll() {
+    // in-flight の合成を無効化（完了しても破棄させる）
+    synthesisGeneration++;
+
     if (currentAudio) {
         currentAudio.onended = null;
         currentAudio.onerror = null;
