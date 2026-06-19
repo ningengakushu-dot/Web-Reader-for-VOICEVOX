@@ -58,31 +58,58 @@ async function sendMessageWithInjection(tabId, message, context, options = {}) {
     }
 }
 
+// ショートカット要求のタブ別二重発火抑制。chrome.commands 経路と content.js の
+// trusted keydown フォールバック（SHORTCUT_PRESSED）が同一キー押下で同時に発火しても、
+// 同一タブで二重トグルしないよう直近に受理した要求の時刻と発生源を記録する。
+// 全体デバウンスではなく「異なる発生源からの近接重複のみ」を抑制するため、
+// ユーザーが素早く2回押して読み上げを止める操作はそのまま通る。
+const SHORTCUT_DUPLICATE_MS = 400;
+const lastShortcut = new Map();
+
+// ショートカット要求の共通処理。commands.onCommand と content.js の
+// SHORTCUT_PRESSED フォールバックの両方からこの関数を呼び出す。
+async function handleShortcutRequest(tabId, source) {
+    if (tabId == null) return;
+
+    // 直近に受理した要求が「異なる発生源」かつ重複ウィンドウ内なら、
+    // 同一キー押下が両経路で二重発火したものとみなして抑制する。
+    // 同一発生源からの連続要求は素早いトグルとして許可する。
+    const now = Date.now();
+    const last = lastShortcut.get(tabId);
+    if (last != null && last.source !== source && now - last.at < SHORTCUT_DUPLICATE_MS) {
+        return;
+    }
+
+    // 非同期注入の前に受理タイムスタンプと発生源を更新し、
+    // commands と content の同時発火による二重トリガを防ぐ。
+    lastShortcut.set(tabId, { at: now, source });
+
+    // TOGGLE_READING は全フレームへ配信され、フォーカスを持つフレームのみが処理する。
+    // 未注入のフレーム（フォーカス中の子フレーム等）が取りこぼされないよう、
+    // 送信前に全フレームへ content.js を事前注入する。
+    // content.js は IIFE ガードを持つため再注入は安全（多重生成しない）。
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            files: ["content.js"]
+        });
+    } catch (err) {
+        console.warn(`Background: ショートカット用 content.js 事前注入失敗 (${source}):`, err.message);
+    }
+
+    await sendMessageWithInjection(
+        tabId,
+        { type: "TOGGLE_READING" },
+        "ショートカットキーのメッセージ送信失敗"
+    );
+}
+
 // ショートカットキーが押された時の処理
 chrome.commands.onCommand.addListener((command) => {
     if (command === "toggle-reading") {
-        chrome.tabs.query({active: true, currentWindow: true}, async (tabs) => {
+        chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
             if (tabs.length === 0) return;
-            const tabId = tabs[0].id;
-
-            // TOGGLE_READING は全フレームへ配信され、フォーカスを持つフレームのみが処理する。
-            // 未注入のフレーム（フォーカス中の子フレーム等）が取りこぼされないよう、
-            // 送信前に全フレームへ content.js を事前注入する。
-            // content.js は IIFE ガードを持つため再注入は安全（多重生成しない）。
-            try {
-                await chrome.scripting.executeScript({
-                    target: { tabId, allFrames: true },
-                    files: ["content.js"]
-                });
-            } catch (err) {
-                console.warn("Background: ショートカット用 content.js 事前注入失敗:", err.message);
-            }
-
-            sendMessageWithInjection(
-                tabId,
-                { type: "TOGGLE_READING" },
-                "ショートカットキーのメッセージ送信失敗"
-            );
+            handleShortcutRequest(tabs[0].id, "commands.onCommand");
         });
     }
 });
@@ -130,10 +157,18 @@ function warn(context) {
 }
 
 // Content Scriptからのメッセージを処理するリスナー
-chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.target && request.target !== 'background') return;
 
     switch (request.type) {
+        case "SHORTCUT_PRESSED":
+            // content.js の trusted keydown フォールバックからの要求。
+            // commands.onCommand と同じ共通処理に集約する。
+            handleShortcutRequest(sender.tab?.id, "content.SHORTCUT_PRESSED")
+                .then(() => sendResponse({ success: true }))
+                .catch(err => sendResponse({ success: false, error: err.message }));
+            return true;
+
         case "OPEN_OPTIONS":
             chrome.runtime.openOptionsPage();
             sendResponse({ success: true });
