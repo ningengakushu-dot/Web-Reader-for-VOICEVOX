@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Web Reader for VOICEVOX",
-  "version": "1.2.1",
-  "description": "閲覧中のWEBページの選択しているテキストのみを読み上げてくれるアプリです。(This extension is designed to read Japanese text aloud.)",
+  "version": "1.3.0",
+  "description": "閲覧中のWEBページの選択テキストや、画像・PDF上の文字（OCR）を読み上げてくれるアプリです。(This extension is designed to read Japanese text aloud.)",
   "icons": {
     "16": "images/icon16.png",
     "32": "images/icon32.png",
@@ -23,10 +23,24 @@
         "mac": "Alt+Shift+U"
       },
       "description": "選択したテキストの読み上げを開始/停止します"
+    },
+    "capture-ocr-reading": {
+      "suggested_key": {
+        "default": "Alt+Shift+O",
+        "mac": "Alt+Shift+O"
+      },
+      "description": "画面をキャプチャして文字認識（OCR）読み上げを開始します"
     }
   },
+  "action": {
+    "default_title": "画面をキャプチャしてOCR読み上げ（画像・PDF向け）"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "host_permissions": [
-    "http://127.0.0.1:50021/*"
+    "http://127.0.0.1:50021/*",
+    "<all_urls>"
   ],
   "content_scripts": [
     {

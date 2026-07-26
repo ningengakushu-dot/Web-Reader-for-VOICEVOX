@@ -1,0 +1,256 @@
+:root {
+    --primary: #4a154b;
+    --primary-hover: #611f69;
+    --bg: #f8f9fa;
+    --card-bg: #ffffff;
+    --text: #1d1c1d;
+    --text-muted: #616061;
+    --accent: #2eb67d;
+    --error: #e01e5a;
+    --border: #dddddd;
+    --radius: 8px;
+    --shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+body {
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 20px;
+}
+
+.page {
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+header {
+    margin-bottom: 16px;
+}
+
+h1 {
+    font-size: 22px;
+    margin: 0;
+    color: var(--primary);
+}
+
+.subtitle {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin: 6px 0 0;
+}
+
+.source-info {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 4px 0 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.banner {
+    background: #fff4f6;
+    border: 1px solid var(--error);
+    color: var(--error);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 14px;
+}
+
+.layout {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+}
+
+.capture-pane {
+    flex: 1 1 auto;
+    min-width: 0;
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px;
+}
+
+.capture-container {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    line-height: 0;
+    cursor: crosshair;
+    user-select: none;
+}
+
+#capture-image {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
+
+.selection-box {
+    position: absolute;
+    border: 2px dashed var(--primary);
+    background: rgba(74, 21, 75, 0.12);
+    pointer-events: none;
+    box-sizing: border-box;
+}
+
+.capture-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+}
+
+.ocr-status {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.ocr-status.error {
+    color: var(--error);
+}
+
+#ocr-progress {
+    width: 160px;
+    height: 8px;
+}
+
+.result-pane {
+    flex: 0 0 360px;
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px;
+    position: sticky;
+    top: 20px;
+}
+
+.result-pane label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+#result-text {
+    width: 100%;
+    height: 260px;
+    box-sizing: border-box;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 14px;
+    line-height: 1.6;
+    resize: vertical;
+    font-family: inherit;
+}
+
+#result-text:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+/* キーボード操作時のみ明確なフォーカスリングを出す（マウス操作時は出さない） */
+#result-text:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.primary-btn:focus-visible,
+.secondary-btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.result-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.primary-btn {
+    background-color: var(--primary);
+    color: white;
+    border: none;
+    padding: 12px 20px;
+    border-radius: var(--radius);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+.primary-btn:hover {
+    background-color: var(--primary-hover);
+}
+
+.primary-btn:active {
+    transform: scale(0.98);
+}
+
+.primary-btn:disabled,
+.secondary-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.secondary-btn {
+    background-color: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.secondary-btn:hover:not(:disabled) {
+    background-color: #f1f1f1;
+    color: var(--text);
+}
+
+.playback-status {
+    font-size: 13px;
+    color: var(--text-muted);
+    min-height: 18px;
+    margin: 10px 0 0;
+}
+
+.playback-status.playing {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.playback-status.error {
+    color: var(--error);
+}
+
+.hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 16px;
+    line-height: 1.6;
+}
+
+/* 幅が狭い場合は縦並びにする */
+@media (max-width: 900px) {
+    .layout {
+        flex-direction: column;
+    }
+
+    .result-pane {
+        flex: 1 1 auto;
+        width: 100%;
+        box-sizing: border-box;
+        position: static;
+    }
+}

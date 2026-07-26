@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>画面OCR読み上げ - Web Reader for VOICEVOX</title>
+    <link rel="stylesheet" href="capture.css">
+</head>
+<body>
+    <div class="page">
+        <header>
+            <h1>画面OCR読み上げ</h1>
+            <p class="subtitle">読み上げたい範囲をドラッグで選択すると、文字認識（OCR）を実行します</p>
+            <p id="source-info" class="source-info"></p>
+        </header>
+
+        <div id="banner" class="banner" role="alert" hidden></div>
+
+        <main class="layout">
+            <section class="capture-pane">
+                <div id="capture-container" class="capture-container">
+                    <img id="capture-image" alt="キャプチャ画像" draggable="false">
+                    <div id="selection-box" class="selection-box" hidden></div>
+                </div>
+                <div class="capture-actions">
+                    <button id="ocr-all-btn" class="secondary-btn">画像全体をOCR</button>
+                    <span id="ocr-status" class="ocr-status" role="status" aria-live="polite"></span>
+                    <progress id="ocr-progress" max="1" value="0" aria-label="文字認識の進捗" hidden></progress>
+                </div>
+            </section>
+
+            <section class="result-pane">
+                <label for="result-text">認識結果（編集してから読み上げることもできます）</label>
+                <textarea id="result-text" placeholder="ここに認識結果が表示されます" spellcheck="false"></textarea>
+                <div class="result-actions">
+                    <button id="speak-btn" class="primary-btn">読み上げる</button>
+                    <button id="stop-btn" class="secondary-btn" disabled>停止</button>
+                </div>
+                <p id="playback-status" class="playback-status" role="status" aria-live="polite"></p>
+                <p class="hint">
+                    読み上げにはVOICEVOXエンジンの起動が必要です。文字認識はお使いのブラウザ内で完結し、
+                    画像やテキストが外部サーバーへ送信されることはありません。
+                </p>
+            </section>
+        </main>
+    </div>
+
+    <script src="constants.js"></script>
+    <script src="vendor/tesseract/tesseract.min.js"></script>
+    <script src="ocr-common.js"></script>
+    <script src="capture.js"></script>
+</body>
+</html>

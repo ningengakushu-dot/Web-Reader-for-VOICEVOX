@@ -88,10 +88,40 @@ select:focus {
     border-color: var(--primary);
 }
 
+/* キーボード操作時のみ明確なフォーカスリングを出す（マウス操作時は出さない） */
+select:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.primary-btn:focus-visible,
+.secondary-btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
 .hint {
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 8px;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    margin-bottom: 0;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--primary);
+    cursor: pointer;
+    flex-shrink: 0;
 }
 
 .actions {
@@ -173,7 +203,6 @@ footer p {
     border: 2px solid var(--border);
     border-bottom-color: var(--primary);
     border-radius: 50%;
-    display: inline-block;
     box-sizing: border-box;
     animation: rotation 1s linear infinite;
     position: absolute;

@@ -1,11 +1,22 @@
 importScripts('constants.js');
 
+// 画面OCR読み上げのコンテキストメニューID
+const OCR_MENU_ID = "capture-ocr-read";
+
 // 拡張機能インストール時にコンテキストメニューを作成
 chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({
         id: "read-selected-text",
         title: "選択したテキストをWeb Reader for VOICEVOXで読み上げ",
         contexts: ["selection"]
+    });
+    // 選択できない文字（画像・PDF・Canvas等）向けのOCR読み上げ入口。
+    // PDFビューア等では表示されない場合があるため、ショートカットとツールバー
+    // アイコンのクリックからも同じ機能を起動できるようにしている。
+    chrome.contextMenus.create({
+        id: OCR_MENU_ID,
+        title: "画面をキャプチャしてOCR読み上げ（画像・PDF向け）",
+        contexts: ["page", "image", "video", "frame"]
     });
 });
 
@@ -20,7 +31,169 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
             options
         );
     }
+    if (info.menuItemId === OCR_MENU_ID && tab?.id != null) {
+        startCaptureOcr(tab);
+    }
 });
+
+// --- 画面キャプチャOCR読み上げ ---
+
+// storage.session の既定クォータ（10MB）に収めるための dataURL 長の上限目安。
+// PNG がこれを超える高解像度画面では JPEG への再エンコード（必要なら縮小）を行う。
+const CAPTURE_MAX_DATAURL_LENGTH = 8 * 1024 * 1024;
+
+// ツールバーアイコンのクリックでもOCR読み上げを起動する（PDFビューア等、
+// コンテキストメニューやショートカットが使えない場合の確実な入口）。
+chrome.action.onClicked.addListener((tab) => {
+    startCaptureOcr(tab);
+});
+
+// OCR読み上げを開始する。
+// 通常のWebページ: 閲覧中のページの上にオーバーレイを出してその場で範囲選択させる
+// （ページの表示・サイズを一切変えないため。選択後は CAPTURE_OCR_REGION が届く）。
+// content script を注入できないページ（PDFビューア・chrome:// 等）:
+// 従来どおり capture.html タブでの範囲選択にフォールバックする。
+async function startCaptureOcr(tab) {
+    if (!tab || tab.id == null) return;
+
+    try {
+        // フォールバックの判断材料はここ（注入可否）だけに限る。
+        // 後続の sendMessage の失敗でタブ方式へ落とすと、オーバーレイが出ているのに
+        // capture.html も開いてUIが二重に立ち上がる。
+        await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ["content.js"]
+        });
+    } catch (err) {
+        // 注入不可ページ（PDFビューア・chrome:// 等）→ タブ方式へフォールバック
+        startCaptureOcrInTab(tab);
+        return;
+    }
+
+    try {
+        await chrome.tabs.sendMessage(tab.id, { type: "START_OCR_SELECTION" }, { frameId: 0 });
+    } catch (err) {
+        // 注入は成功しているのでオーバーレイは出ている見込み。ここでの失敗は
+        // 応答チャネルの都合であることが多く、フォールバックの根拠にはしない。
+        console.warn("Background: OCR範囲選択の開始通知に失敗:", err.message);
+    }
+    // 範囲をドラッグしている数秒の間に、文字認識エンジン（同梱の辞書とWASM）を
+    // 先に読み込ませておく。初回だけ発生する待ち時間を利用者に見せないため。
+    // 失敗しても本来の経路で改めて生成されるので無視してよい。
+    prewarmOcr();
+
+    startCaptureOcrInTab(tab);
+}
+
+// フォールバック: タブをキャプチャし、範囲選択・OCR用の capture.html を開く。
+// 画像データは storage.session 経由で受け渡す（Service Worker の休止に耐えるため）。
+// 固定キーへの上書き保存なので並行実行しても last-write-wins となり、
+// 追い越された側のタブは captureId の不一致で明示的なエラーを表示できる。
+async function startCaptureOcrInTab(tab) {
+    try {
+        let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+        if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+            // captureVisibleTab は毎秒の呼び出し回数制限があるため再キャプチャはせず、
+            // 取得済みのPNGをJPEGへ再エンコードしてクォータに収める
+            dataUrl = await reencodeCaptureAsJpeg(dataUrl);
+        }
+
+        const captureId = String(Date.now());
+        await chrome.storage.session.set({
+            [CAPTURE_STORAGE_KEY]: {
+                captureId,
+                dataUrl,
+                sourceTitle: tab.title ?? "",
+                sourceUrl: tab.url ?? ""
+            }
+        });
+
+        await chrome.tabs.create({
+            url: chrome.runtime.getURL(`capture.html?cid=${captureId}`),
+            index: tab.index + 1
+        });
+    } catch (err) {
+        // chrome:// ページ等のキャプチャ不可画面ではここに到達する。
+        // ページ内にUIを出せない場面もあるため、ツールバーバッジで簡易通知する。
+        console.warn("Background: 画面キャプチャに失敗:", err.message);
+        flashActionBadge("ERR", "このページは画面をキャプチャできません（Chromeの設定画面・ウェブストア等）");
+    }
+}
+
+// ページ内オーバーレイで選択された範囲をキャプチャし、offscreen にOCRを依頼する。
+// OCRの完了は offscreen からの OCR_COMPLETE メッセージで受け取り（イベント駆動）、
+// メッセージ応答チャネルを長時間保持しない（Service Worker の休止対策）。
+async function captureAndRecognizeRegion(request, tab) {
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    await setupOffscreen();
+    // offscreen ドキュメントは chrome.storage を参照できないため、
+    // ルビ除去設定はここで読み取ってメッセージに載せて渡す。
+    const { ocrRemoveRuby } = await chrome.storage.local.get(OCR_SETTING_DEFAULTS);
+    await sendToOffscreen({
+        type: "OCR_RECOGNIZE",
+        dataUrl,
+        rect: request.rect,
+        viewportWidth: request.viewportWidth,
+        tabId: tab.id,
+        removeRuby: ocrRemoveRuby === true
+    });
+}
+
+// PNGのdataURLをJPEG（品質92%）へ再エンコードする。
+// それでも上限を超える超高解像度画面では、収まる見込みの倍率まで縮小して再試行する。
+async function reencodeCaptureAsJpeg(pngDataUrl) {
+    const blob = await (await fetch(pngDataUrl)).blob();
+    const bitmap = await createImageBitmap(blob);
+    try {
+        let dataUrl = await drawToJpegDataUrl(bitmap, 1);
+        if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+            const scale = Math.sqrt(CAPTURE_MAX_DATAURL_LENGTH / dataUrl.length) * 0.9;
+            dataUrl = await drawToJpegDataUrl(bitmap, scale);
+        }
+        return dataUrl;
+    } finally {
+        bitmap.close();
+    }
+}
+
+async function drawToJpegDataUrl(bitmap, scale) {
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = new OffscreenCanvas(width, height);
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+    const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
+    return blobToDataUrl(jpegBlob);
+}
+
+// Service Worker には FileReader が無いため、手動で dataURL 化する
+async function blobToDataUrl(blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    const CHUNK_SIZE = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK_SIZE));
+    }
+    return `data:${blob.type};base64,${btoa(binary)}`;
+}
+
+// ツールバーアイコンのバッジを一時表示する（キャプチャ不可ページ等のエラー通知）。
+// 短時間に連続失敗しても前回のクリアタイマーが表示中のバッジを早消ししないようにする。
+let badgeClearTimer = null;
+// manifest.json の action.default_title と同一。エラー通知後に戻すため保持する。
+const ACTION_DEFAULT_TITLE = "画面をキャプチャしてOCR読み上げ（画像・PDF向け）";
+// ページ内にUIを出せない画面（chrome:// 等）での唯一の通知手段。
+// バッジは3文字程度しか出せないため、理由は必ずツールチップにも入れる。
+function flashActionBadge(text, title) {
+    chrome.action.setBadgeBackgroundColor({ color: "#e01e5a" });
+    chrome.action.setBadgeText({ text });
+    if (title) chrome.action.setTitle({ title: `${ACTION_DEFAULT_TITLE}\n${title}` });
+    if (badgeClearTimer) clearTimeout(badgeClearTimer);
+    badgeClearTimer = setTimeout(() => {
+        badgeClearTimer = null;
+        chrome.action.setBadgeText({ text: "" });
+        chrome.action.setTitle({ title: ACTION_DEFAULT_TITLE });
+    }, 3000);
+}
 
 // content.js が未注入のタブ（拡張のインストール/リロード前から開かれていたタブ等）では
 // tabs.sendMessage が "Receiving end does not exist" で失敗する。
@@ -106,29 +279,89 @@ async function handleShortcutRequest(tabId, source) {
 
 // ショートカットキーが押された時の処理
 chrome.commands.onCommand.addListener((command) => {
-    if (command === "toggle-reading") {
-        chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-            if (tabs.length === 0) return;
+    if (command !== "toggle-reading" && command !== "capture-ocr-reading") return;
+    chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
+        if (tabs.length === 0) return;
+        if (command === "toggle-reading") {
             handleShortcutRequest(tabs[0].id, "commands.onCommand");
-        });
-    }
+        } else {
+            startCaptureOcr(tabs[0]);
+        }
+    });
 });
 
 // 再生状態通知（PLAYBACK_*）の宛先タブ。GENERATE_VOICE を要求したタブの id を記録し、
 // offscreen から届く再生状態を「全アクティブタブ」ではなく要求元タブにのみ転送する。
 // これにより、別ウィンドウ/別タブのアイコンUIが他タブの再生状態で誤更新される問題を防ぐ。
+// Service Worker はメモリ上のこの変数を休止で失うため、storage.session にも退避する。
+// 句点の無い長文（画像OCRの結果等）は1つの長い音声になり、その再生中は SW への
+// 通信が無く約30秒で SW が休止し得る。休止から復帰した SW でも宛先を復元できないと
+// 再生終了通知（PLAYBACK_ENDED）を取りこぼし、インジケーターが点灯したまま固着する。
 let playbackTabId = null;
 
+// 宛先タブIDを更新し、storage.session にも反映する（null はクリア）。
+function setPlaybackTabId(tabId) {
+    playbackTabId = tabId;
+    if (tabId == null) {
+        chrome.storage.session.remove(PLAYBACK_TAB_STORAGE_KEY).catch(() => {});
+    } else {
+        chrome.storage.session.set({ [PLAYBACK_TAB_STORAGE_KEY]: tabId }).catch(() => {});
+    }
+}
+
+// 宛先タブIDを取得する。メモリ上の値が失われている（SW休止からの復帰直後）場合は
+// storage.session から読み直してメモリへ復元する。
+async function getPlaybackTabId() {
+    if (playbackTabId != null) return playbackTabId;
+    try {
+        const stored = await chrome.storage.session.get(PLAYBACK_TAB_STORAGE_KEY);
+        const tabId = stored[PLAYBACK_TAB_STORAGE_KEY];
+        if (tabId != null) playbackTabId = tabId;
+    } catch (e) {
+        // session 参照に失敗しても従来どおりメモリ値で続行する
+    }
+    return playbackTabId;
+}
+
 // タブが閉じられたら、保持している状態（再生宛先・ショートカット重複抑制）を掃除する。
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId) => {
     lastShortcut.delete(tabId);
-    if (playbackTabId === tabId) {
-        playbackTabId = null;
+    if (await getPlaybackTabId() === tabId) {
+        setPlaybackTabId(null);
+    }
+});
+
+// 再生中のタブが別ページへ遷移／リロードされたら、音声が鳴りっぱなしになるのを防ぐため
+// 再生を停止する。宛先を先にクリアするので、offscreen が返す PLAYBACK_STOPPED は
+// 転送先が無くなり、遷移先の新しいページのインジケーターを誤って点灯させない。
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+    if (changeInfo.status !== "loading") return;
+    if (await getPlaybackTabId() !== tabId) return;
+    setPlaybackTabId(null);
+    try {
+        const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+        if (contexts.length > 0) {
+            sendToOffscreen({ type: "STOP_AUDIO" }).catch(() => {});
+        }
+    } catch (e) {
+        // getContexts 失敗時は何もしない（再生中でなければ実害なし）
     }
 });
 
 // --- Offscreen Document 管理 ---
 let offscreenCreating = null;
+
+// 文字認識エンジンの先読み。範囲選択中に offscreen を用意してワーカーを起こしておく。
+// エンジンの初期化（同梱の辞書14MBとWASMの読み込み）は初回だけ数秒かかるため、
+// 利用者がドラッグしている間に済ませてしまう。失敗しても本来の経路で作り直される。
+async function prewarmOcr() {
+    try {
+        await setupOffscreen();
+        await sendToOffscreen({ type: "PREWARM_OCR" });
+    } catch (err) {
+        // 先読みは best-effort。失敗しても本来の認識には影響しない
+    }
+}
 
 async function setupOffscreen() {
     try {
@@ -145,8 +378,8 @@ async function setupOffscreen() {
 
         offscreenCreating = chrome.offscreen.createDocument({
             url: 'offscreen.html',
-            reasons: ['AUDIO_PLAYBACK'],
-            justification: '音声再生によるアクセシビリティ向上のため（CSP制限サイト回避）'
+            reasons: ['AUDIO_PLAYBACK', 'WORKERS'],
+            justification: '音声再生によるアクセシビリティ向上（CSP制限サイト回避）と、画面OCR読み上げの文字認識ワーカー実行のため'
         });
 
         await offscreenCreating;
@@ -172,6 +405,13 @@ function warn(context) {
 // Content Scriptからのメッセージを処理するリスナー
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.target && request.target !== 'background') return;
+    // target:'background' は offscreen ドキュメントからの通知（PLAYBACK_* / OCR_*）に限る。
+    // 送信元が offscreen.html であることを確認し、他コンテキストからの偽装を排除する（多層防御）。
+    // content script/拡張ページからの要求は target を付けず、sender.tab で正しく扱っている。
+    if (request.target === 'background'
+        && sender.url !== chrome.runtime.getURL('offscreen.html')) {
+        return;
+    }
 
     switch (request.type) {
         case "SHORTCUT_PRESSED":
@@ -207,12 +447,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const requestTabId = sender.tab?.id ?? null;
             // 別タブからの新しい再生要求なら、前の再生タブへ明示的に停止を通知してから
             // 宛先を切り替える。前タブのアイコンUIが「再生中」のまま取り残されるのを防ぐ。
-            if (requestTabId != null && playbackTabId != null && playbackTabId !== requestTabId) {
-                chrome.tabs.sendMessage(playbackTabId, { type: "PLAYBACK_STOPPED" })
-                    .catch(warn("旧再生タブへの停止通知失敗"));
-            }
+            // target:"tab" はタブ宛て転送の目印（capture.html はこれが無いと無視する）。
             if (requestTabId != null) {
-                playbackTabId = requestTabId;
+                getPlaybackTabId().then((prev) => {
+                    if (prev != null && prev !== requestTabId) {
+                        chrome.tabs.sendMessage(prev, { type: "PLAYBACK_STOPPED", target: "tab" })
+                            .catch(warn("旧再生タブへの停止通知失敗"));
+                    }
+                    setPlaybackTabId(requestTabId);
+                });
             }
             handleGenerateVoice(request.text, sendResponse);
             return true;
@@ -225,16 +468,96 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ success: true });
             return false;
 
+        case "CAPTURE_OCR_REGION": {
+            // ページ内オーバーレイで選択された範囲のキャプチャ→OCR開始要求
+            const tab = sender.tab;
+            if (!tab || tab.id == null) {
+                sendResponse({ success: false, error: "要求元タブを特定できません" });
+                return false;
+            }
+            captureAndRecognizeRegion(request, tab)
+                .then(() => sendResponse({ success: true }))
+                .catch((err) => {
+                    console.warn("Background: 範囲OCRの開始に失敗:", err.message);
+                    // captureVisibleTab には毎秒の呼び出し回数制限がある。連続実行で踏んだ場合は
+                    // 生のエラー文言だと利用者が対処できないため、原因の分かる案内に差し替える。
+                    const message = /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/i.test(err.message)
+                        ? "短い間隔で連続して実行されました。少し待ってからもう一度お試しください。"
+                        : err.message;
+                    sendResponse({ success: false, error: message });
+                });
+            return true;
+        }
+
+        case "OCR_PROGRESS":
+            // offscreen からのOCR進行状況を要求元タブへ転送する
+            if (request.tabId != null) {
+                chrome.tabs.sendMessage(request.tabId, {
+                    type: "OCR_PROGRESS",
+                    progress: request.progress,
+                    target: "tab"
+                }).catch(() => {});
+            }
+            return false;
+
+        case "OCR_COMPLETE": {
+            // offscreen でのOCR完了。認識テキストを既存の読み上げパイプラインへ流す。
+            const tabId = request.tabId ?? null;
+            if (request.error || !request.text) {
+                if (tabId != null) {
+                    chrome.tabs.sendMessage(tabId, {
+                        type: "OCR_STATUS",
+                        status: "error",
+                        message: request.error || "文字を認識できませんでした。",
+                        target: "tab"
+                    }).catch(warn("OCRエラー通知の送信失敗"));
+                }
+                return false;
+            }
+            if (tabId != null) {
+                // GENERATE_VOICE と同様に、再生状態通知の宛先を要求元タブへ切り替える
+                getPlaybackTabId().then((prev) => {
+                    if (prev != null && prev !== tabId) {
+                        chrome.tabs.sendMessage(prev, { type: "PLAYBACK_STOPPED", target: "tab" })
+                            .catch(warn("旧再生タブへの停止通知失敗"));
+                    }
+                    setPlaybackTabId(tabId);
+                });
+                chrome.tabs.sendMessage(tabId, { type: "OCR_STATUS", status: "done", target: "tab" })
+                    .catch(() => {});
+            }
+            // 読み上げ準備の失敗（offscreen 生成不可等）も要求元タブへ通知する。
+            // VOICEVOX への接続失敗は合成時に PLAYBACK_ERROR として別途届く。
+            handleGenerateVoice(request.text, (res) => {
+                if (res && res.success === false && tabId != null) {
+                    chrome.tabs.sendMessage(tabId, {
+                        type: "OCR_STATUS",
+                        status: "error",
+                        message: `読み上げを開始できませんでした: ${res.error}`,
+                        target: "tab"
+                    }).catch(warn("読み上げ開始エラー通知の送信失敗"));
+                }
+            });
+            return false;
+        }
+
         case "PLAYBACK_STARTED":
         case "PLAYBACK_ENDED":
         case "PLAYBACK_ERROR":
         case "PLAYBACK_STOPPED":
             // 再生を要求したタブにのみ転送する。全アクティブタブへ配信すると、
             // 別ウィンドウのアクティブタブのUIまで誤って更新されてしまう。
-            if (playbackTabId != null) {
-                chrome.tabs.sendMessage(playbackTabId, request)
-                    .catch(warn("再生状態の転送失敗"));
-            }
+            // target を 'tab' に付け替えるのは、拡張機能ページ（capture.html）が
+            // offscreen からの全体ブロードキャスト（target:'background'）と
+            // このタブ宛て転送を区別して二重処理を防げるようにするため。
+            // SW休止から復帰した直後はメモリ上の宛先が失われているため、
+            // storage.session から復元してから転送する（getPlaybackTabId）。
+            getPlaybackTabId().then((tabId) => {
+                if (tabId != null) {
+                    chrome.tabs.sendMessage(tabId, { ...request, target: "tab" })
+                        .catch(warn("再生状態の転送失敗"));
+                }
+            });
             return false;
     }
 

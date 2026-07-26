@@ -1,9 +1,8 @@
-.codex/
+# AI エージェント向けのローカル設定（公開パッケージには不要）
 AGENTS.md
 CLAUDE.md
-docs/agent-workflow.md
-docs/agent-tasks/
-scripts/agent-loop.ps1
-scripts/codex-stop-hook.ps1
-scripts/start-agent-loop.ps1
+.claude/
+.codex/
+
+# 作業用の音声出力
 audio/

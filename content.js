@@ -20,11 +20,18 @@
         }
     }
 
+// OCRの進捗がこの時間だけ途絶えたら、処理が中断されたとみなして待つのをやめる。
+// 認識自体の上限（offscreen 側の 60 秒）より長く取り、正常に時間がかかっている
+// だけの場合に誤って打ち切らないようにする。
+const OCR_STALL_TIMEOUT_MS = 90000;
+
 class VVRadioReader {
     constructor() {
         this.active = true;
         this.isPlaying = false;
         this.indicator = null;
+        // OCRの進捗途絶を検知する見張りタイマー（armOcrStallWatchdog で設定）
+        this.ocrStallWatchdog = null;
         // クロスオリジンの frame プロパティにアクセスせず、window.self/window.top の
         // 比較のみで安全にトップフレーム判定を行う
         this.isTopFrame = window.self === window.top;
@@ -56,19 +63,31 @@ class VVRadioReader {
     // 以降のメッセージは active=false により無視される。
     deactivate() {
         this.active = false;
+        // OCR選択オーバーレイの window リスナーと、OCRトースト/進捗ガードタイマーも解放する。
+        // host を消すだけでは window に張った mousemove/mouseup/keydown と setTimeout が
+        // 取り残され、detached ノードを参照し続けてリークする（OCR選択中の再注入で発生）。
+        this.removeOcrOverlay();
+        this.removeOcrToast();
         const host = document.getElementById("vvradio-host");
         if (host) host.remove();
+        // this.ocrOverlay が未設定の段階で残った stale な OCR ホストも念のため除去する。
+        const ocrHost = document.getElementById("vvradio-ocr-host");
+        if (ocrHost) ocrHost.remove();
     }
 
     // アイコンサイズをストレージから取得して適用し、変更をリアルタイム監視
     applyIconSize() {
         chrome.storage.local.get(["iconSize"], (res) => {
+            if (!this.indicator) return;
             const size = res.iconSize || 16;
             this.indicator.style.width = `${size}px`;
             this.indicator.style.height = `${size}px`;
         });
 
         chrome.storage.onChanged.addListener((changes, namespace) => {
+            // deactivate 済み（stale）インスタンスや、インジケーター未生成のフレームでは
+            // detached になった indicator を触らないよう早期に抜ける。
+            if (!this.active || !this.indicator) return;
             if (namespace !== 'local') return;
 
             // サイズのリアルタイム反映
@@ -205,10 +224,20 @@ class VVRadioReader {
             this.toggleReading();
         });
 
-        // オプション画面を開くリスナー（右クリック）
+        // 右クリックリスナー。動作は設定で切替可能（既定: 画面OCR読み上げの開始）。
+        // 従来のオプション画面を開く動作は、設定 iconRightClickAction を
+        // "options" にすることで維持できる。
         this.indicator.addEventListener("contextmenu", (e) => {
             e.preventDefault();
-            chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
+            chrome.storage.local.get({ iconRightClickAction: "capture" }, (res) => {
+                if (res.iconRightClickAction === "options") {
+                    chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
+                } else {
+                    // ページ内の範囲選択オーバーレイを直接開始する
+                    // （インジケーターはトップフレームにのみ存在する）
+                    this.startOcrSelection();
+                }
+            });
         });
 
         this.shadowRoot.appendChild(this.indicator);
@@ -321,12 +350,29 @@ class VVRadioReader {
 
     // バックグラウンド等からのメッセージのリスナーを設定
     setupMessageListener() {
-        chrome.runtime.onMessage.addListener((request) => {
+        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // 停止済み（stale）インスタンスのリスナーは何もしない
             if (!this.active) return;
             switch (request.type) {
                 case "READ_SELECTED_TEXT":
                     if (request.text) this.speakText(request.text);
+                    break;
+                case "START_OCR_SELECTION":
+                    // ページ内OCR範囲選択はトップフレームのみが担当する
+                    // （background も frameId: 0 を指定して送ってくる）
+                    if (!this.isTopFrame) break;
+                    this.startOcrSelection();
+                    // 応答を返さないと送信側が「応答チャネルが閉じた」で失敗扱いになる。
+                    // background 側はこれをフォールバック判断に使わないが、
+                    // 無用な失敗ログを出さないためここで明示的に応答する。
+                    sendResponse({ success: true });
+                    break;
+                case "OCR_PROGRESS":
+                    this.updateOcrToast(`文字認識中... ${Math.round((request.progress || 0) * 100)}%`);
+                    this.armOcrStallWatchdog();
+                    break;
+                case "OCR_STATUS":
+                    this.handleOcrStatus(request);
                     break;
                 case "TOGGLE_READING":
                     // フォーカスを持つフレームのみが処理（全フレーム配信による二重読み上げ防止）
@@ -346,6 +392,7 @@ class VVRadioReader {
                     console.error("Web Reader for VOICEVOX: 再生エラー:", request.error);
                     this.isPlaying = false;
                     this.updateUIState('error');
+                    this.showPlaybackErrorToast(request.error);
                     break;
             }
         });
@@ -359,6 +406,251 @@ class VVRadioReader {
                 this.updateUIState('error');
             }
         });
+    }
+
+    // --- ページ内OCR範囲選択 ---
+    // 閲覧中のページの表示を一切変えずに、オーバーレイ上で読み上げたい範囲を
+    // ドラッグ選択させる。選択後はオーバーレイを除去してから background に
+    // キャプチャとOCRを依頼する（オーバーレイが写り込まないようにするため）。
+
+    startOcrSelection() {
+        this.removeOcrOverlay();
+        this.removeOcrToast();
+        // 旧インスタンスが残したオーバーレイがあれば除去する（再注入時の保険）
+        const stale = document.getElementById("vvradio-ocr-host");
+        if (stale) stale.remove();
+
+        const host = document.createElement("div");
+        host.id = "vvradio-ocr-host";
+        (document.body || document.documentElement).appendChild(host);
+        const root = host.attachShadow({ mode: "closed" });
+
+        const style = document.createElement("style");
+        style.textContent = `
+            #vvradio-ocr-overlay {
+                position: fixed; inset: 0; z-index: 2147483647;
+                cursor: crosshair; user-select: none;
+                background: rgba(29, 28, 29, 0.3);
+            }
+            #vvradio-ocr-overlay.dragging { background: transparent; }
+            #vvradio-ocr-hint {
+                position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+                background: rgba(29, 28, 29, 0.85); color: #fff;
+                font: 13px 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                padding: 8px 16px; border-radius: 6px; pointer-events: none;
+            }
+            #vvradio-ocr-box {
+                position: fixed; box-sizing: border-box;
+                border: 2px dashed #ffffff;
+                box-shadow: 0 0 0 100000px rgba(29, 28, 29, 0.3);
+                display: none; pointer-events: none;
+            }
+        `;
+        root.appendChild(style);
+
+        const overlay = document.createElement("div");
+        overlay.id = "vvradio-ocr-overlay";
+        const hint = document.createElement("div");
+        hint.id = "vvradio-ocr-hint";
+        hint.textContent = "読み上げたい範囲をドラッグで選択（Escまたはクリックでキャンセル）";
+        const box = document.createElement("div");
+        box.id = "vvradio-ocr-box";
+        overlay.appendChild(hint);
+        overlay.appendChild(box);
+        root.appendChild(overlay);
+
+        const state = { startX: 0, startY: 0, dragging: false };
+
+        const currentRect = (e) => {
+            const curX = Math.max(0, Math.min(e.clientX, window.innerWidth));
+            const curY = Math.max(0, Math.min(e.clientY, window.innerHeight));
+            return {
+                x: Math.min(state.startX, curX),
+                y: Math.min(state.startY, curY),
+                width: Math.abs(curX - state.startX),
+                height: Math.abs(curY - state.startY)
+            };
+        };
+
+        const onMouseDown = (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            state.dragging = true;
+            state.startX = e.clientX;
+            state.startY = e.clientY;
+            hint.style.display = "none";
+            overlay.classList.add("dragging");
+        };
+
+        const onMouseMove = (e) => {
+            if (!state.dragging) return;
+            const rect = currentRect(e);
+            box.style.left = `${rect.x}px`;
+            box.style.top = `${rect.y}px`;
+            box.style.width = `${rect.width}px`;
+            box.style.height = `${rect.height}px`;
+            box.style.display = "block";
+        };
+
+        const onMouseUp = (e) => {
+            if (!state.dragging) return;
+            const rect = currentRect(e);
+            this.removeOcrOverlay();
+            // 微小ドラッグ（クリック）はキャンセル扱い
+            if (rect.width < 12 || rect.height < 12) return;
+            this.requestRegionOcr(rect);
+        };
+
+        const onKeyDown = (e) => {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                this.removeOcrOverlay();
+            }
+        };
+
+        overlay.addEventListener("mousedown", onMouseDown);
+        window.addEventListener("mousemove", onMouseMove, true);
+        window.addEventListener("mouseup", onMouseUp, true);
+        window.addEventListener("keydown", onKeyDown, true);
+
+        this.ocrOverlay = {
+            host,
+            cleanup: () => {
+                window.removeEventListener("mousemove", onMouseMove, true);
+                window.removeEventListener("mouseup", onMouseUp, true);
+                window.removeEventListener("keydown", onKeyDown, true);
+            }
+        };
+    }
+
+    removeOcrOverlay() {
+        if (!this.ocrOverlay) return;
+        this.ocrOverlay.cleanup();
+        this.ocrOverlay.host.remove();
+        this.ocrOverlay = null;
+    }
+
+    // 選択範囲（ビューポートCSS座標）を background に渡してキャプチャ→OCR→読み上げを依頼する。
+    // オーバーレイ除去の再描画がキャプチャに反映されるよう、2フレーム＋少し待ってから送る。
+    requestRegionOcr(rect) {
+        // キャプチャに自前UI（インジケーター・準備中トースト）が写り込むと、その文言まで
+        // OCRされて読み上げに混入する（画面全体の選択で確実に起きる）。撮影前にインジケーターを
+        // 隠し、進捗トーストは撮影完了後（sendMessage 応答後＝captureVisibleTab 済み）にのみ表示する。
+        if (this.indicator) this.indicator.style.visibility = "hidden";
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            setTimeout(() => {
+                // OCRが長引いた場合・応答が途絶えた場合にトーストが残り続けないための保険。
+                // ここでエラー扱いにすると、後から認識完了→読み上げ開始したときに表示と矛盾する
+                // ため（巨大範囲・低速端末で発生）、中立的に待たせるに留める。
+                this.ocrToastGuard = setTimeout(() => {
+                    this.ocrToastGuard = null;
+                    if (this.indicator) this.indicator.style.visibility = "";
+                    this.showOcrToast("文字認識に時間がかかっています。しばらくお待ちください…");
+                }, 90000);
+
+                chrome.runtime.sendMessage({
+                    type: "CAPTURE_OCR_REGION",
+                    rect,
+                    viewportWidth: window.innerWidth
+                }, (response) => {
+                    // 応答は background が captureVisibleTab を終えた後に届く＝撮影済み。
+                    // ここで初めてインジケーターを戻し、進捗トーストを出す（写り込み防止）。
+                    if (this.indicator) this.indicator.style.visibility = "";
+                    if (chrome.runtime.lastError || !response || !response.success) {
+                        const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
+                        this.handleOcrStatus({ status: "error", message: `キャプチャに失敗しました: ${reason}` });
+                    } else {
+                        this.showOcrToast("文字認識中...");
+                        this.armOcrStallWatchdog();
+                    }
+                });
+            }, 60);
+        }));
+    }
+
+    // 認識処理そのものが止まったことを検知する見張り。進捗が届くたびに掛け直す。
+    // OCRを担う offscreen ドキュメントが認識中に破棄されると、完了もエラーも
+    // 届かないまま待ち続けることになるため、その場合でも必ず終わらせる。
+    armOcrStallWatchdog() {
+        if (this.ocrStallWatchdog) clearTimeout(this.ocrStallWatchdog);
+        this.ocrStallWatchdog = setTimeout(() => {
+            this.ocrStallWatchdog = null;
+            this.handleOcrStatus({
+                status: "error",
+                message: "文字認識が中断されました。もう一度お試しください。"
+            });
+        }, OCR_STALL_TIMEOUT_MS);
+    }
+
+    clearOcrStallWatchdog() {
+        if (this.ocrStallWatchdog) {
+            clearTimeout(this.ocrStallWatchdog);
+            this.ocrStallWatchdog = null;
+        }
+    }
+
+    // OCRの進行状況・完了・エラーを示す小さなトースト表示
+    showOcrToast(text) {
+        if (!this.shadowRoot) return;
+        if (!this.ocrToast) {
+            const toast = document.createElement("div");
+            toast.id = "vvradio-ocr-toast";
+            toast.style.cssText = `
+                position: fixed; bottom: 48px; right: 20px; z-index: 999999;
+                background: rgba(29, 28, 29, 0.85); color: #fff;
+                font: 12px 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                padding: 6px 12px; border-radius: 6px; pointer-events: none;
+                max-width: 320px;
+            `;
+            this.shadowRoot.appendChild(toast);
+            this.ocrToast = toast;
+        }
+        this.ocrToast.textContent = text;
+    }
+
+    updateOcrToast(text) {
+        if (this.ocrToast) this.showOcrToast(text);
+    }
+
+    removeOcrToast() {
+        this.clearOcrStallWatchdog();
+        if (this.ocrToastGuard) {
+            clearTimeout(this.ocrToastGuard);
+            this.ocrToastGuard = null;
+        }
+        if (this.ocrToast) {
+            this.ocrToast.remove();
+            this.ocrToast = null;
+        }
+    }
+
+    // 合成・再生の失敗をトーストで明示する。アイコンの状態変化だけでは
+    // 「何も起きない」ように見えるため（VOICEVOX未起動が典型例）。
+    showPlaybackErrorToast(error) {
+        const message = /Failed to fetch|NetworkError|ERR_CONNECTION/i.test(error || "")
+            ? "VOICEVOXエンジンに接続できません。VOICEVOXを起動してから再度お試しください。"
+            : `音声の再生に失敗しました: ${error || "不明なエラー"}`;
+        this.showOcrToast(message);
+        setTimeout(() => this.removeOcrToast(), 6000);
+    }
+
+    handleOcrStatus(request) {
+        // 撮影のために隠したインジケーターを、どの終了経路でも確実に復帰させる。
+        if (this.indicator) this.indicator.style.visibility = "";
+        this.clearOcrStallWatchdog();
+        if (this.ocrToastGuard) {
+            clearTimeout(this.ocrToastGuard);
+            this.ocrToastGuard = null;
+        }
+        if (request.status === "error") {
+            this.showOcrToast(request.message || "文字認識に失敗しました。");
+            this.updateUIState('error');
+            setTimeout(() => this.removeOcrToast(), 4000);
+        } else {
+            // 完了: 読み上げが始まると PLAYBACK_STARTED でインジケーターが点灯する
+            this.removeOcrToast();
+        }
     }
 
     // 音声再生リクエスト

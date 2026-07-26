@@ -67,17 +67,37 @@
                 </div>
             </section>
 
+            <section class="settings-section">
+                <label class="checkbox-label" for="ocrRemoveRuby-check">
+                    <input type="checkbox" id="ocrRemoveRuby-check">
+                    <span>画面OCR読み上げでルビ（ふりがな）を優先して読む</span>
+                </label>
+                <p class="hint">縦書きの小説など、ルビが振られたページ向けの設定です。ふりがなの付いた漢字は、漢字の一般的な読みではなく、ふりがなのとおりに読み上げます（例: 「鯨幕」→「くじらまく」）。ルビをうまく読み取れなかった場合は、そのルビを使わず漢字のまま読み上げます。ルビのないページでは影響しません。</p>
+            </section>
+
+            <section class="settings-section">
+                <label for="iconRightClick-select">ページ内アイコンを右クリックしたときの動作</label>
+                <div class="select-wrapper">
+                    <select id="iconRightClick-select">
+                        <option value="capture">画面OCR読み上げを開始</option>
+                        <option value="options">オプション画面を開く</option>
+                    </select>
+                </div>
+                <p class="hint">「画面OCR読み上げを開始」設定時も、ツールバーの拡張機能アイコンを右クリック→「オプション」からこの画面を開けます。</p>
+            </section>
+
             <div class="actions">
                 <button id="save-btn" class="primary-btn">設定を保存</button>
                 <button id="reset-btn" class="secondary-btn">アイコンの位置・サイズを初期化</button>
-                <span id="status-msg" class="status-msg"></span>
+                <span id="status-msg" class="status-msg" role="status" aria-live="polite"></span>
             </div>
         </main>
 
         <footer>
-            <p>Web Reader for VOICEVOX v1.2.1</p>
+            <p>Web Reader for VOICEVOX v1.3.0</p>
         </footer>
     </div>
+    <script src="constants.js"></script>
     <script src="options.js"></script>
 </body>
 </html>
