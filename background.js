@@ -453,6 +453,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 .catch(err => sendResponse({ success: false, error: err.message }));
             return true;
 
+        case "GET_SPEAKER_ICON":
+            // 設定画面のページ内アイコン表示用。VOICEVOXエンジンは拡張機能の
+            // オリジンからしか叩けないため、取得は background に集約する。
+            fetchSpeakerIcon(request.speakerId)
+                .then(result => sendResponse({ success: true, ...result }))
+                .catch(err => sendResponse({ success: false, error: err.message }));
+            return true;
+
         case "GENERATE_VOICE": {
             // 要求元タブを再生状態通知の宛先として記録する。
             // ショートカット/コンテキストメニュー経由でも content.js から送信されるため
@@ -599,6 +607,45 @@ async function handleGenerateVoice(text, sendResponse) {
         console.error("Background: 準備エラー:", err);
         sendResponse({ success: false, error: err.message });
     }
+}
+
+/**
+ * スタイルID（speakerId）から、キャラクター名とアイコン画像を取得する。
+ *
+ * 画像は拡張機能に同梱せず、利用者自身のPCで動いている VOICEVOX エンジンから
+ * その都度取得する（VOICEVOX本体の規約が禁じる「再配布」を避けるため）。
+ * 取得した画像は利用者のブラウザ内にとどまり、外部へ送信されることはない。
+ *
+ * エンジンが起動していない場合は例外になるが、呼び出し側（options.js）は
+ * 名前だけの表示にフォールバックできるため、致命的ではない。
+ *
+ * @returns {Promise<{name: string, icon: string|null}>} icon は base64（データURL接頭辞なし）
+ */
+async function fetchSpeakerIcon(speakerId) {
+    const id = Number(speakerId);
+    if (!Number.isInteger(id)) throw new Error("speakerId が不正です");
+
+    const speakersRes = await fetchWithTimeout(
+        `${VOICEVOX_BASE_URL}/speakers`, {}, VOICEVOX_FETCH_TIMEOUT_MS);
+    if (!speakersRes.ok) throw new Error(`キャラクター一覧の取得に失敗しました (${speakersRes.status})`);
+    const speakers = await speakersRes.json();
+
+    const speaker = speakers.find(s => (s.styles || []).some(st => st.id === id));
+    if (!speaker) throw new Error("選択中のキャラクターが見つかりません");
+
+    // speaker_uuid が無いエンジンでも名前だけは返し、文字表示にフォールバックさせる。
+    if (!speaker.speaker_uuid) return { name: speaker.name, icon: null };
+
+    const infoRes = await fetchWithTimeout(
+        `${VOICEVOX_BASE_URL}/speaker_info?speaker_uuid=${encodeURIComponent(speaker.speaker_uuid)}`,
+        {}, VOICEVOX_FETCH_TIMEOUT_MS);
+    if (!infoRes.ok) return { name: speaker.name, icon: null };
+    const info = await infoRes.json();
+
+    // スタイルごとにアイコンが違うため、選択中のスタイルのものを優先する。
+    const styleInfos = info.style_infos || [];
+    const matched = styleInfos.find(si => si.id === id) || styleInfos[0];
+    return { name: speaker.name, icon: matched?.icon || null };
 }
 
 /**

@@ -106,6 +106,64 @@ select:focus-visible {
     margin-top: 8px;
 }
 
+/* ページ内アイコンの見た目プレビュー。実際の表示と同じ見え方にする。 */
+.icon-preview-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.icon-preview-row .hint {
+    margin-top: 0;
+}
+
+.icon-preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background-color: #3498db;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    color: #ffffff;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+    overflow: hidden;
+}
+
+.icon-preview.image {
+    background-color: transparent;
+    box-shadow: none;
+    background-size: contain;
+    background-position: center;
+    background-repeat: no-repeat;
+}
+
+#customIcon-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+/* ID セレクタの display:flex が hidden 属性の UA スタイルに勝ってしまうため明示する */
+#customIcon-row[hidden] {
+    display: none;
+}
+
+#customIcon-row .hint {
+    flex-basis: 100%;
+    margin-top: 0;
+}
+
+#customIcon-row .secondary-btn {
+    padding: 6px 12px;
+}
+
 .checkbox-label {
     display: flex;
     align-items: center;

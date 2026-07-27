@@ -68,6 +68,31 @@
             </section>
 
             <section class="settings-section">
+                <label for="iconStyle-select">アイコンの見た目</label>
+                <div class="select-wrapper">
+                    <select id="iconStyle-select">
+                        <option value="dot">シンプルな円（既定）</option>
+                        <option value="app">このアプリのアイコン</option>
+                        <option value="character">読み上げキャラクター</option>
+                        <option value="custom">画像を指定する</option>
+                    </select>
+                </div>
+                <p class="hint" id="iconStyle-hint-character" hidden>
+                    今どのキャラクターで読み上げるかがページ上でわかります。画像はお使いのPCのVOICEVOXから取得し、外部へ送信されません。
+                    キャラクター画像の利用が規約で明示的に許可されているキャラクターのみ画像で表示し、それ以外はキャラクター名の頭文字で表示します。
+                </p>
+                <div id="customIcon-row" hidden>
+                    <input type="file" id="customIcon-file" accept="image/png,image/jpeg,image/webp,image/gif">
+                    <button type="button" id="customIcon-clear" class="secondary-btn">画像を削除</button>
+                    <p class="hint">PNG / JPEG / WebP / GIF、2MBまで。128px の正方形に縮小して保存します。</p>
+                </div>
+                <div class="icon-preview-row">
+                    <span class="hint">プレビュー:</span>
+                    <span id="iconStyle-preview" class="icon-preview" aria-hidden="true"></span>
+                </div>
+            </section>
+
+            <section class="settings-section">
                 <label class="checkbox-label" for="ocrRemoveRuby-check">
                     <input type="checkbox" id="ocrRemoveRuby-check">
                     <span>画面OCR読み上げでルビ（ふりがな）を優先して読む</span>
@@ -94,7 +119,7 @@
         </main>
 
         <footer>
-            <p>Web Reader for VOICEVOX v1.3.0</p>
+            <p>Web Reader for VOICEVOX v1.4.0</p>
         </footer>
     </div>
     <script src="constants.js"></script>

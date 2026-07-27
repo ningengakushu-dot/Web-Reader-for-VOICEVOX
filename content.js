@@ -108,13 +108,14 @@ class VVRadioReader {
         if (ocrHost) ocrHost.remove();
     }
 
-    // アイコンサイズをストレージから取得して適用し、変更をリアルタイム監視
+    // アイコンのサイズと見た目をストレージから取得して適用し、変更をリアルタイム監視
+    // （content script は constants.js を読み込まないため、キー名と既定値は直値で持つ）
     applyIconSize() {
-        chrome.storage.local.get(["iconSize"], (res) => {
+        const keys = ["iconSize", "iconStyle", "vv_character_icon", "vv_custom_icon"];
+        chrome.storage.local.get(keys, (res) => {
             if (!this.indicator) return;
-            const size = res.iconSize || 16;
-            this.indicator.style.width = `${size}px`;
-            this.indicator.style.height = `${size}px`;
+            this.applyIndicatorSize(res.iconSize || 16);
+            this.applyIndicatorStyle(res);
         });
 
         this.addStorageListener((changes, namespace) => {
@@ -125,9 +126,16 @@ class VVRadioReader {
 
             // サイズのリアルタイム反映
             if (changes.iconSize) {
-                const newSize = changes.iconSize.newValue || 16;
-                this.indicator.style.width = `${newSize}px`;
-                this.indicator.style.height = `${newSize}px`;
+                this.applyIndicatorSize(changes.iconSize.newValue || 16);
+            }
+
+            // 見た目のリアルタイム反映。設定画面での保存直後に開いているページへ即反映する。
+            // 画像データは storage 側にしか無いため、変更があれば毎回まとめて読み直す。
+            if (changes.iconStyle || changes.vv_character_icon || changes.vv_custom_icon) {
+                chrome.storage.local.get(keys, (res) => {
+                    if (!this.active || !this.indicator) return;
+                    this.applyIndicatorStyle(res);
+                });
             }
 
             // 位置リセットのリアルタイム反映（オプション画面からリセットされた場合）
@@ -138,6 +146,60 @@ class VVRadioReader {
                 this.indicator.style.right = '20px';
             }
         });
+    }
+
+    // アイコンの一辺のサイズを適用する。
+    // キャラクター名の文字表示は円に内接させたいので、文字サイズも連動させる。
+    applyIndicatorSize(size) {
+        this.indicator.style.width = `${size}px`;
+        this.indicator.style.height = `${size}px`;
+        this.indicator.style.fontSize = `${Math.max(8, Math.round(size * 0.62))}px`;
+    }
+
+    // アイコンの見た目（従来の円／拡張機能のアイコン／読み上げキャラクター／
+    // 利用者がアップロードした画像）を適用する。
+    // 画像・文字の指定が欠けている場合は、必ず従来の円にフォールバックする。
+    applyIndicatorStyle(res) {
+        const el = this.indicator;
+        el.classList.remove('image', 'text');
+        el.style.backgroundImage = '';
+        el.textContent = '';
+        el.removeAttribute('title');
+
+        const style = res.iconStyle || 'dot';
+        const asImage = (url) => {
+            el.classList.add('image');
+            // storage 由来のデータURL/拡張機能内URLのみ。外部URLは入らない。
+            el.style.backgroundImage = `url("${url}")`;
+        };
+
+        if (style === 'app') {
+            asImage(chrome.runtime.getURL('images/icon128.png'));
+            el.title = 'Web Reader for VOICEVOX';
+            return;
+        }
+
+        if (style === 'custom') {
+            const custom = res.vv_custom_icon;
+            if (typeof custom === 'string' && custom.startsWith('data:image/')) {
+                asImage(custom);
+                return;
+            }
+            return; // 画像が未設定なら従来の円のまま
+        }
+
+        if (style === 'character') {
+            const character = res.vv_character_icon;
+            if (!character || !character.name) return;
+            el.title = character.name;
+            if (typeof character.dataUrl === 'string' && character.dataUrl.startsWith('data:image/')) {
+                asImage(character.dataUrl);
+            } else {
+                // 画像の利用許諾が確認できないキャラクターは名前の頭文字で表示する。
+                el.classList.add('text');
+                el.textContent = character.name.slice(0, 1);
+            }
+        }
     }
 
     // 画面にインジケーターアイコンを注入
@@ -171,6 +233,34 @@ class VVRadioReader {
             #vvradio-indicator.error {
                 opacity: 1; background-color: #e01e5a; box-shadow: 0 0 15px rgba(224, 30, 90, 0.8);
             }
+            /* 画像アイコン（拡張機能のアイコン／キャラクター／アップロード画像）。
+               背景色を消して画像そのものを見せ、状態は輪郭の光で表す。
+               .reading / .error より詳細度を高くするため、必ず2クラス指定で上書きする。 */
+            #vvradio-indicator.image {
+                background-color: transparent; box-shadow: none; opacity: 0.85;
+                background-size: contain; background-position: center; background-repeat: no-repeat;
+            }
+            #vvradio-indicator.image:hover { opacity: 1; }
+            /* 画像は背景色で状態を表せないため輪郭線で示す。
+               box-shadow は .reading のパルスアニメーションに上書きされるので outline を使う。 */
+            #vvradio-indicator.image.reading {
+                background-color: transparent; opacity: 1;
+                outline: 2px solid rgba(46, 182, 125, 0.9); outline-offset: 1px;
+            }
+            #vvradio-indicator.image.error {
+                background-color: transparent; opacity: 1; animation: none;
+                outline: 2px solid rgba(224, 30, 90, 0.95); outline-offset: 1px;
+                box-shadow: 0 0 14px rgba(224, 30, 90, 0.8);
+            }
+            /* キャラクター名の頭文字表示。画像の利用許諾が確認できないキャラクター向け。 */
+            #vvradio-indicator.text {
+                color: #ffffff; opacity: 0.85; overflow: hidden;
+                font-family: sans-serif; font-weight: 700; line-height: 1;
+                -webkit-user-select: none; user-select: none;
+            }
+            #vvradio-indicator.text:hover { opacity: 1; }
+            #vvradio-indicator.text.reading { background-color: #2eb67d; opacity: 1; }
+            #vvradio-indicator.text.error { background-color: #e01e5a; opacity: 1; animation: none; }
             @keyframes vvpulse {
                 0% { box-shadow: 0 0 0 0 rgba(46, 182, 125, 0.7); }
                 70% { box-shadow: 0 0 0 10px rgba(46, 182, 125, 0); }
