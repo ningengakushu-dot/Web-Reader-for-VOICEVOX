@@ -3,20 +3,35 @@ importScripts('constants.js');
 // 画面OCR読み上げのコンテキストメニューID
 const OCR_MENU_ID = "capture-ocr-read";
 
-// 拡張機能インストール時にコンテキストメニューを作成
+// 拡張機能のインストール／更新時にコンテキストメニューを作成する。
+// onInstalled は更新時にも発火し、既存メニューが残っていることがある。
+// 同一 id の create は "Cannot create item with duplicate id" で失敗するため、
+// 必ず removeAll してから作り直す（更新後にメニューが消える不具合の原因）。
 chrome.runtime.onInstalled.addListener(() => {
-    chrome.contextMenus.create({
-        id: "read-selected-text",
-        title: "選択したテキストをWeb Reader for VOICEVOXで読み上げ",
-        contexts: ["selection"]
-    });
-    // 選択できない文字（画像・PDF・Canvas等）向けのOCR読み上げ入口。
-    // PDFビューア等では表示されない場合があるため、ショートカットとツールバー
-    // アイコンのクリックからも同じ機能を起動できるようにしている。
-    chrome.contextMenus.create({
-        id: OCR_MENU_ID,
-        title: "画面をキャプチャしてOCR読み上げ（画像・PDF向け）",
-        contexts: ["page", "image", "video", "frame"]
+    chrome.contextMenus.removeAll(() => {
+        // コールバック内で lastError を読まないと未処理エラーになる
+        void chrome.runtime.lastError;
+        chrome.contextMenus.create({
+            id: "read-selected-text",
+            title: "選択したテキストをWeb Reader for VOICEVOXで読み上げ",
+            contexts: ["selection"]
+        }, () => {
+            if (chrome.runtime.lastError) {
+                console.warn("Background: コンテキストメニュー作成失敗:", chrome.runtime.lastError.message);
+            }
+        });
+        // 選択できない文字（画像・PDF・Canvas等）向けのOCR読み上げ入口。
+        // PDFビューア等では表示されない場合があるため、ショートカットとツールバー
+        // アイコンのクリックからも同じ機能を起動できるようにしている。
+        chrome.contextMenus.create({
+            id: OCR_MENU_ID,
+            title: "画面をキャプチャしてOCR読み上げ（画像・PDF向け）",
+            contexts: ["page", "image", "video", "frame"]
+        }, () => {
+            if (chrome.runtime.lastError) {
+                console.warn("Background: OCRメニュー作成失敗:", chrome.runtime.lastError.message);
+            }
+        });
     });
 });
 
@@ -426,13 +441,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return false;
 
         case "CHECK_CONNECTION":
-            fetch(`${VOICEVOX_BASE_URL}/version`)
+            fetchWithTimeout(`${VOICEVOX_BASE_URL}/version`, {}, VOICEVOX_FETCH_TIMEOUT_MS)
                 .then(res => sendResponse({ success: res.ok }))
                 .catch(err => sendResponse({ success: false, error: err.message }));
             return true;
 
         case "GET_SPEAKERS":
-            fetch(`${VOICEVOX_BASE_URL}/speakers`)
+            fetchWithTimeout(`${VOICEVOX_BASE_URL}/speakers`, {}, VOICEVOX_FETCH_TIMEOUT_MS)
                 .then(res => res.json())
                 .then(speakers => sendResponse({ success: true, speakers }))
                 .catch(err => sendResponse({ success: false, error: err.message }));
@@ -572,17 +587,36 @@ async function handleGenerateVoice(text, sendResponse) {
         // Offscreen への配信完了を確認してから成功応答を返す（無音失敗の可視化）
         await sendToOffscreen({ type: 'STOP_AUDIO' });
 
-        for (const chunk of chunks) {
-            await sendToOffscreen({
-                type: 'ENQUEUE_TEXT',
-                text: chunk,
-                settings
-            });
-        }
+        // 1文ずつ送ると、短い文では先頭の再生完了時にキューが空になり
+        // 読み上げ終了が早すぎるタイミングで通知される。まとめて渡す。
+        await sendToOffscreen({
+            type: 'ENQUEUE_TEXTS',
+            texts: chunks,
+            settings
+        });
         sendResponse({ success: true });
     } catch (err) {
         console.error("Background: 準備エラー:", err);
         sendResponse({ success: false, error: err.message });
+    }
+}
+
+/**
+ * 制限時間つきの fetch。VOICEVOXエンジンが応答しない場合に、
+ * 接続確認やキャラクター一覧の取得が終わらないまま固まるのを防ぐ。
+ */
+async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+        if (err.name === "AbortError") {
+            throw new Error(`VOICEVOXエンジンが応答しません（${Math.round(timeoutMs / 1000)}秒）`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
     }
 }
 

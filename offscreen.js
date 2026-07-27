@@ -19,8 +19,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.id !== chrome.runtime.id) return;
 
     switch (message.type) {
-        case 'ENQUEUE_TEXT':
-            enqueueText(message.text, message.settings);
+        case 'ENQUEUE_TEXTS':
+            enqueueTexts(message.texts, message.settings);
             sendResponse({ success: true });
             break;
         case 'STOP_AUDIO':
@@ -182,10 +182,16 @@ function scheduleOcrWorkerIdleRelease() {
 }
 
 /**
- * テキストを合成待ちキューに追加し、合成プロセスを開始する
+ * 分割済みのテキストをまとめて合成待ちキューに追加し、合成プロセスを開始する。
+ * 1文ずつ別メッセージで受け取ると、短い文では先頭の再生が終わった時点で
+ * キューが空になり、まだ後続が残っているのに読み上げ終了として通知してしまう
+ * （アイコンが途中で待機状態に戻る）。必ず全文をまとめて積む。
  */
-function enqueueText(text, settings) {
-    textQueue.push({ text, settings });
+function enqueueTexts(texts, settings) {
+    if (!Array.isArray(texts) || texts.length === 0) return;
+    for (const text of texts) {
+        textQueue.push({ text, settings });
+    }
     processSynthesis();
 }
 
@@ -225,6 +231,26 @@ async function processSynthesis() {
 }
 
 /**
+ * 制限時間つきの fetch。時間内に応答が無ければ中断して例外にする。
+ * VOICEVOXエンジンが落ちている・固まっている場合に、合成キューが
+ * 永久に詰まって以降の読み上げが一切できなくなるのを防ぐ。
+ */
+async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+        if (err.name === "AbortError") {
+            throw new Error(`VOICEVOXエンジンが応答しません（${Math.round(timeoutMs / 1000)}秒）`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
  * VOICEVOX APIを使用して音声を合成し、Blob URLを返す
  */
 async function generateVoiceBlob(text, settings) {
@@ -233,7 +259,8 @@ async function generateVoiceBlob(text, settings) {
     const speaker = Number(speakerId);
 
     const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
-    const queryResponse = await fetch(queryUrl, { method: "POST" });
+    const queryResponse = await fetchWithTimeout(
+        queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
     if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
 
     const queryJson = await queryResponse.json();
@@ -247,11 +274,11 @@ async function generateVoiceBlob(text, settings) {
     queryJson.pauseLengthScale = pauseLengthScale;
 
     const synthUrl = `${VOICEVOX_BASE_URL}/synthesis?speaker=${speaker}`;
-    const synthResponse = await fetch(synthUrl, {
+    const synthResponse = await fetchWithTimeout(synthUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(queryJson)
-    });
+    }, VOICEVOX_SYNTHESIS_TIMEOUT_MS);
     if (!synthResponse.ok) throw new Error(`Synthesis失敗(${synthResponse.status})`);
 
     const audioBlob = await synthResponse.blob();
