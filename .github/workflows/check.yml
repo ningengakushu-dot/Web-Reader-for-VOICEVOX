@@ -66,6 +66,31 @@ jobs:
             console.log("拡張機能ページの参照 OK");
           '
 
+      - name: ページ内でトップレベル宣言が衝突しないことの確認
+        run: |
+          # 同じページに読み込むスクリプトを連結して構文検査する。
+          # 別ファイルでも同じ const を宣言すると実行時に SyntaxError で
+          # ページ全体が動かなくなるため、CI で先に検出する。
+          node -e '
+            const fs = require("fs"), cp = require("child_process");
+            let ng = 0;
+            for (const page of ["offscreen.html", "capture.html", "options.html"]) {
+              const html = fs.readFileSync(page, "utf8");
+              const srcs = [...html.matchAll(/<script src="([^"]+)"/g)]
+                .map((m) => m[1]).filter((s) => !s.startsWith("vendor/"));
+              fs.writeFileSync(".tmp-merge.js", srcs.map((s) => fs.readFileSync(s, "utf8")).join("\n;\n"));
+              try {
+                cp.execSync("node --check .tmp-merge.js", { stdio: "pipe" });
+                console.log("OK  " + page);
+              } catch (e) {
+                console.error("NG  " + page + "\n" + e.stderr.toString());
+                ng++;
+              }
+            }
+            fs.unlinkSync(".tmp-merge.js");
+            process.exit(ng ? 1 : 0);
+          '
+
       - name: リモートコードを実行していないことの確認
         run: |
           # importScripts は同梱ファイルの読み込みに使うため、外部URLの場合だけを弾く。
