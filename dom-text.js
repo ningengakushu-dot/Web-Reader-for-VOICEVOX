@@ -38,6 +38,9 @@ const DOM_TEXT_FOREIGN_FRAME_RATIO = 0.25;
 const DOM_TEXT_IMAGE_DOMINANT_RATIO = 0.5;
 const DOM_TEXT_IMAGE_VS_TEXT_RATIO = 4;
 
+// 画像の代替テキストを読むのは、その画像がこの割合以上選択範囲に入っているときだけ。
+const DOM_TEXT_LABEL_MIN_INSIDE_RATIO = 0.6;
+
 // 読み上げ対象にしないタグ
 const DOM_TEXT_SKIP_TAGS = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TITLE", "META", "LINK",
@@ -56,6 +59,8 @@ const DOM_TEXT_BLOCK_TAGS = new Set([
 // 祖先を遡って呼ぶと無視できないコストになる。1回の抽出の間だけ結果を覚えておく
 // （抽出中にページのスタイルが変わることは想定しない）。
 let styleCache = null;
+// 祖先の overflow による切り取り枠も同様に1回の抽出の間だけ覚えておく
+let clipBoxCache = null;
 
 function cachedStyle(el) {
     if (!styleCache) {
@@ -92,6 +97,15 @@ function rectIntersectionArea(a, b) {
 
 function rectArea(r) {
     return Math.max(0, r.width) * Math.max(0, r.height);
+}
+
+// その要素が選択範囲に「しっかり入っている」か。
+// 代替テキストは要素全体を表す文言なので、端に少し掛かっただけで採用すると
+// 範囲外の内容を丸ごと読み上げることになる。
+function isMostlyInside(box, sel, overlap) {
+    const area = rectArea(box);
+    if (area <= 0) return false;
+    return overlap / area >= DOM_TEXT_LABEL_MIN_INSIDE_RATIO;
 }
 
 // フレームのオフセットを足して、最上位ビューポート座標へ変換する
@@ -261,6 +275,40 @@ function blockAncestorOf(node) {
     return null;
 }
 
+// 祖先の overflow による切り取りを行矩形に反映する。
+//
+// 折りたたみ（max-height:0 + overflow:hidden）やカルーセルでは、画面に出ていない
+// 文字の行矩形が、はみ出した位置＝別の内容の上に重なって返ってくる。そのまま扱うと
+// 「画面に無い文章が読み上げられる」ことになるため、実際に見えている部分だけに絞る。
+function clipRectsByAncestorOverflow(rects, el, offset) {
+    // 同じ親を持つテキストノードが多数あるため、祖先の切り取り枠は覚えておく
+    let boxes = clipBoxCache ? clipBoxCache.get(el) : null;
+    if (!boxes) {
+        boxes = [];
+        for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+            const style = cachedStyle(node);
+            if (style && style.overflow && style.overflow !== "visible") {
+                boxes.push(offsetRect(node.getBoundingClientRect(), offset));
+            }
+        }
+        if (clipBoxCache) clipBoxCache.set(el, boxes);
+    }
+    let clipped = rects;
+    for (const box of boxes) {
+        if (!clipped.length) break;
+        clipped = clipped
+            .map((r) => {
+                const left = Math.max(r.left, box.left);
+                const top = Math.max(r.top, box.top);
+                const right = Math.min(r.right, box.right);
+                const bottom = Math.min(r.bottom, box.bottom);
+                return { left, top, right, bottom, width: right - left, height: bottom - top };
+            })
+            .filter((r) => r.width > 0.5 && r.height > 0.5);
+    }
+    return clipped;
+}
+
 // テキストノードのうち、選択矩形に入っている部分だけを取り出す。
 // 行矩形との重なりで粗く判定し、境界にかかった行だけ文字単位で切り出す。
 function clipTextNode(node, sel, offset, doc) {
@@ -270,9 +318,15 @@ function clipTextNode(node, sel, offset, doc) {
 
     const range = doc.createRange();
     range.selectNodeContents(node);
-    const lineRects = Array.from(range.getClientRects())
+    const rawRects = Array.from(range.getClientRects())
         .map((r) => offsetRect(r, offset))
         .filter((r) => rectArea(r) > 0);
+    if (!rawRects.length) return empty;
+
+    // 祖先の overflow で切り取られて画面に出ていない部分を落とす。
+    // これをしないと、折りたたみやカルーセルの中の見えない文字が
+    // 別の内容の上に重なった矩形として拾われてしまう。
+    const lineRects = clipRectsByAncestorOverflow(rawRects, node.parentElement, offset);
     if (!lineRects.length) return empty;
 
     let fullyInside = 0;
@@ -415,10 +469,13 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
             }
 
             if (overlap > 0 && (el.tagName === "CANVAS" || el.tagName === "SVG" || el.tagName === "VIDEO")) {
-                // 中身が文字かどうかは分からない。読めない面積として数える。
-                const label = imageAltOf(el);
-                if (label) out.units.push({ text: label, rect: box, kind: "label" });
-                else out.opaqueArea += overlap;
+                // 中身が文字かどうかは分からないので、代替テキストの有無に関わらず
+                // 「文字として取り出せていない面積」として数える。
+                out.opaqueArea += overlap;
+                if (isMostlyInside(box, sel, overlap)) {
+                    const label = imageAltOf(el);
+                    if (label) out.units.push({ text: label, rect: box, kind: "label" });
+                }
                 node = skipSubtree(walker);
                 continue;
             }
@@ -428,9 +485,17 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
             // （実測: Wikipedia の infobox が丸ごと落ちた）、安全に飛ばせないため。
             if (el.tagName === "IMG" && overlap > 0) {
                 if (isElementReadable(el)) {
-                    const alt = imageAltOf(el);
-                    if (alt) out.units.push({ text: alt, rect: box, kind: "alt" });
-                    else out.opaqueArea += overlap;
+                    // 代替テキストの有無に関わらず、画像は「文字として取り出せていない
+                    // 面積」として数える。代替テキストがあっても、それが画像の中身を
+                    // 表しているとは限らないため（広告バナー等）。
+                    out.opaqueArea += overlap;
+                    // 代替テキストを読むのは、その画像が選択範囲にしっかり入っている
+                    // ときだけにする。端に少し掛かっただけの隣の広告の文言を丸ごと
+                    // 読み上げてしまう事故を防ぐ。
+                    if (isMostlyInside(box, sel, overlap)) {
+                        const alt = imageAltOf(el);
+                        if (alt) out.units.push({ text: alt, rect: box, kind: "alt" });
+                    }
                 }
                 node = skipSubtree(walker);
                 continue;
@@ -519,11 +584,13 @@ function collectRegionText(rect, options = {}) {
     const selArea = rectArea(sel);
     const out = { units: [], foreignArea: 0, opaqueArea: 0, textArea: 0 };
     styleCache = new Map();
+    clipBoxCache = new Map();
 
     try {
         collectFromDocument(document.body || document.documentElement, document, sel, null, options, out);
     } catch (err) {
         styleCache = null;
+        clipBoxCache = null;
         return {
             ok: false,
             text: "",
@@ -534,6 +601,7 @@ function collectRegionText(rect, options = {}) {
     }
 
     styleCache = null;
+    clipBoxCache = null;
     const text = joinTextUnits(out.units);
     const chars = text.replace(/\s/g, "").length;
     // 画像同士が重なると面積が二重に積まれるため、選択範囲を超えないよう抑える
