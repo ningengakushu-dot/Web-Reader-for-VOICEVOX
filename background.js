@@ -128,14 +128,15 @@ async function captureAndRecognizeRegion(request, tab) {
     await setupOffscreen();
     // offscreen ドキュメントは chrome.storage を参照できないため、
     // ルビ除去設定はここで読み取ってメッセージに載せて渡す。
-    const { ocrRemoveRuby } = await chrome.storage.local.get(OCR_SETTING_DEFAULTS);
+    const { ocrRemoveRuby, ocrMangaMode } = await chrome.storage.local.get(OCR_SETTING_DEFAULTS);
     await sendToOffscreen({
         type: "OCR_RECOGNIZE",
         dataUrl,
         rect: request.rect,
         viewportWidth: request.viewportWidth,
         tabId: tab.id,
-        removeRuby: ocrRemoveRuby === true
+        removeRuby: ocrRemoveRuby === true,
+        manga: ocrMangaMode === true
     });
 }
 

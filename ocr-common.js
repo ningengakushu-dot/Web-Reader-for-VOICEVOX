@@ -471,9 +471,431 @@ function markOcrParagraphBreaks(items, orientation, glyphSize) {
     return out;
 }
 
+// ===== 漫画モード：コマの読み順に並べ替える =====
+//
+// 漫画は「右上のコマから左下のコマへ、コマの中では右上の吹き出しから左下へ、
+// 吹き出しの中では右の列から左の列へ」という順で読む。Tesseract は紙面の
+// レイアウトを知らないため、この順序では出力してくれない。文字認識そのものは
+// 正しくても、並びが崩れると台詞が入れ替わって意味が通らなくなる。
+//
+// 解き方は、紙面を余白で再帰的に切り分ける方法（XY-cut）を漫画の向きに合わせたもの。
+//   1. 全体を横切る横方向の余白があれば、そこで上下に切り、上を先に読む（コマの段）
+//   2. なければ縦方向の余白で左右に切り、右を先に読む（同じ段の中のコマ）
+//   3. どちらの余白も無ければ同じ吹き出しの中なので、縦書きなら右の列から読む
+// 余白は常に「最も広いところ」で切るため、コマの間 → 吹き出しの間 → 列の間、と
+// 大きい構造から順に分かれていく。
+
+// ===== 吹き出しの検出 =====
+//
+// 漫画のページは面積の大半が絵で、文字は吹き出しの中にしかない。ページ全体を
+// そのまま文字認識にかけると、髪・トーン・輪郭線から実在しない文字が作られる
+// （実機で「ずっと謎の発音をする」状態になった）。
+//
+// 吹き出しと説明の枠は「線で囲まれた白い領域」として現れる。紙の白を連結成分と
+// して数え上げ、外周に接しない・つぶれていない・中に文字らしい黒がある成分だけを
+// 取り出せば、絵を読ませずに済む。
+const OCR_MANGA_BALLOON_SCAN_MAX = 1000;   // 走査用に縮小する長辺の画素数
+const OCR_MANGA_BALLOON_PAPER_LUM = 128;   // これ以上の輝度を紙（白）とみなす
+const OCR_MANGA_BALLOON_MIN_SIDE = 12;     // 吹き出しと認める最小の辺（走査画像）
+const OCR_MANGA_BALLOON_MAX_AREA = 0.4;    // 画面に対する面積の上限（背景の白を除く）
+const OCR_MANGA_BALLOON_MIN_FILL = 0.5;    // 外接矩形に対する白の占有率の下限
+const OCR_MANGA_BALLOON_MIN_INK = 0.02;    // 中の黒（文字）の割合の下限
+const OCR_MANGA_BALLOON_MAX_INK = 0.6;     // 同上限（黒すぎる＝絵）
+const OCR_MANGA_BALLOON_MAX_COUNT = 40;    // これを超えたら検出失敗とみなす
+const OCR_MANGA_BALLOON_PAD = 3;           // 切り出しに付ける余白（走査画像）
+const OCR_MANGA_BALLOON_MIN_GLYPHS = 2;    // 吹き出しと認めるのに必要な文字の数
+const OCR_MANGA_BALLOON_MAX_OVERLAP = 0.5; // これ以上重なる候補は同じ吹き出しとみなす
+
+function rectArea2(b) { return Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0); }
+
+// 白い領域の中身が「文字」かどうかを見る。
+//
+// 絵の線が囲んだ白い隙間も「線で囲まれた白」なので候補に挙がってしまう
+// （実測: 1ページで真の吹き出し7個に対し誤検出が13個）。文字は、大きさの揃った
+// 塊がいくつも並ぶという際立った性質を持つので、そこで見分ける。
+// 絵の線は細長い塊になり、網点は小さすぎるため、どちらも文字とは見なされない。
+const OCR_MANGA_GLYPH_MIN_RATIO = 0.10; // 短辺に対する文字の最小の大きさ
+const OCR_MANGA_GLYPH_MAX_RATIO = 0.75; // 同 最大
+const OCR_MANGA_GLYPH_MIN_FILL = 0.15;  // 外接矩形に対する黒の占有率（細い線を除く）
+const OCR_MANGA_GLYPH_MAX_ASPECT = 4;   // 縦横比（細長い線を除く）
+
+function countMangaGlyphs(paper, W, box, limit) {
+    const inset = 2;
+    const x0 = box.x0 + inset;
+    const y0 = box.y0 + inset;
+    const x1 = box.x1 - inset;
+    const y1 = box.y1 - inset;
+    const bw = x1 - x0;
+    const bh = y1 - y0;
+    if (bw < 4 || bh < 4) return 0;
+    const short = Math.min(bw, bh);
+    const minSide = Math.max(2, short * OCR_MANGA_GLYPH_MIN_RATIO);
+    const maxSide = short * OCR_MANGA_GLYPH_MAX_RATIO;
+    const seen = new Uint8Array(bw * bh);
+    const stack = new Int32Array(bw * bh);
+    let glyphs = 0;
+    for (let s = 0; s < seen.length; s++) {
+        if (seen[s]) continue;
+        const sx = s % bw;
+        const sy = (s - sx) / bw;
+        if (paper[(y0 + sy) * W + (x0 + sx)]) { seen[s] = 1; continue; }
+        let top = 0;
+        stack[top++] = s;
+        seen[s] = 1;
+        let gx0 = sx, gy0 = sy, gx1 = sx + 1, gy1 = sy + 1, area = 0;
+        let touches = false;
+        while (top > 0) {
+            const at = stack[--top];
+            const x = at % bw;
+            const y = (at - x) / bw;
+            area++;
+            if (x < gx0) gx0 = x;
+            if (y < gy0) gy0 = y;
+            if (x >= gx1) gx1 = x + 1;
+            if (y >= gy1) gy1 = y + 1;
+            // 外周に接する黒は吹き出しの輪郭線であり、文字ではない
+            if (x === 0 || y === 0 || x === bw - 1 || y === bh - 1) touches = true;
+            const push = (nx, ny) => {
+                if (nx < 0 || ny < 0 || nx >= bw || ny >= bh) return;
+                const ni = ny * bw + nx;
+                if (seen[ni] || paper[(y0 + ny) * W + (x0 + nx)]) return;
+                seen[ni] = 1;
+                stack[top++] = ni;
+            };
+            push(x - 1, y); push(x + 1, y); push(x, y - 1); push(x, y + 1);
+        }
+        if (touches) continue;
+        const gw = gx1 - gx0;
+        const gh = gy1 - gy0;
+        if (gw < minSide && gh < minSide) continue;
+        if (gw > maxSide || gh > maxSide) continue;
+        if (area < gw * gh * OCR_MANGA_GLYPH_MIN_FILL) continue;
+        if (gw > gh * OCR_MANGA_GLYPH_MAX_ASPECT || gh > gw * OCR_MANGA_GLYPH_MAX_ASPECT) continue;
+        glyphs++;
+        if (glyphs >= limit) break;
+    }
+    return glyphs;
+}
+
+// 画像を縮小し、紙（白）と絵・文字（黒）の2値配列を作る
+function toMangaScanMask(canvas, maxSide) {
+    const w = canvas.width;
+    const h = canvas.height;
+    if (!(w > 0 && h > 0)) return null;
+    // 縮小に canvas の平均化を使うと、吹き出しやコマの枠線（1〜2画素）が薄まって
+    // 消え、囲いが破れて白がつながってしまう。区画内の最も暗い画素を残す縮小に
+    // することで、細い線が残る。
+    let data;
+    try {
+        const src = document.createElement("canvas");
+        src.width = w;
+        src.height = h;
+        const sctx = src.getContext("2d", { willReadFrequently: true });
+        sctx.drawImage(canvas, 0, 0);
+        data = sctx.getImageData(0, 0, w, h).data;
+    } catch (e) {
+        return null;
+    }
+    const step = Math.max(1, Math.ceil(Math.max(w, h) / maxSide));
+    const W = Math.max(1, Math.ceil(w / step));
+    const H = Math.max(1, Math.ceil(h / step));
+    const lum = new Uint8Array(W * H).fill(255);
+    for (let y = 0; y < h; y++) {
+        const oy = ((y / step) | 0) * W;
+        for (let x = 0; x < w; x++) {
+            const p = (y * w + x) * 4;
+            const v = (data[p] * 299 + data[p + 1] * 587 + data[p + 2] * 114) / 1000;
+            const at = oy + ((x / step) | 0);
+            if (v < lum[at]) lum[at] = v;
+        }
+    }
+    return { lum, W, H, scale: 1 / step };
+}
+
+// 吹き出し・説明枠の矩形を元画像の座標で返す。見つからなければ null。
+function detectMangaBalloons(canvas) {
+    const scan = toMangaScanMask(canvas, OCR_MANGA_BALLOON_SCAN_MAX);
+    if (!scan) return null;
+    const { lum, W, H, scale } = scan;
+    const paper = new Uint8Array(W * H);
+    for (let i = 0; i < paper.length; i++) paper[i] = lum[i] >= OCR_MANGA_BALLOON_PAPER_LUM ? 1 : 0;
+
+    const label = new Int32Array(W * H).fill(-1);
+    const stack = new Int32Array(W * H);
+    const boxes = [];
+    const maxArea = W * H * OCR_MANGA_BALLOON_MAX_AREA;
+
+    for (let seed = 0; seed < paper.length; seed++) {
+        if (!paper[seed] || label[seed] >= 0) continue;
+        const id = boxes.length;
+        let top = 0;
+        stack[top++] = seed;
+        label[seed] = id;
+        let x0 = W, y0 = H, x1 = 0, y1 = 0, area = 0, touchesEdge = false;
+        while (top > 0) {
+            const at = stack[--top];
+            const x = at % W;
+            const y = (at - x) / W;
+            area++;
+            if (x < x0) x0 = x;
+            if (y < y0) y0 = y;
+            if (x >= x1) x1 = x + 1;
+            if (y >= y1) y1 = y + 1;
+            if (x === 0 || y === 0 || x === W - 1 || y === H - 1) touchesEdge = true;
+            if (x > 0 && paper[at - 1] && label[at - 1] < 0) { label[at - 1] = id; stack[top++] = at - 1; }
+            if (x + 1 < W && paper[at + 1] && label[at + 1] < 0) { label[at + 1] = id; stack[top++] = at + 1; }
+            if (y > 0 && paper[at - W] && label[at - W] < 0) { label[at - W] = id; stack[top++] = at - W; }
+            if (y + 1 < H && paper[at + W] && label[at + W] < 0) { label[at + W] = id; stack[top++] = at + W; }
+        }
+        // 外周に届く白は紙の地。線で閉じられていないので吹き出しではない。
+        if (touchesEdge) continue;
+        const bw = x1 - x0;
+        const bh = y1 - y0;
+        if (bw < OCR_MANGA_BALLOON_MIN_SIDE || bh < OCR_MANGA_BALLOON_MIN_SIDE) continue;
+        if (area > maxArea) continue;
+        // つぶれた細長い形・複雑な形は絵の一部（服の白など）である可能性が高い
+        if (area < bw * bh * OCR_MANGA_BALLOON_MIN_FILL) continue;
+        // 中に文字らしい黒があるか
+        let ink = 0;
+        for (let y = y0; y < y1; y++) {
+            for (let x = x0; x < x1; x++) if (!paper[y * W + x]) ink++;
+        }
+        const inkRatio = ink / (bw * bh);
+        if (inkRatio < OCR_MANGA_BALLOON_MIN_INK || inkRatio > OCR_MANGA_BALLOON_MAX_INK) continue;
+        // 中身が文字らしいか（大きさの揃った塊が複数あるか）で、絵の隙間を除く
+        if (countMangaGlyphs(paper, W, { x0, y0, x1, y1 }, OCR_MANGA_BALLOON_MIN_GLYPHS)
+            < OCR_MANGA_BALLOON_MIN_GLYPHS) continue;
+        boxes.push({ x0, y0, x1, y1 });
+    }
+
+    // コマの中の白地も「線で囲まれた白い領域」なので候補に挙がる。そのまま読むと
+    // コマ全体を認識してしまい、絵から文字が作られる。吹き出しを内側に含む候補は
+    // コマ側なので落とす（吹き出しがコマを含むことはない）。
+    // 重なり合う候補は、絵の線が作った大きめの領域が本物の吹き出しを巻き込んだもの。
+    // 小さい方（＝吹き出しそのもの）を残すと、同じ台詞を二度読む事故も防げる。
+    const kept = [];
+    for (const cand of boxes.slice().sort((x, y) => rectArea2(x) - rectArea2(y))) {
+        const dup = kept.some((k) => {
+            const ow = Math.min(k.x1, cand.x1) - Math.max(k.x0, cand.x0);
+            const oh = Math.min(k.y1, cand.y1) - Math.max(k.y0, cand.y0);
+            if (ow <= 0 || oh <= 0) return false;
+            return ow * oh >= Math.min(rectArea2(k), rectArea2(cand)) * OCR_MANGA_BALLOON_MAX_OVERLAP;
+        });
+        if (!dup) kept.push(cand);
+    }
+    if (!kept.length || kept.length > OCR_MANGA_BALLOON_MAX_COUNT) return null;
+    boxes.length = 0;
+    boxes.push(...kept);
+    const inv = 1 / scale;
+    const pad = OCR_MANGA_BALLOON_PAD;
+    return boxes.map((b) => ({
+        x0: Math.max(0, (b.x0 - pad) * inv),
+        y0: Math.max(0, (b.y0 - pad) * inv),
+        x1: Math.min(canvas.width, (b.x1 + pad) * inv),
+        y1: Math.min(canvas.height, (b.y1 + pad) * inv)
+    }));
+}
+
+// ===== コマ割りの検出 =====
+//
+// 吹き出しの座標だけでは、どこがコマの境界なのか分からない。
+// 例えば「右にぶち抜きの縦長コマ、左を上下2段に割る」構図では、台詞の座標には
+// 上下の隙間があるので横に切ってしまうが、実際には右のコマが上下をまたいでいる
+// ため、横に切ってはいけない（実測: この構図で読み順が A→C→D→B→E と崩れた）。
+//
+// コマの境界は紙面の余白（ガター）として画像に現れる。そこで、実際の画像から
+// 「その領域を端から端まで貫く白い帯」を探して再帰的に切り分ける。
+// 貫く帯が無ければ、そこは1つのコマである。
+
+const OCR_MANGA_PANEL_SCAN_MAX = 700;   // 走査用に縮小する長辺の画素数
+const OCR_MANGA_PANEL_INK_LUM = 200;    // これ未満の輝度を「絵・文字がある」とみなす
+const OCR_MANGA_PANEL_INK_RATIO = 0.01; // 行/列のこの割合未満なら余白とみなす
+const OCR_MANGA_PANEL_MIN_GUTTER = 0.012; // 余白と認める帯の幅（短辺に対する比）
+const OCR_MANGA_PANEL_MIN_SIDE = 0.06;    // コマと認める最小の辺（短辺に対する比）
+const OCR_MANGA_PANEL_MAX_DEPTH = 8;
+
+// 領域内の各行・各列の「絵がある画素数」を数え、貫く余白の帯を返す
+function findMangaGutter(ink, W, box, minGutter) {
+    const scan = (isRow) => {
+        const lo = isRow ? box.y0 : box.x0;
+        const hi = isRow ? box.y1 : box.x1;
+        const span = (isRow ? box.x1 - box.x0 : box.y1 - box.y0);
+        const limit = Math.max(1, Math.floor(span * OCR_MANGA_PANEL_INK_RATIO));
+        const runs = [];
+        let start = -1;
+        for (let i = lo; i < hi; i++) {
+            let count = 0;
+            for (let j = (isRow ? box.x0 : box.y0); j < (isRow ? box.x1 : box.y1); j++) {
+                if (ink[isRow ? i * W + j : j * W + i]) {
+                    count++;
+                    if (count > limit) break;
+                }
+            }
+            const blank = count <= limit;
+            if (blank && start < 0) start = i;
+            if (!blank && start >= 0) { runs.push([start, i]); start = -1; }
+        }
+        if (start >= 0) runs.push([start, hi]);
+        // 端に接する余白は外側の余白であり、コマの境界ではない
+        let best = null;
+        for (const [a, b] of runs) {
+            if (a <= lo || b >= hi) continue;
+            if (b - a < minGutter) continue;
+            if (!best || b - a > best[1] - best[0]) best = [a, b];
+        }
+        return best;
+    };
+    // 漫画は「段」が先。横に貫く余白があればそこで上下に切る。
+    const row = scan(true);
+    if (row) return { axis: "y", at: (row[0] + row[1]) / 2 };
+    const col = scan(false);
+    if (col) return { axis: "x", at: (col[0] + col[1]) / 2 };
+    return null;
+}
+
+// 画像からコマを読み順（右上→左下）に並べて返す。
+// 切れ目が見つからない場合は、画像全体を1コマとして返す。
+function detectMangaPanels(canvas) {
+    const scan = toMangaScanMask(canvas, OCR_MANGA_PANEL_SCAN_MAX);
+    if (!scan) return null;
+    const { lum, W, H, scale } = scan;
+    const ink = new Uint8Array(W * H);
+    for (let i = 0; i < ink.length; i++) ink[i] = lum[i] < OCR_MANGA_PANEL_INK_LUM ? 1 : 0;
+
+    const short = Math.min(W, H);
+    const minGutter = Math.max(2, Math.round(short * OCR_MANGA_PANEL_MIN_GUTTER));
+    const minSide = Math.max(4, Math.round(short * OCR_MANGA_PANEL_MIN_SIDE));
+    const panels = [];
+    const split = (box, depth) => {
+        const cut = (depth >= OCR_MANGA_PANEL_MAX_DEPTH
+            || box.x1 - box.x0 < minSide * 2 || box.y1 - box.y0 < minSide * 2)
+            ? null
+            : findMangaGutter(ink, W, box, minGutter);
+        if (!cut) { panels.push(box); return; }
+        if (cut.axis === "y") {
+            // 上の段を先に読む
+            split({ ...box, y1: cut.at }, depth + 1);
+            split({ ...box, y0: cut.at }, depth + 1);
+        } else {
+            // 右のコマを先に読む
+            split({ ...box, x0: cut.at }, depth + 1);
+            split({ ...box, x1: cut.at }, depth + 1);
+        }
+    };
+    split({ x0: 0, y0: 0, x1: W, y1: H }, 0);
+    if (panels.length <= 1) return null;
+    // 元の画像の座標系に戻す
+    const inv = 1 / scale;
+    return panels.map((p) => ({
+        x0: p.x0 * inv, y0: p.y0 * inv, x1: p.x1 * inv, y1: p.y1 * inv
+    }));
+}
+
+// 切れ目とみなす余白の最小幅（文字サイズに対する比）。これ未満の隙間では切らない。
+// 同じ吹き出しの中の列間（実測で文字サイズの0.2〜0.4倍）で切ってしまわないための下限。
+const OCR_MANGA_MIN_GAP_RATIO = 0.5;
+// 読み上げに「間」を入れる、吹き出しどうしの距離（文字サイズに対する比）
+const OCR_MANGA_PAUSE_GAP_RATIO = 1.5;
+
+// 矩形の集合を軸に射影し、最も広い空白を見つけて2つに分ける。
+// 分けられない場合は null。
+function findMangaCut(items, axis, minGap) {
+    const lo = axis === "y" ? (b) => b.y0 : (b) => b.x0;
+    const hi = axis === "y" ? (b) => b.y1 : (b) => b.x1;
+    const sorted = items.slice().sort((a, b) => lo(a.bbox) - lo(b.bbox));
+    let best = null;
+    let reach = hi(sorted[0].bbox);
+    for (let i = 1; i < sorted.length; i++) {
+        const gap = lo(sorted[i].bbox) - reach;
+        // 全体を貫く余白でなければコマの境界ではない（reach を越える要素があると貫かない）
+        if (gap >= minGap && (!best || gap > best.gap)) best = { gap, index: i };
+        reach = Math.max(reach, hi(sorted[i].bbox));
+    }
+    if (!best) return null;
+    return { first: sorted.slice(0, best.index), second: sorted.slice(best.index) };
+}
+
+// 漫画の読み順に並べ替える。orientation は吹き出しの中の並びに使う。
+function orderMangaItems(items, orientation, minGap) {
+    if (items.length <= 1) return items.slice();
+    // 1. コマの段（横方向の余白）。上の段を先に読む。
+    const rows = findMangaCut(items, "y", minGap);
+    if (rows) {
+        return orderMangaItems(rows.first, orientation, minGap)
+            .concat(orderMangaItems(rows.second, orientation, minGap));
+    }
+    // 2. 同じ段の中のコマ・吹き出し（縦方向の余白）。右から左へ読む。
+    const cols = findMangaCut(items, "x", minGap);
+    if (cols) {
+        return orderMangaItems(cols.second, orientation, minGap)
+            .concat(orderMangaItems(cols.first, orientation, minGap));
+    }
+    // 3. 切れ目が無い＝同じ吹き出しの中。縦書きは右の列から、横書きは上の行から。
+    return items.slice().sort((a, b) => (orientation === "vertical"
+        ? b.bbox.x1 - a.bbox.x1 || a.bbox.y0 - b.bbox.y0
+        : a.bbox.y0 - b.bbox.y0 || b.bbox.x1 - a.bbox.x1));
+}
+
+// 漫画モードの行の組み立て。読み順に並べ替えたうえで、離れた吹き出しの間には
+// 空行を入れる（normalizeOcrText が「間」に変える）。
+function buildMangaLines(lines, orientation, glyphSize, panels) {
+    const usable = lines.filter((line) => line.bbox);
+    // 座標が取れない行が混じる場合は並べ替えを行わない（順序を壊さないため）
+    if (usable.length !== lines.length || usable.length < 2 || !(glyphSize > 0)) {
+        return lines.map((line) => line.text);
+    }
+    const ordered = arrangeMangaItems(lines, orientation, glyphSize * OCR_MANGA_MIN_GAP_RATIO, panels);
+    const pauseGap = glyphSize * OCR_MANGA_PAUSE_GAP_RATIO;
+    const out = [];
+    for (let i = 0; i < ordered.length; i++) {
+        out.push(ordered[i].text);
+        if (i === ordered.length - 1) continue;
+        const a = ordered[i].bbox;
+        const b = ordered[i + 1].bbox;
+        // 矩形どうしの隙間（重なっていれば0）
+        const dx = Math.max(0, Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1));
+        const dy = Math.max(0, Math.max(a.y0, b.y0) - Math.min(a.y1, b.y1));
+        if (Math.hypot(dx, dy) > pauseGap) out.push("");
+    }
+    return out;
+}
+
+// 矩形をコマの読み順に並べる。コマ割りが分かっていればコマ単位に振り分けてから並べる。
+function arrangeMangaItems(items, orientation, minGap, panels) {
+    let ordered;
+    if (panels && panels.length > 1) {
+        // コマごとに振り分け、コマの読み順どおりに並べる。
+        // どのコマにも入らない行（欄外の見出し・効果音など）は最も近いコマに寄せる。
+        const groups = panels.map(() => []);
+        for (const item of items) {
+            const cx = (item.bbox.x0 + item.bbox.x1) / 2;
+            const cy = (item.bbox.y0 + item.bbox.y1) / 2;
+            let at = -1;
+            let bestDist = Infinity;
+            for (let i = 0; i < panels.length; i++) {
+                const p = panels[i];
+                if (cx >= p.x0 && cx < p.x1 && cy >= p.y0 && cy < p.y1) { at = i; break; }
+                const dx = Math.max(p.x0 - cx, 0, cx - p.x1);
+                const dy = Math.max(p.y0 - cy, 0, cy - p.y1);
+                const d = Math.hypot(dx, dy);
+                if (d < bestDist) { bestDist = d; at = i; }
+            }
+            groups[at].push(item);
+        }
+        ordered = [];
+        for (const group of groups) {
+            if (group.length) ordered = ordered.concat(orderMangaItems(group, orientation, minGap));
+        }
+    } else {
+        ordered = orderMangaItems(items, orientation, minGap);
+    }
+    return ordered;
+}
+
 // blocks からテキストを再構成する（tesseract と同じ: 単語をスペース、行を改行で連結）。
 // orientation と glyphSize を渡した場合は、段落の切れ目に空行を差し込む。
-function buildTextFromBlocks(blocks, orientation, glyphSize) {
+// manga が true のときは、代わりに漫画のコマ順へ並べ替える。
+function buildTextFromBlocks(blocks, orientation, glyphSize, manga, panels) {
     const lines = [];
     for (const block of (blocks || [])) {
         for (const par of (block.paragraphs || [])) {
@@ -485,6 +907,7 @@ function buildTextFromBlocks(blocks, orientation, glyphSize) {
             }
         }
     }
+    if (manga) return buildMangaLines(lines, orientation, glyphSize, panels).join("\n");
     if (!orientation) return lines.map((line) => line.text).join("\n");
     return markOcrParagraphBreaks(lines, orientation, glyphSize).join("\n");
 }
@@ -944,8 +1367,84 @@ async function resolveOcrOrientation(grayCanvas, workerProvider) {
 // options.removeRuby が true の場合、ルビ（ふりがな）を優先して読む処理を行う
 // （ふりがなの付いた漢字をルビの読みに差し替え、読めないルビは捨てる）。
 // 戻り値は { text, confidence }（text は処理後の生テキスト。整形は呼び出し側で行う）。
+// 吹き出しの中身が「読み上げる価値のある文字」かどうか。
+// 絵を誤って吹き出しと判定してしまった場合、認識結果は日本語にならないか、
+// 確信度が極端に低い。ここで落とさないと意味のない音が読み上げられる。
+const OCR_MANGA_TEXT_RE = /[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]/;
+const OCR_MANGA_SHORT_CONFIDENCE = 70;
+// 吹き出しの縦横比がこれを超えたら横書きとみなす
+const OCR_MANGA_HORIZONTAL_RATIO = 1.8;
+
+function isMangaSpeech(text, confidence) {
+    const body = (text || "").replace(/\s/g, "");
+    if (!body || !OCR_MANGA_TEXT_RE.test(body)) return false;
+    // 絵を吹き出しと誤検出した場合、認識の確信度は低いところに落ちる
+    if (confidence < OCR_CONFIDENCE_ACCEPT) return false;
+    // 1文字だけの吹き出し（「あ」「え？」等）は実際に多いが、絵の誤検出とも
+    // 紛らわしい。短いものは確信度で足切りする。
+    return body.length >= 2 || confidence >= OCR_MANGA_SHORT_CONFIDENCE;
+}
+
+// 吹き出しの中だけを、コマの読み順で認識する。
+// 吹き出しを見つけられなかった場合は null を返し、従来どおりページ全体を認識する。
+async function recognizeMangaPage(sourceCanvas, workerProvider, options) {
+    const gray = toGrayscale(sourceCanvas);
+    const balloons = detectMangaBalloons(gray);
+    if (!balloons || balloons.length < 2) return null;
+
+    const panels = detectMangaPanels(gray);
+    // 並べ替えの「近い／遠い」の基準は吹き出しの大きさから取る
+    const sides = balloons.map((b) => Math.min(b.x1 - b.x0, b.y1 - b.y0)).sort((a, b) => a - b);
+    const minGap = sides[Math.floor(sides.length / 2)] * 0.3;
+    const items = balloons.map((b) => ({ bbox: b }));
+    const ordered = arrangeMangaItems(items, "vertical", minGap, panels);
+
+    // ページ全体で使える精錬時間を吹き出しの数で分け合う
+    const perBalloonBudget = Math.max(600, Math.floor(OCR_REFINE_TIME_BUDGET_MS / ordered.length));
+    const parts = [];
+    let confidenceSum = 0;
+    let confidenceCount = 0;
+    for (const item of ordered) {
+        const b = item.bbox;
+        const w = Math.round(b.x1 - b.x0);
+        const h = Math.round(b.y1 - b.y0);
+        if (w < 1 || h < 1) continue;
+        const crop = cropOcrCanvas(sourceCanvas, Math.round(b.x0), Math.round(b.y0), w, h, 1);
+        // 吹き出しごとに、通常どおりの認識（組版方向の判定・拡大再認識・融合・
+        // 辞書リランク・ルビ処理）をそのまま適用する。範囲が小さいぶん速い。
+        // 日本の漫画の台詞は縦書きが基本。明らかに横長の吹き出しだけ横書き扱いにする。
+        const forceOrientation = w > h * OCR_MANGA_HORIZONTAL_RATIO ? "horizontal" : "vertical";
+        const one = await recognizeWithOrientation(crop, workerProvider,
+            { removeRuby: options.removeRuby, manga: false, forceOrientation, refineBudgetMs: perBalloonBudget });
+        if (!isMangaSpeech(one.text, one.confidence)) continue;
+        parts.push(one.text.trim());
+        confidenceSum += one.confidence;
+        confidenceCount++;
+    }
+    if (!parts.length) return null;
+    // 吹き出しの区切りは空行にする（normalizeOcrText が「間」に変える）
+    return {
+        text: parts.join("\n\n"),
+        confidence: confidenceCount ? confidenceSum / confidenceCount : 0
+    };
+}
+
 async function recognizeWithOrientation(sourceCanvas, workerProvider, options = {}) {
     const removeRuby = !!options.removeRuby;
+    const manga = !!options.manga;
+    // 精錬に使える時間。漫画モードでは吹き出しの数だけ認識を繰り返すため、
+    // 呼び出し側がページ全体の予算を分けて渡す（1つあたりに満額を与えると
+    // 吹き出しの数だけ待ち時間が積み上がる）。
+    const refineBudgetMs = options.refineBudgetMs > 0
+        ? options.refineBudgetMs
+        : OCR_REFINE_TIME_BUDGET_MS;
+
+    // 漫画モードでは、まず吹き出しを見つけてその中だけを読む。
+    // ページ全体を認識させると絵から実在しない文字が作られるため。
+    if (manga) {
+        const page = await recognizeMangaPage(sourceCanvas, workerProvider, options);
+        if (page) return page;
+    }
     // blocks はルビ除去（行ごとの座標）と文字サイズの実測（行bbox）に使う
     const output = { text: true, blocks: true };
 
@@ -964,7 +1463,11 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
     // 明朝体等、強い前処理が裏目に出るフォントがあるため）
     const grayCanvas = toGrayscale(canvas);
 
-    const detected = detectTextOrientation(canvas);
+    // 漫画モードでは、吹き出しごとの小さな切り出しで組版方向を測ると外れやすい
+    // （縦横比がほぼ1になるため）。ページ全体から決めた方向を呼び出し側が渡す。
+    const detected = options.forceOrientation
+        ? { orientation: options.forceOrientation, confident: true }
+        : detectTextOrientation(canvas);
     let orientation = detected.orientation;
     if (!detected.confident) {
         // 画素の統計だけでは決められない範囲。本文の密な小領域を両方のモデルで
@@ -991,7 +1494,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
     const sourceArea = grayCanvas.width * grayCanvas.height;
     const refinable = sourceArea <= OCR_REFINE_MAX_AREA;
     let refinesLeft = refinable
-        ? Math.max(0, Math.floor((OCR_REFINE_TIME_BUDGET_MS - primaryMs) / primaryMs))
+        ? Math.max(0, Math.floor((refineBudgetMs - primaryMs) / primaryMs))
         : 0;
     const canRefine = () => refinesLeft > 0;
     const useRefine = () => { refinesLeft--; };
@@ -1059,8 +1562,16 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
     // 段落境界の推定には best を生んだ画像の座標系・組版方向を使う
     const bestOrientation = bestLang === "jpn_vert" ? "vertical" : "horizontal";
     const bestGlyphSize = estimateGlyphSizeFromBlocks(best.blocks, bestOrientation);
+    // コマ割りの検出は画像の走査を伴うため、必要になったとき一度だけ行う。
+    let mangaPanelsCache;
+    const mangaPanels = () => {
+        if (mangaPanelsCache === undefined) {
+            mangaPanelsCache = manga ? detectMangaPanels(bestCanvas) : null;
+        }
+        return mangaPanelsCache;
+    };
     let text = best.blocks
-        ? buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize)
+        ? buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize, manga, mangaPanels())
         : best.text;
 
     // 文字単位アンサンブル融合。元寸grayが採用され、かつ文字がLSTM最適域を下回るときだけ、
@@ -1083,7 +1594,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
             const fused = fuseOcrSymbols(best.blocks, others);
             const reranked = rerankOcrByDictionary(best.blocks, others);
             if (fused > 0 || reranked > 0) {
-                text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
+                text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize, manga, mangaPanels());
             }
         }
     } else if (best === primary.data && glyphSize != null
@@ -1114,7 +1625,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
         // 2つ以上の倍率が同じ辞書語で一致したときだけ置換する（多数決の最低条件）
         const reranked = others.length >= 2 ? rerankOcrByDictionary(best.blocks, others) : 0;
         if (fused > 0 || reranked > 0) {
-            text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
+            text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize, manga, mangaPanels());
         }
     }
 
@@ -1124,7 +1635,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
         // 再認識する。再認識には best と同じ言語のワーカーを使う。
         const rubyWorker = await workerProvider(bestLang);
         const filtered = await applyRubyReadings(
-            best.blocks, rubyOrientation, bestCanvas, rubyWorker, output);
+            best.blocks, rubyOrientation, bestCanvas, rubyWorker, output, manga, mangaPanels());
         if (filtered != null) text = filtered;
     }
     return { text, confidence: best.confidence };
@@ -1375,7 +1886,7 @@ async function rescanOcrRubyLine(ruby, orientation, canvas, worker, output, body
 // ルビを親文字に差し替えたテキストを返す。ルビが見つからない場合や、
 // 除去しすぎ（本文の大半が消える）・情報不足の場合は null を返し、呼び出し側で
 // 生テキストにフォールバックさせる（誤検出による本文欠落を防ぐ安全弁）。
-async function applyRubyReadings(blocks, orientation, canvas, worker, output) {
+async function applyRubyReadings(blocks, orientation, canvas, worker, output, manga, mangaPanels) {
     const lines = collectOcrLines(blocks, orientation);
     const bodySize = estimateOcrBodySize(lines);
     if (bodySize == null) return null;
@@ -1416,6 +1927,7 @@ async function applyRubyReadings(blocks, orientation, canvas, worker, output) {
     }
     if (totalChars === 0 || keptChars < totalChars * OCR_RUBY_MIN_KEEP_RATIO) return null;
     // ルビ経路でも同じ規則で段落境界を入れる（本文行だけで判定する）
+    if (manga) return buildMangaLines(kept, orientation, bodySize, mangaPanels).join("\n");
     return markOcrParagraphBreaks(kept, orientation, bodySize).join("\n");
 }
 
