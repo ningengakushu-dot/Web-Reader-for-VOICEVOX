@@ -565,11 +565,50 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
 
 // 収集した断片を、段落の切れ目を保ったまま1つのテキストへ組み立てる。
 // 並び順は文書順（＝著者が意図した順序であり、スクリーンリーダーが読む順序）。
+// 選択肢・箇条書きの記号。ブロックの先頭にこれだけが単独で置かれている場合、
+// 続く本文との間に「間」を入れる（「アキーワード検索の…」と続けて読まれるのを防ぐ）。
+//
+// 記号のうち、語の一部になり得ないもの（丸数字・括弧付き・区切り付き）。
+// これらは見た目の間隔に関わらず記号として扱える。
+// 数字と漢数字は、区切り記号か括弧が付いているものだけを記号とみなす
+// （「3」「時に集合」のように分かれているだけの並びを切らないため）。
+const DOM_TEXT_LABEL_CLEAR_RE = new RegExp(
+    "^(?:"
+    + "[\\u2460-\\u2473\\u3251-\\u325F]"                    // 丸数字
+    + "|[(（\\[［{｛【]\\s*[0-9０-９A-Za-z\\u30A1-\\u30F6一二三四五六七八九十]{1,3}\\s*[)）\\]］}｝】]"
+    + "|[0-9０-９一二三四五六七八九十]{1,3}\\s*[.．、,，)）:：]"
+    + ")$");
+
+// 語の一部にもなり得る裸の1文字（ア・A など）。こちらは見た目の間隔がある場合だけ
+// 記号とみなす。検索結果のハイライト（例: <mark>ア</mark>ジア）のように隙間なく
+// 続いている分割まで切ると、語そのものが壊れてしまうため。
+const DOM_TEXT_LABEL_BARE_RE = new RegExp(
+    "^(?:[\\u30A1-\\u30F6]|[A-Za-z\\uFF21-\\uFF3A\\uFF41-\\uFF5A])$");
+
+// 記号と本文の間に必要な、見た目の隙間（画素）
+const DOM_TEXT_LABEL_MIN_GAP_PX = 3;
+
+function isLabelUnit(text, unit, next, block) {
+    if (!next || !next.text || !next.text.trim()) return false;
+    // 段落が変わるなら、そこで既に「間」が入る
+    if ((next.block !== undefined ? next.block : null) !== block) return false;
+    const label = text.trim();
+    if (DOM_TEXT_LABEL_CLEAR_RE.test(label)) return true;
+    if (!DOM_TEXT_LABEL_BARE_RE.test(label)) return false;
+    const a = unit.rect;
+    const b = next.rect;
+    if (!a || !b) return false;
+    // 本文が下の行から始まる＝見た目にも別の要素
+    if (b.top >= a.bottom - 1) return true;
+    return b.left - a.right >= DOM_TEXT_LABEL_MIN_GAP_PX;
+}
+
 function joinTextUnits(units) {
     const parts = [];
     let prevBlock = null;
     let prevKey = null;
-    for (const unit of units) {
+    for (let i = 0; i < units.length; i++) {
+        const unit = units[i];
         // HTMLの字下げによる改行や連続空白は文章としての意味を持たないので潰す。
         // 段落の「間」はブロック要素の境界だけで表す。
         const text = unit.text.replace(/\s+/g, " ");
@@ -580,9 +619,14 @@ function joinTextUnits(units) {
         const key = text.replace(/\s/g, "");
         if (key.length >= 4 && key === prevKey) continue;
         prevKey = key;
+        const startsBlock = !parts.length || unit.block !== prevBlock;
         if (parts.length && unit.block !== prevBlock) parts.push("\n");
         parts.push(text);
         prevBlock = unit.block !== undefined ? unit.block : null;
+        // 選択肢や箇条書きの記号のあとに「間」を入れる。
+        // 「ア」と本文が同じブロックに入っている作りだと、そのままでは
+        // 「アキーワード検索の…」と続けて読まれてしまう。
+        if (startsBlock && isLabelUnit(text, unit, units[i + 1], prevBlock)) parts.push("\n");
     }
     return parts.join("")
         // 日本語の文字どうしの間に入った空白は組版上の区切りでしかないため取り除く
