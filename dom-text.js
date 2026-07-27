@@ -184,38 +184,35 @@ function paintsBackground(el) {
     return parts.length < 4 || parts[3] > 0.05;
 }
 
-// 当たり判定で前面に出た別要素が、本当にテキストを隠しているかを見る。
+// その座標でテキストが実際に見えているかを、重なり全体をたどって判定する。
 //
-// カード全体をリンクにする実装（透明な <a> を position:absolute で重ねる手法）が
-// 広く使われており、当たり判定だけを見ると本文が「覆われている」と誤判定される。
-// 背景を塗っていない要素は後ろの文字が透けて見えるため、隠しているとは扱わない。
-// モーダルや同意ダイアログは背景を塗るので、これまでどおり除外される。
-function isReallyOccluding(hit, el) {
-    let node = hit;
-    // 共通の祖先に達するまでの間に、背景を塗る要素があるかを見る
-    while (node && node.nodeType === 1 && !node.contains(el)) {
-        if (paintsBackground(node)) return true;
-        node = node.parentElement;
-    }
-    return false;
-}
-
-// その座標で最前面にあるのが自分（またはその祖先・子孫）かを見る。
-// モーダル等に覆われて実際には見えていないテキストを除外する
-// （描画パイプラインの深度テストに相当する）。
+// 最前面の1要素だけを見る方法では判定を誤る。
+// - カード全体をリンクにする実装（透明な <a> を重ねる手法）では、透明な要素が
+//   最前面に来るため、見えている本文を「覆われている」と誤判定する。
+// - 逆に、サンプル閲覧などのライトボックスでは、最前面が透明な当たり判定用の
+//   要素だと「覆われていない」と誤判定し、その裏にある別の内容を読み上げてしまう
+//   （実機で「Amazonの価格設定と割引について」が読み上げられた原因）。
+//
+// そこで、手前から順に要素をたどり、自分に到達する前に「背景を塗る要素」が
+// あれば覆われているとみなす。透明な要素は何枚あっても素通しにする。
 function isTopMostAt(el, x, y) {
     const root = el.getRootNode();
     // Shadow DOM 内の要素は、その ShadowRoot 側で判定しないと常にホストが返る
-    const picker = root && typeof root.elementFromPoint === "function" ? root : el.ownerDocument;
-    let hit;
+    const picker = root && typeof root.elementsFromPoint === "function" ? root : el.ownerDocument;
+    let stack;
     try {
-        hit = picker.elementFromPoint(x, y);
+        stack = picker.elementsFromPoint(x, y);
     } catch (e) {
         return true; // 判定できない場合は読む側に倒す
     }
-    if (!hit) return false;
-    if (hit === el || el.contains(hit) || hit.contains(el)) return true;
-    return !isReallyOccluding(hit, el);
+    if (!stack || !stack.length) return false;
+    for (const node of stack) {
+        // 自分（またはその祖先・子孫）に到達した＝手前に遮るものが無かった
+        if (node === el || el.contains(node) || node.contains(el)) return true;
+        if (paintsBackground(node)) return false;
+    }
+    // 重なりの中に自分が現れない＝別の階層に隠れている
+    return false;
 }
 
 // テキストが実際に見えているかを、行ごとに複数点で確かめる。
