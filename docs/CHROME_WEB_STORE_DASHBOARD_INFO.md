@@ -22,15 +22,34 @@ This extension is designed to provide text-to-speech functionality using the loc
 ## 2. 権限の使用理由 (Permission Justification)
 ダッシュボードで必要になる場合がある説明です。
 
-- **activeTab / scripting**: ユーザーが現在閲覧しているタブから選択されたテキストを取得するために必要です。
-- **storage**: ユーザーが選択したキャラクターや読み上げ速度の設定を次回起動時も保持するために使用します。
+- **activeTab**: ユーザーがショートカットキーまたは右クリックメニューで読み上げを指示したタブに限り、選択テキストを取得するために使用します。ユーザー操作が無い状態ではページへアクセスしません。
+- **scripting**: 拡張機能のインストール/更新より前から開かれていたタブに、読み上げ用スクリプト（content.js）を再注入するために使用します（`activeTab` により許可されたタブに限定）。
+- **storage**: ユーザーが選択したキャラクター、読み上げ速度、アイコンの位置とサイズの設定を次回起動時も保持するために使用します（`chrome.storage.local` のみ）。
 - **contextMenus**: 右クリックメニューから読み上げを開始するエントリーを追加するために使用します。
-- **host_permissions (http://127.0.0.1:50021/*)**: ローカルで起動しているVOICEVOXエンジンのAPIと通信するために不可欠です。
+- **offscreen**: Service Worker では音声を再生できないため、音声再生専用の Offscreen Document を1つ生成します。サイト側のCSP（コンテンツセキュリティポリシー）に影響されずに合成音声を再生するために必要です。
+- **host_permissions (http://127.0.0.1:50021/*)**: ローカルで起動しているVOICEVOXエンジンのAPIと通信するために不可欠です。外部サーバーへの通信は一切行いません。
+- **content_scripts の `<all_urls>` (broad host permission)**: 本拡張機能は「ユーザーが閲覧しているどのWebページでも選択テキストを読み上げる」ことを単一目的としており、対象サイトを事前に限定できません。読み上げ操作用のフローティングアイコンの表示と、選択テキストの取得のみに使用します。ページ内容の収集・送信・改変は行いません。`all_frames` はiframe内で選択されたテキストにも対応するため、`match_origin_as_fallback` はサンドボックス化されたエディタ等（about:srcdoc / data: フレーム）に対応するために指定しています。
+
+---
+
+## 2-1. パッケージング時の注意
+Chrome Web Store にアップロードするZIPには、拡張機能の動作に必要なファイルのみを含めてください。
+
+- 含める: `manifest.json` / `background.js` / `content.js` / `constants.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.css` / `options.js` / `images/icon{16,32,48,128}.png`
+- 含めない: `docs/`（ストア掲載用のスクリーンショット・動画を含む `docs/store-assets/` を含む）、`.git/`、その他の開発用ファイル
 
 ---
 
 ## 3. バージョン別 ストア更新テキスト (Version Update Text)
 ダッシュボードの「公開用メモ」やストア掲載の更新内容として使用できます。
+
+### v1.2.2
+
+#### 日本語
+安定性に関する修正を行いました。読み上げ中のタブを閉じたりページを移動したりしても音声が鳴り続ける問題、拡張機能の更新後に開いたままのタブでアイコンが反応しなくなる問題、長い文章の読み上げ途中でアイコンが待機状態に戻る問題を修正しました。また、VOICEVOXエンジンが応答しない場合にタイムアウトするようにし、設定画面のエラー表示を分かりやすくしました。
+
+#### English (Recommended)
+Stability fixes. Audio no longer keeps playing after the reading tab is closed or navigated away, the on-page icon no longer becomes unresponsive in tabs that were open during an extension update, and the icon no longer returns to the idle state in the middle of reading long passages. Requests to the VOICEVOX engine now time out instead of hanging, and error messages on the settings page are clearer.
 
 ### v1.2.1
 

@@ -47,6 +47,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (error) {
             console.error('Error during init:', error);
+            // 取得失敗時に「取得中...」のまま止まって見えないよう、選択肢の文言も更新する
+            speakerSelect.innerHTML = '<option value="">キャラクターを取得できませんでした</option>';
             showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
         } finally {
             showLoader(false);
@@ -81,13 +83,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     saveBtn.addEventListener('click', async () => {
-        const speakerId = parseInt(speakerSelect.value);
-        if (isNaN(speakerId)) return;
+        const speakerId = parseInt(speakerSelect.value, 10);
+        if (isNaN(speakerId)) {
+            // キャラクター未取得のまま保存すると speakerId が NaN になり合成に失敗するため、
+            // 黙って握りつぶさずユーザーに理由を伝える。
+            showStatus('キャラクターを選択してください。VOICEVOXの起動を確認後、再読み込みしてください。', 'error');
+            return;
+        }
 
         const settings = { speakerId };
         for (const s of sliders) {
             const val = parseFloat(s.slider.value);
-            if (isNaN(val)) return;
+            if (isNaN(val)) {
+                showStatus('設定値が不正です。スライダーを操作し直してください。', 'error');
+                return;
+            }
             settings[s.key] = val;
         }
 

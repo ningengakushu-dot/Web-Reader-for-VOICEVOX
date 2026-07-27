@@ -25,6 +25,9 @@ class VVRadioReader {
         this.active = true;
         this.isPlaying = false;
         this.indicator = null;
+        this.errorTimer = null;
+        this.onStorageChanged = null;
+        this.onKeyDown = null;
         // クロスオリジンの frame プロパティにアクセスせず、window.self/window.top の
         // 比較のみで安全にトップフレーム判定を行う
         this.isTopFrame = window.self === window.top;
@@ -32,15 +35,23 @@ class VVRadioReader {
     }
 
     init() {
-        // インジケーター注入・アイコンサイズ適用・接続確認・オプションUIはトップフレームのみ。
-        // サブフレームはメッセージリスナーのみ登録し、TOGGLE_READING で選択テキストを読む。
-        if (this.isTopFrame) {
-            this.injectIndicator();
-            this.applyIconSize();
-            this.checkVoicevoxConnection();
-        }
+        // メッセージリスナーとショートカットは最優先で登録する。
+        // UI 注入（document.body 不在の XML 文書等で失敗し得る）より先に登録することで、
+        // 注入に失敗したページでも右クリック/ショートカットからの読み上げは動作させる。
         this.setupMessageListener();
         this.setupKeyboardShortcutFallback();
+
+        // インジケーター注入・アイコンサイズ適用・接続確認はトップフレームのみ。
+        // サブフレームはメッセージリスナーのみ登録し、TOGGLE_READING で選択テキストを読む。
+        if (this.isTopFrame) {
+            try {
+                this.injectIndicator();
+                this.applyIconSize();
+            } catch (err) {
+                console.warn("Web Reader for VOICEVOX: インジケーターの初期化をスキップしました:", err.message);
+            }
+            this.checkVoicevoxConnection();
+        }
     }
 
     // このインスタンスがまだ機能しているか（＝再注入をスキップしてよいか）を返す。
@@ -52,24 +63,67 @@ class VVRadioReader {
         return true;
     }
 
-    // このインスタンスを停止し、注入済みの UI を除去する。
+    // このインスタンスを停止し、注入済みの UI とリスナーを除去する。
     // 以降のメッセージは active=false により無視される。
     deactivate() {
         this.active = false;
+
+        if (this.errorTimer) {
+            clearTimeout(this.errorTimer);
+            this.errorTimer = null;
+        }
+        if (this.onKeyDown) {
+            document.removeEventListener("keydown", this.onKeyDown, true);
+            this.onKeyDown = null;
+        }
+        // 拡張コンテキスト無効化後は chrome.storage へのアクセス自体が例外になる
+        if (this.onStorageChanged) {
+            try {
+                chrome.storage.onChanged.removeListener(this.onStorageChanged);
+            } catch (e) {
+                // 無効化済みコンテキストでの解除失敗は無視
+            }
+            this.onStorageChanged = null;
+        }
+
         const host = document.getElementById("vvradio-host");
         if (host) host.remove();
+        this.indicator = null;
+    }
+
+    // 拡張コンテキストが無効化（拡張の更新・リロード）された古いタブでは
+    // chrome.runtime.sendMessage が同期的に例外を投げる。
+    // 例外を握りつぶさずインスタンスを停止し、ページ側にエラーを漏らさない。
+    sendMessage(message, callback) {
+        try {
+            chrome.runtime.sendMessage(message, (response) => {
+                const lastError = chrome.runtime.lastError;
+                if (callback) callback(response, lastError ? lastError.message : null);
+            });
+        } catch (err) {
+            // 「Extension context invalidated」= このタブの拡張機能は既に死んでいる。
+            // 反応しないUIを残すより撤去し、ページ再読み込みで復帰させる。
+            this.deactivate();
+            if (callback) callback(undefined, err.message);
+        }
     }
 
     // アイコンサイズをストレージから取得して適用し、変更をリアルタイム監視
     applyIconSize() {
+        if (!this.indicator) return;
+
         chrome.storage.local.get(["iconSize"], (res) => {
+            if (chrome.runtime.lastError || !this.indicator) return;
             const size = res.iconSize || 16;
             this.indicator.style.width = `${size}px`;
             this.indicator.style.height = `${size}px`;
         });
 
-        chrome.storage.onChanged.addListener((changes, namespace) => {
-            if (namespace !== 'local') return;
+        // deactivate() で解除できるよう参照を保持する。
+        // 保持しないと再注入のたびにリスナーが積み上がり、除去済みの
+        // インジケーターを触り続けるリークになる。
+        this.onStorageChanged = (changes, namespace) => {
+            if (!this.active || namespace !== 'local' || !this.indicator) return;
 
             // サイズのリアルタイム反映
             if (changes.iconSize) {
@@ -85,18 +139,24 @@ class VVRadioReader {
                 this.indicator.style.bottom = '20px';
                 this.indicator.style.right = '20px';
             }
-        });
+        };
+        chrome.storage.onChanged.addListener(this.onStorageChanged);
     }
 
     // 画面にインジケーターアイコンを注入
     injectIndicator() {
+        // XML/SVG 文書など document.body が存在しないページでも例外を出さない。
+        // どちらも取れない場合はUIを諦め、メッセージ経由の読み上げのみ提供する。
+        const root = document.body || document.documentElement;
+        if (!root) return;
+
         // 再注入時に古いホストが残っていると UI が二重化するため、生成前に除去する。
         const stale = document.getElementById("vvradio-host");
         if (stale) stale.remove();
 
         const host = document.createElement("div");
         host.id = "vvradio-host";
-        document.body.appendChild(host);
+        root.appendChild(host);
 
         // Shadow DOM でカプセル化
         this.shadowRoot = host.attachShadow({ mode: "closed" });
@@ -162,10 +222,14 @@ class VVRadioReader {
             document.removeEventListener("mouseup", onMouseUp);
 
             // 移動した場合、その位置を永続化（次回ロード時に復元するため）
-            if (dragMoved) {
-                chrome.storage.local.set({ 
-                    vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop } 
-                });
+            if (dragMoved && this.indicator) {
+                try {
+                    chrome.storage.local.set({
+                        vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop }
+                    });
+                } catch (e) {
+                    // 拡張コンテキスト無効化時の保存失敗は無視する
+                }
             }
         };
 
@@ -208,27 +272,29 @@ class VVRadioReader {
         // オプション画面を開くリスナー（右クリック）
         this.indicator.addEventListener("contextmenu", (e) => {
             e.preventDefault();
-            chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
+            this.sendMessage({ type: "OPEN_OPTIONS" });
         });
 
         this.shadowRoot.appendChild(this.indicator);
 
         // 保存された位置があれば復元
         chrome.storage.local.get(["vvradio_icon_pos", "iconSize"], (res) => {
-            if (res.vvradio_icon_pos) {
-                const { left, top } = res.vvradio_icon_pos;
-                const size = res.iconSize || 16;
-                // 画面サイズ変更などで画面外に出ないように補正
-                const maxLeft = window.innerWidth - size;
-                const maxTop = window.innerHeight - size;
-                const safeLeft = Math.max(0, Math.min(maxLeft, left));
-                const safeTop = Math.max(0, Math.min(maxTop, top));
+            if (chrome.runtime.lastError || !this.indicator || !res.vvradio_icon_pos) return;
 
-                this.indicator.style.bottom = "auto";
-                this.indicator.style.right = "auto";
-                this.indicator.style.left = `${safeLeft}px`;
-                this.indicator.style.top = `${safeTop}px`;
-            }
+            const { left, top } = res.vvradio_icon_pos;
+            if (!Number.isFinite(left) || !Number.isFinite(top)) return;
+
+            const size = res.iconSize || 16;
+            // 画面サイズ変更などで画面外に出ないように補正
+            const maxLeft = window.innerWidth - size;
+            const maxTop = window.innerHeight - size;
+            const safeLeft = Math.max(0, Math.min(maxLeft, left));
+            const safeTop = Math.max(0, Math.min(maxTop, top));
+
+            this.indicator.style.bottom = "auto";
+            this.indicator.style.right = "auto";
+            this.indicator.style.left = `${safeLeft}px`;
+            this.indicator.style.top = `${safeTop}px`;
         });
     }
 
@@ -247,23 +313,35 @@ class VVRadioReader {
                 // selection 非対応の input でのアクセス例外は無視し、通常の選択取得にフォールバック
             }
         }
-        return window.getSelection().toString().trim();
+        const selection = window.getSelection();
+        return selection ? selection.toString().trim() : "";
     }
 
     // UIのステータス表示を更新
     updateUIState(state) {
         if (!this.indicator) return;
+
+        // 直前のエラー表示タイマーが残っていると、新しいエラー表示を
+        // 途中で消してしまうため必ず解除する。
+        if (this.errorTimer) {
+            clearTimeout(this.errorTimer);
+            this.errorTimer = null;
+        }
+
         this.indicator.classList.remove("reading", "error");
         if (state === 'reading') {
             this.indicator.classList.add("reading");
         } else if (state === 'error') {
             this.indicator.classList.add("error");
-            setTimeout(() => this.indicator.classList.remove("error"), 3000);
+            this.errorTimer = setTimeout(() => {
+                this.errorTimer = null;
+                if (this.indicator) this.indicator.classList.remove("error");
+            }, 3000);
         }
     }
 
     setupKeyboardShortcutFallback() {
-        document.addEventListener("keydown", (event) => {
+        this.onKeyDown = (event) => {
             if (!this.active || event.repeat || !event.isTrusted) return;
             if (!this.isShortcutEvent(event)) return;
             if (!this.shouldHandleToggleReading()) return;
@@ -273,13 +351,13 @@ class VVRadioReader {
             event.preventDefault();
             event.stopPropagation();
 
-            chrome.runtime.sendMessage({ type: "SHORTCUT_PRESSED" }, () => {
-                if (chrome.runtime.lastError) {
-                    console.warn("Web Reader for VOICEVOX: ショートカット通知に失敗:",
-                        chrome.runtime.lastError.message);
+            this.sendMessage({ type: "SHORTCUT_PRESSED" }, (_res, error) => {
+                if (error) {
+                    console.warn("Web Reader for VOICEVOX: ショートカット通知に失敗:", error);
                 }
             });
-        }, true);
+        };
+        document.addEventListener("keydown", this.onKeyDown, true);
     }
 
     isShortcutEvent(event) {
@@ -353,8 +431,8 @@ class VVRadioReader {
 
     // バックグラウンド経由でVOICEVOXエンジンの接続確認
     checkVoicevoxConnection() {
-        chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
-            if (chrome.runtime.lastError || !res || !res.success) {
+        this.sendMessage({ type: "CHECK_CONNECTION" }, (res, error) => {
+            if (error || !res || !res.success) {
                 console.warn("Web Reader for VOICEVOX: VOICEVOXに接続できません。");
                 this.updateUIState('error');
             }
@@ -368,13 +446,13 @@ class VVRadioReader {
         const cleanText = this.cleanMessage(text);
         if (!cleanText) return;
 
-        chrome.runtime.sendMessage({
+        this.sendMessage({
             type: "GENERATE_VOICE",
             text: cleanText
-        }, (response) => {
-            if (chrome.runtime.lastError || !response || !response.success) {
+        }, (response, error) => {
+            if (error || !response || !response.success) {
                 console.error("Web Reader for VOICEVOX: 依頼失敗:",
-                    chrome.runtime.lastError?.message || response?.error || "応答なし");
+                    error || response?.error || "応答なし");
                 this.updateUIState('error');
             }
         });
@@ -382,7 +460,7 @@ class VVRadioReader {
 
     // 再生の完全停止とキューのクリア要求
     stopAll() {
-        chrome.runtime.sendMessage({ type: "STOP_ALL" });
+        this.sendMessage({ type: "STOP_ALL" });
         this.isPlaying = false;
         this.updateUIState('idle');
     }
