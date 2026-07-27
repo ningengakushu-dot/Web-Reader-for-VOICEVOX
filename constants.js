@@ -1,4 +1,6 @@
-// 共通定数定義
+// 共通の定数とユーティリティ。
+// Service Worker（background.js の importScripts）と拡張機能ページ
+// （offscreen.html / capture.html / options.html の script タグ）の両方から読み込む。
 
 // VOICEVOXエンジンのベースURL（ローカルサーバー）
 const VOICEVOX_BASE_URL = "http://127.0.0.1:50021";
@@ -19,6 +21,32 @@ const PLAYBACK_TAB_STORAGE_KEY = "vv_playback_tab_id";
 // 長文の合成は時間がかかるため、合成だけ長めに取る。
 const VOICEVOX_FETCH_TIMEOUT_MS = 15000;
 const VOICEVOX_SYNTHESIS_TIMEOUT_MS = 60000;
+
+/**
+ * 制限時間つきの fetch。時間内に応答が無ければ中断して例外にする。
+ * VOICEVOXエンジンが落ちている・固まっている場合に、接続確認やキャラクター一覧の
+ * 取得が終わらないまま固まったり、合成キューが永久に詰まったりするのを防ぐ。
+ * background（Service Worker）と offscreen の双方で使う。
+ *
+ * @param {string} url
+ * @param {RequestInit} options
+ * @param {number} timeoutMs
+ * @returns {Promise<Response>}
+ */
+async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+        if (err.name === "AbortError") {
+            throw new Error(`VOICEVOXエンジンが応答しません（${Math.round(timeoutMs / 1000)}秒）`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 // 設定のデフォルト値
 const SETTING_DEFAULTS = {

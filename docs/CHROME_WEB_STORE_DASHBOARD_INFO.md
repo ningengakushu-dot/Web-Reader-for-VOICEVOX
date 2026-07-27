@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 出力: `dist/web-reader-for-voicevox-<version>.zip`
 
-**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `ocr-words.txt` / `ocr-dictionary-NOTICE.md` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
+**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `ocr-ruby.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `ocr-words.txt` / `ocr-dictionary-NOTICE.md` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
 
 **除外するもの**: `README.md`、`docs/`、`tools/`、`dist/`、ストア掲載用の素材（`images/Web-Reader-for-VOICEVOX_*.png`、`images/Web_Reader_for_VOICEVOX.mp4`）、`.claude/`、`AGENTS.md`、`CLAUDE.md`、`audio/`
 

@@ -3,6 +3,46 @@ importScripts('constants.js');
 // 画面OCR読み上げのコンテキストメニューID
 const OCR_MENU_ID = "capture-ocr-read";
 
+// タブへ動的注入するコンテンツスクリプト。manifest の content_scripts と同じ並びにする
+// （dom-text.js が先。content.js が globalThis.VVRadioDomText を参照するため）。
+const CONTENT_SCRIPT_FILES = ["dom-text.js", "content.js"];
+
+/**
+ * 指定した対象へコンテンツスクリプトを注入する。
+ * content.js は IIFE ガードを持つため、既に動いているタブへの再注入も安全。
+ * @param {chrome.scripting.InjectionTarget} target
+ */
+function injectContentScripts(target) {
+    return chrome.scripting.executeScript({ target, files: CONTENT_SCRIPT_FILES });
+}
+
+/**
+ * 非同期処理の結果を sendResponse へ返す定型。
+ * 失敗時の応答の形（{success:false, error}）を1か所に揃え、
+ * 例外が握り潰されて「応答が返らないまま固まる」のを防ぐ。
+ * @param {Promise<any>} promise
+ * @param {(response: object) => void} sendResponse
+ * @param {(value: any) => object} [toResponse] 成功時の応答を作る（既定は {success:true}）
+ */
+function respondWith(promise, sendResponse, toResponse) {
+    promise
+        .then((value) => sendResponse(toResponse ? toResponse(value) : { success: true }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+}
+
+/**
+ * タブへ通知を送る。target:"tab" はタブ宛て転送の目印
+ * （capture.html はこれが無いと offscreen のブロードキャストと区別できず二重処理になる）。
+ * @param {number|null|undefined} tabId
+ * @param {object} message
+ * @param {string} [context] 指定すると失敗を警告ログに出す
+ */
+function notifyTab(tabId, message, context) {
+    if (tabId == null) return;
+    const sending = chrome.tabs.sendMessage(tabId, { ...message, target: "tab" });
+    sending.catch(context ? warn(context) : () => {});
+}
+
 // 拡張機能のインストール／更新時にコンテキストメニューを作成する。
 // onInstalled は更新時にも発火し、既存メニューが残っていることがある。
 // 同一 id の create は "Cannot create item with duplicate id" で失敗するため、
@@ -75,10 +115,7 @@ async function startCaptureOcr(tab) {
         // フォールバックの判断材料はここ（注入可否）だけに限る。
         // 後続の sendMessage の失敗でタブ方式へ落とすと、オーバーレイが出ているのに
         // capture.html も開いてUIが二重に立ち上がる。
-        await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            files: ["dom-text.js", "content.js"]
-        });
+        await injectContentScripts({ tabId: tab.id });
     } catch (err) {
         // 注入不可ページ（PDFビューア・chrome:// 等）→ タブ方式へフォールバック
         startCaptureOcrInTab(tab);
@@ -229,10 +266,7 @@ async function sendMessageWithInjection(tabId, message, context, options = {}) {
             return;
         }
         try {
-            await chrome.scripting.executeScript({
-                target: injectionTarget,
-                files: ["dom-text.js", "content.js"]
-            });
+            await injectContentScripts(injectionTarget);
             if (messageOptions) {
                 await chrome.tabs.sendMessage(tabId, message, messageOptions);
             } else {
@@ -275,10 +309,7 @@ async function handleShortcutRequest(tabId, source) {
     // 送信前に全フレームへ content.js を事前注入する。
     // content.js は IIFE ガードを持つため再注入は安全（多重生成しない）。
     try {
-        await chrome.scripting.executeScript({
-            target: { tabId, allFrames: true },
-            files: ["dom-text.js", "content.js"]
-        });
+        await injectContentScripts({ tabId, allFrames: true });
     } catch (err) {
         console.warn(`Background: ショートカット用 content.js 事前注入失敗 (${source}):`, err.message);
     }
@@ -294,7 +325,11 @@ async function handleShortcutRequest(tabId, source) {
 chrome.commands.onCommand.addListener((command) => {
     if (command !== "toggle-reading" && command !== "capture-ocr-reading") return;
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-        if (tabs.length === 0) return;
+        if (chrome.runtime.lastError) {
+            console.warn("Background: アクティブタブの取得に失敗:", chrome.runtime.lastError.message);
+            return;
+        }
+        if (!tabs || tabs.length === 0) return;
         if (command === "toggle-reading") {
             handleShortcutRequest(tabs[0].id, "commands.onCommand");
         } else {
@@ -334,6 +369,22 @@ async function getPlaybackTabId() {
         // session 参照に失敗しても従来どおりメモリ値で続行する
     }
     return playbackTabId;
+}
+
+/**
+ * 再生状態通知の宛先を指定タブへ移す。
+ * 前の宛先タブには停止を通知し、そのタブのアイコンが「再生中」のまま
+ * 取り残されるのを防ぐ（GENERATE_VOICE と OCR_COMPLETE の共通処理）。
+ * @param {number|null} tabId
+ */
+function switchPlaybackTabTo(tabId) {
+    if (tabId == null) return;
+    getPlaybackTabId().then((prev) => {
+        if (prev != null && prev !== tabId) {
+            notifyTab(prev, { type: "PLAYBACK_STOPPED" }, "旧再生タブへの停止通知失敗");
+        }
+        setPlaybackTabId(tabId);
+    });
 }
 
 // タブが閉じられたら、保持している状態（再生宛先・ショートカット重複抑制）を掃除する。
@@ -441,46 +492,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return false;
 
         case "CHECK_CONNECTION":
-            fetchWithTimeout(`${VOICEVOX_BASE_URL}/version`, {}, VOICEVOX_FETCH_TIMEOUT_MS)
-                .then(res => sendResponse({ success: res.ok }))
-                .catch(err => sendResponse({ success: false, error: err.message }));
+            respondWith(
+                fetchWithTimeout(`${VOICEVOX_BASE_URL}/version`, {}, VOICEVOX_FETCH_TIMEOUT_MS),
+                sendResponse,
+                (res) => ({ success: res.ok }));
             return true;
 
         case "GET_SPEAKERS":
-            fetchWithTimeout(`${VOICEVOX_BASE_URL}/speakers`, {}, VOICEVOX_FETCH_TIMEOUT_MS)
-                .then(res => res.json())
-                .then(speakers => sendResponse({ success: true, speakers }))
-                .catch(err => sendResponse({ success: false, error: err.message }));
+            respondWith(
+                fetchWithTimeout(`${VOICEVOX_BASE_URL}/speakers`, {}, VOICEVOX_FETCH_TIMEOUT_MS)
+                    .then((res) => res.json()),
+                sendResponse,
+                (speakers) => ({ success: true, speakers }));
             return true;
 
         case "GET_SPEAKER_ICON":
             // 設定画面のページ内アイコン表示用。VOICEVOXエンジンは拡張機能の
             // オリジンからしか叩けないため、取得は background に集約する。
-            fetchSpeakerIcon(request.speakerId)
-                .then(result => sendResponse({ success: true, ...result }))
-                .catch(err => sendResponse({ success: false, error: err.message }));
+            respondWith(
+                fetchSpeakerIcon(request.speakerId),
+                sendResponse,
+                (result) => ({ success: true, ...result }));
             return true;
 
-        case "GENERATE_VOICE": {
+        case "GENERATE_VOICE":
             // 要求元タブを再生状態通知の宛先として記録する。
             // ショートカット/コンテキストメニュー経由でも content.js から送信されるため
             // sender.tab.id で正しい要求元タブが取得できる。
-            const requestTabId = sender.tab?.id ?? null;
-            // 別タブからの新しい再生要求なら、前の再生タブへ明示的に停止を通知してから
-            // 宛先を切り替える。前タブのアイコンUIが「再生中」のまま取り残されるのを防ぐ。
-            // target:"tab" はタブ宛て転送の目印（capture.html はこれが無いと無視する）。
-            if (requestTabId != null) {
-                getPlaybackTabId().then((prev) => {
-                    if (prev != null && prev !== requestTabId) {
-                        chrome.tabs.sendMessage(prev, { type: "PLAYBACK_STOPPED", target: "tab" })
-                            .catch(warn("旧再生タブへの停止通知失敗"));
-                    }
-                    setPlaybackTabId(requestTabId);
-                });
-            }
+            switchPlaybackTabTo(sender.tab?.id ?? null);
             handleGenerateVoice(request.text, sendResponse);
             return true;
-        }
 
         case "STOP_ALL":
             setupOffscreen()
@@ -512,51 +553,32 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         case "OCR_PROGRESS":
             // offscreen からのOCR進行状況を要求元タブへ転送する
-            if (request.tabId != null) {
-                chrome.tabs.sendMessage(request.tabId, {
-                    type: "OCR_PROGRESS",
-                    progress: request.progress,
-                    target: "tab"
-                }).catch(() => {});
-            }
+            notifyTab(request.tabId, { type: "OCR_PROGRESS", progress: request.progress });
             return false;
 
         case "OCR_COMPLETE": {
             // offscreen でのOCR完了。認識テキストを既存の読み上げパイプラインへ流す。
             const tabId = request.tabId ?? null;
             if (request.error || !request.text) {
-                if (tabId != null) {
-                    chrome.tabs.sendMessage(tabId, {
-                        type: "OCR_STATUS",
-                        status: "error",
-                        message: request.error || "文字を認識できませんでした。",
-                        target: "tab"
-                    }).catch(warn("OCRエラー通知の送信失敗"));
-                }
+                notifyTab(tabId, {
+                    type: "OCR_STATUS",
+                    status: "error",
+                    message: request.error || "文字を認識できませんでした。"
+                }, "OCRエラー通知の送信失敗");
                 return false;
             }
-            if (tabId != null) {
-                // GENERATE_VOICE と同様に、再生状態通知の宛先を要求元タブへ切り替える
-                getPlaybackTabId().then((prev) => {
-                    if (prev != null && prev !== tabId) {
-                        chrome.tabs.sendMessage(prev, { type: "PLAYBACK_STOPPED", target: "tab" })
-                            .catch(warn("旧再生タブへの停止通知失敗"));
-                    }
-                    setPlaybackTabId(tabId);
-                });
-                chrome.tabs.sendMessage(tabId, { type: "OCR_STATUS", status: "done", target: "tab" })
-                    .catch(() => {});
-            }
+            // GENERATE_VOICE と同様に、再生状態通知の宛先を要求元タブへ切り替える
+            switchPlaybackTabTo(tabId);
+            notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
             // 読み上げ準備の失敗（offscreen 生成不可等）も要求元タブへ通知する。
             // VOICEVOX への接続失敗は合成時に PLAYBACK_ERROR として別途届く。
             handleGenerateVoice(request.text, (res) => {
-                if (res && res.success === false && tabId != null) {
-                    chrome.tabs.sendMessage(tabId, {
+                if (res && res.success === false) {
+                    notifyTab(tabId, {
                         type: "OCR_STATUS",
                         status: "error",
-                        message: `読み上げを開始できませんでした: ${res.error}`,
-                        target: "tab"
-                    }).catch(warn("読み上げ開始エラー通知の送信失敗"));
+                        message: `読み上げを開始できませんでした: ${res.error}`
+                    }, "読み上げ開始エラー通知の送信失敗");
                 }
             });
             return false;
@@ -573,12 +595,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // このタブ宛て転送を区別して二重処理を防げるようにするため。
             // SW休止から復帰した直後はメモリ上の宛先が失われているため、
             // storage.session から復元してから転送する（getPlaybackTabId）。
-            getPlaybackTabId().then((tabId) => {
-                if (tabId != null) {
-                    chrome.tabs.sendMessage(tabId, { ...request, target: "tab" })
-                        .catch(warn("再生状態の転送失敗"));
-                }
-            });
+            getPlaybackTabId().then((tabId) => notifyTab(tabId, request, "再生状態の転送失敗"));
             return false;
     }
 
@@ -586,11 +603,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function handleGenerateVoice(text, sendResponse) {
-    const result = await chrome.storage.local.get(Object.keys(SETTING_DEFAULTS));
-    const settings = { ...SETTING_DEFAULTS, ...result };
-    const chunks = splitText(text);
-
     try {
+        // 設定の読み出しも try の内側に入れる。ここで例外が出ると応答が返らず、
+        // 要求元は「無反応」のまま待たされてしまう。
+        const result = await chrome.storage.local.get(Object.keys(SETTING_DEFAULTS));
+        const settings = { ...SETTING_DEFAULTS, ...result };
+        const chunks = splitText(text);
+
         await setupOffscreen();
         // Offscreen への配信完了を確認してから成功応答を返す（無音失敗の可視化）
         await sendToOffscreen({ type: 'STOP_AUDIO' });
@@ -646,25 +665,6 @@ async function fetchSpeakerIcon(speakerId) {
     const styleInfos = info.style_infos || [];
     const matched = styleInfos.find(si => si.id === id) || styleInfos[0];
     return { name: speaker.name, icon: matched?.icon || null };
-}
-
-/**
- * 制限時間つきの fetch。VOICEVOXエンジンが応答しない場合に、
- * 接続確認やキャラクター一覧の取得が終わらないまま固まるのを防ぐ。
- */
-async function fetchWithTimeout(url, options, timeoutMs) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        return await fetch(url, { ...options, signal: controller.signal });
-    } catch (err) {
-        if (err.name === "AbortError") {
-            throw new Error(`VOICEVOXエンジンが応答しません（${Math.round(timeoutMs / 1000)}秒）`);
-        }
-        throw err;
-    } finally {
-        clearTimeout(timer);
-    }
 }
 
 /**

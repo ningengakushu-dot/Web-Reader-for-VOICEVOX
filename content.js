@@ -47,7 +47,7 @@ class VVRadioReader {
         // サブフレームはメッセージリスナーのみ登録し、TOGGLE_READING で選択テキストを読む。
         if (this.isTopFrame) {
             this.injectIndicator();
-            this.applyIconSize();
+            this.applyIconAppearance();
             this.checkVoicevoxConnection();
         }
         this.setupMessageListener();
@@ -108,9 +108,9 @@ class VVRadioReader {
         if (ocrHost) ocrHost.remove();
     }
 
-    // アイコンのサイズと見た目をストレージから取得して適用し、変更をリアルタイム監視
+    // アイコンのサイズと見た目をストレージから読み込んで適用し、変更をリアルタイムに反映する
     // （content script は constants.js を読み込まないため、キー名と既定値は直値で持つ）
-    applyIconSize() {
+    applyIconAppearance() {
         const keys = ["iconSize", "iconStyle", "vv_character_icon", "vv_custom_icon"];
         chrome.storage.local.get(keys, (res) => {
             if (!this.indicator) return;
@@ -214,7 +214,47 @@ class VVRadioReader {
 
         // Shadow DOM でカプセル化
         this.shadowRoot = host.attachShadow({ mode: "closed" });
+        this.shadowRoot.appendChild(this.createIndicatorStyle());
 
+        this.indicator = document.createElement("div");
+        this.indicator.id = "vvradio-indicator";
+
+        const isDragging = this.enableIndicatorDrag();
+
+        // 読み上げ開始/停止のトグルリスナー（左クリック）
+        this.indicator.addEventListener("click", (e) => {
+            // ドラッグ操作だった場合はクリック判定を破棄（競合回避）
+            if (isDragging()) {
+                e.preventDefault();
+                return;
+            }
+
+            this.toggleReading();
+        });
+
+        // 右クリックリスナー。動作は設定で切替可能（既定: 画面OCR読み上げの開始）。
+        // 従来のオプション画面を開く動作は、設定 iconRightClickAction を
+        // "options" にすることで維持できる。
+        this.indicator.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            chrome.storage.local.get({ iconRightClickAction: "capture" }, (res) => {
+                if (res.iconRightClickAction === "options") {
+                    chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
+                } else {
+                    // ページ内の範囲選択オーバーレイを直接開始する
+                    // （インジケーターはトップフレームにのみ存在する）
+                    this.startOcrSelection();
+                }
+            });
+        });
+
+        this.shadowRoot.appendChild(this.indicator);
+        this.restoreIndicatorPosition();
+    }
+
+    // インジケーターのスタイル定義を作る。
+    // ページ側のCSSと干渉しないよう Shadow DOM の中だけで完結させる。
+    createIndicatorStyle() {
         const style = document.createElement("style");
         style.textContent = `
             #vvradio-indicator {
@@ -267,12 +307,14 @@ class VVRadioReader {
                 100% { box-shadow: 0 0 0 0 rgba(46, 182, 125, 0); }
             }
         `;
-        this.shadowRoot.appendChild(style);
+        return style;
+    }
 
-        this.indicator = document.createElement("div");
-        this.indicator.id = "vvradio-indicator";
-
-        // --- ドラッグ＆ドロップ実装 ---
+    // インジケーターのドラッグ移動を有効にする。
+    // 戻り値は「直前の操作がドラッグだったか」を返す関数で、クリックでの
+    // 読み上げトグルとドラッグの競合を避けるために使う。
+    // @returns {() => boolean}
+    enableIndicatorDrag() {
         let isDragging = false;
         let dragMoved = false;
         let startX, startY, initialLeft, initialTop;
@@ -336,36 +378,11 @@ class VVRadioReader {
             document.addEventListener("mouseup", onMouseUp);
         });
 
-        // 読み上げ開始/停止のトグルリスナー（左クリック）
-        this.indicator.addEventListener("click", (e) => {
-            // ドラッグ操作だった場合はクリック判定を破棄（競合回避）
-            if (dragMoved) {
-                e.preventDefault();
-                return;
-            }
+        return () => dragMoved;
+    }
 
-            this.toggleReading();
-        });
-
-        // 右クリックリスナー。動作は設定で切替可能（既定: 画面OCR読み上げの開始）。
-        // 従来のオプション画面を開く動作は、設定 iconRightClickAction を
-        // "options" にすることで維持できる。
-        this.indicator.addEventListener("contextmenu", (e) => {
-            e.preventDefault();
-            chrome.storage.local.get({ iconRightClickAction: "capture" }, (res) => {
-                if (res.iconRightClickAction === "options") {
-                    chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
-                } else {
-                    // ページ内の範囲選択オーバーレイを直接開始する
-                    // （インジケーターはトップフレームにのみ存在する）
-                    this.startOcrSelection();
-                }
-            });
-        });
-
-        this.shadowRoot.appendChild(this.indicator);
-
-        // 保存された位置があれば復元
+    // 保存された位置があれば復元する
+    restoreIndicatorPosition() {
         chrome.storage.local.get(["vvradio_icon_pos", "iconSize"], (res) => {
             if (res.vvradio_icon_pos) {
                 const { left, top } = res.vvradio_icon_pos;
@@ -768,12 +785,17 @@ class VVRadioReader {
         if (this.ocrToast) this.showOcrToast(text);
     }
 
-    removeOcrToast() {
-        this.clearOcrStallWatchdog();
+    // キャプチャ後の「時間がかかっています」表示を出す予約を取り消す
+    clearOcrToastGuard() {
         if (this.ocrToastGuard) {
             clearTimeout(this.ocrToastGuard);
             this.ocrToastGuard = null;
         }
+    }
+
+    removeOcrToast() {
+        this.clearOcrStallWatchdog();
+        this.clearOcrToastGuard();
         if (this.ocrToast) {
             this.ocrToast.remove();
             this.ocrToast = null;
@@ -794,10 +816,7 @@ class VVRadioReader {
         // 撮影のために隠したインジケーターを、どの終了経路でも確実に復帰させる。
         if (this.indicator) this.indicator.style.visibility = "";
         this.clearOcrStallWatchdog();
-        if (this.ocrToastGuard) {
-            clearTimeout(this.ocrToastGuard);
-            this.ocrToastGuard = null;
-        }
+        this.clearOcrToastGuard();
         if (request.status === "error") {
             this.showOcrToast(request.message || "文字認識に失敗しました。");
             this.updateUIState('error');

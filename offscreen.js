@@ -49,9 +49,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // --- ページ内範囲選択OCR ---
 
-// OCRワーカーは組版方向（横書き jpn / 縦書き jpn_vert）ごとに初回利用時に生成し、
-// 以降のOCRで使い回す。この offscreen document が破棄された場合は次回作成時に再生成される。
-const ocrWorkerPromises = {};
 // 進行状況の通知先タブ（OCR実行中のみ設定）
 let ocrProgressTabId = null;
 // 1回のOCR要求で recognize は最大6回走る（拡大版・二値化版・融合用の各倍率）。
@@ -77,23 +74,17 @@ function toOverallOcrProgress(passProgress) {
     return ocrProgressBase + (1 - ocrProgressBase) * OCR_PROGRESS_PASS_SHARE * p;
 }
 
-function getOcrWorker(lang) {
-    if (!ocrWorkerPromises[lang]) {
-        ocrWorkerPromises[lang] = createOcrWorker(lang, (m) => {
-            if (m.status === "recognizing text" && ocrProgressTabId != null) {
-                notifyBackground("OCR_PROGRESS", {
-                    tabId: ocrProgressTabId,
-                    progress: toOverallOcrProgress(m.progress)
-                });
-            }
-        }).catch((err) => {
-            // 失敗したPromiseをキャッシュしない（次回のOCRで再試行できるようにする）
-            ocrWorkerPromises[lang] = null;
-            throw err;
+// OCRワーカーは組版方向（横書き jpn / 縦書き jpn_vert）ごとに初回利用時に生成し、
+// 以降のOCRで使い回す。この offscreen document が破棄された場合は次回作成時に再生成される。
+const ocrWorkers = createOcrWorkerPool((m) => {
+    if (m.status === "recognizing text" && ocrProgressTabId != null) {
+        notifyBackground("OCR_PROGRESS", {
+            tabId: ocrProgressTabId,
+            progress: toOverallOcrProgress(m.progress)
         });
     }
-    return ocrWorkerPromises[lang];
-}
+});
+const getOcrWorker = ocrWorkers.get;
 
 // 範囲OCR要求を1件ずつ順に処理するチェーン。共有Tesseractワーカーの recognize は
 // 並行呼び出しに耐えず、進捗通知先 ocrProgressTabId もモジュールグローバルのため、
@@ -105,13 +96,7 @@ function enqueueOcrRecognition(message) {
 }
 
 // ハングした可能性のあるワーカーを破棄し、次回のOCRで作り直させる（認識タイムアウト時に使用）。
-function resetOcrWorkers() {
-    for (const lang of Object.keys(ocrWorkerPromises)) {
-        const promise = ocrWorkerPromises[lang];
-        ocrWorkerPromises[lang] = null;
-        if (promise) promise.then((worker) => worker.terminate()).catch(() => {});
-    }
-}
+const resetOcrWorkers = ocrWorkers.terminate;
 
 /**
  * キャプチャ画像から選択範囲を切り出してOCRし、結果を background へ通知する。
@@ -231,27 +216,8 @@ async function processSynthesis() {
 }
 
 /**
- * 制限時間つきの fetch。時間内に応答が無ければ中断して例外にする。
- * VOICEVOXエンジンが落ちている・固まっている場合に、合成キューが
- * 永久に詰まって以降の読み上げが一切できなくなるのを防ぐ。
- */
-async function fetchWithTimeout(url, options, timeoutMs) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        return await fetch(url, { ...options, signal: controller.signal });
-    } catch (err) {
-        if (err.name === "AbortError") {
-            throw new Error(`VOICEVOXエンジンが応答しません（${Math.round(timeoutMs / 1000)}秒）`);
-        }
-        throw err;
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
-/**
- * VOICEVOX APIを使用して音声を合成し、Blob URLを返す
+ * VOICEVOX APIを使用して音声を合成し、Blob URLを返す。
+ * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
  */
 async function generateVoiceBlob(text, settings) {
     const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;

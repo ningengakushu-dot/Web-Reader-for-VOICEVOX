@@ -27,7 +27,7 @@ body {
 .container {
     background: var(--card-bg);
     width: 100%;
-    max-width: 450px;
+    max-width: 620px;
     padding: 32px;
     border-radius: var(--radius);
     box-shadow: var(--shadow);
@@ -52,6 +52,63 @@ h1 {
 
 .settings-section {
     margin-bottom: 24px;
+}
+
+/* 設定を役割ごとにまとめるセクション */
+.settings-group {
+    margin-bottom: 28px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.settings-group:last-of-type {
+    border-bottom: none;
+    margin-bottom: 8px;
+}
+
+.group-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--primary);
+    margin: 0 0 16px;
+}
+
+/* 音声調整スライダーは 2 列に並べ、1 本あたりの操作幅を広く保つ */
+.slider-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 20px;
+}
+
+.slider-grid .settings-section {
+    margin-bottom: 20px;
+    min-width: 0;
+}
+
+.slider-wrapper input[type="range"] {
+    width: 100%;
+    accent-color: var(--primary);
+    margin: 0;
+}
+
+@media (max-width: 520px) {
+    .slider-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* 「アイコンの見た目」のドロップダウンとプレビューを横並びにする */
+.icon-style-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.icon-style-select-wrapper {
+    flex: 1 1 240px;
+    min-width: 0;
 }
 
 label {
@@ -111,7 +168,7 @@ select:focus-visible {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-top: 10px;
+    flex-shrink: 0;
 }
 
 .icon-preview-row .hint {

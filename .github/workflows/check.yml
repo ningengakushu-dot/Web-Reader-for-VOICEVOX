@@ -34,6 +34,7 @@ jobs:
               m.options_page,
               ...Object.values(m.icons),
               ...m.content_scripts.flatMap((c) => c.js),
+              ...(m.web_accessible_resources || []).flatMap((w) => w.resources || []),
             ];
             let ng = 0;
             for (const r of refs) {
@@ -43,6 +44,26 @@ jobs:
             if (!/^\d+\.\d+\.\d+$/.test(m.version)) { console.error("version の形式が不正"); ng++; }
             if (ng) process.exit(1);
             console.log("manifest OK (v" + m.version + ")");
+          '
+
+      - name: 拡張機能ページが読み込むファイルの存在確認
+        run: |
+          # script/link の参照先が実在するか。JSファイルを分割したときに
+          # HTML への追記漏れで拡張が壊れるのを防ぐ。
+          node -e '
+            const fs = require("fs");
+            const pages = ["offscreen.html", "options.html", "capture.html"];
+            let ng = 0;
+            for (const page of pages) {
+              const html = fs.readFileSync(page, "utf8");
+              for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
+                const ref = m[1];
+                if (/^(https?:|data:|#)/.test(ref)) continue;
+                if (!fs.existsSync(ref)) { console.error(page + " の参照先が無い: " + ref); ng++; }
+              }
+            }
+            if (ng) process.exit(1);
+            console.log("拡張機能ページの参照 OK");
           '
 
       - name: リモートコードを実行していないことの確認
