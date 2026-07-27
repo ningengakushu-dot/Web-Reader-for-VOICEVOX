@@ -32,6 +32,12 @@ const DOM_TEXT_CHAR_CLIP_MAX = 600;
 // 中身を読めないためTier 0を諦めてOCRへ回す。
 const DOM_TEXT_FOREIGN_FRAME_RATIO = 0.25;
 
+// 画像が選択範囲を占める割合がこれ以上で、かつ文字の占める面積が
+// 画像面積の 1/4 に満たない場合は「画像を読ませたい選択」とみなしてOCRへ回す。
+// 実測した実サイト10件の最大は 42%（楽天）で、いずれもこの条件には該当しない。
+const DOM_TEXT_IMAGE_DOMINANT_RATIO = 0.5;
+const DOM_TEXT_IMAGE_VS_TEXT_RATIO = 4;
+
 // 読み上げ対象にしないタグ
 const DOM_TEXT_SKIP_TAGS = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TITLE", "META", "LINK",
@@ -45,6 +51,25 @@ const DOM_TEXT_BLOCK_TAGS = new Set([
     "BLOCKQUOTE", "PRE", "FIGCAPTION", "FIGURE", "FORM", "UL", "OL", "DL",
     "TABLE", "ADDRESS", "HR", "BR"
 ]);
+
+// getComputedStyle はレイアウト情報の読み出しを伴い、テキストノードごとに
+// 祖先を遡って呼ぶと無視できないコストになる。1回の抽出の間だけ結果を覚えておく
+// （抽出中にページのスタイルが変わることは想定しない）。
+let styleCache = null;
+
+function cachedStyle(el) {
+    if (!styleCache) {
+        const view = el.ownerDocument.defaultView;
+        return view ? view.getComputedStyle(el) : null;
+    }
+    let style = styleCache.get(el);
+    if (style === undefined) {
+        const view = el.ownerDocument.defaultView;
+        style = view ? view.getComputedStyle(el) : null;
+        styleCache.set(el, style);
+    }
+    return style;
+}
 
 // TreeWalker で現在のノードの部分木を飛ばして次へ進む。
 // nextSibling() は次の兄弟が無いとき現在位置を動かさないため、
@@ -82,6 +107,32 @@ function offsetRect(rect, offset) {
     };
 }
 
+// 画面には出さず支援技術にだけ読ませる「視覚的隠しテキスト」を見分ける。
+// （例: Wikipedia のセクション開閉ボタンに付く「◯◯サブセクションを切り替えます」）
+//
+// 1px の箱に押し込めて overflow:hidden する／clip で潰す、という定型手法が使われる。
+// これらはレイアウト上の矩形が通常サイズのまま残るため、行矩形の大きさでは判別できず、
+// 祖先の指定を見る必要がある。本アプリは「画面で見えている範囲」を読み上げるため、
+// 目に見えない補助ラベルは読まない（OCR経路の挙動とも揃う）。
+function isVisuallyHiddenText(el) {
+    let node = el;
+    // 定型手法は数階層以内に収まるため、遡る範囲を限定してコストを抑える
+    for (let depth = 0; node && node.nodeType === 1 && depth < 5; depth++, node = node.parentElement) {
+        const style = cachedStyle(node);
+        if (!style) return false;
+        const clip = style.clip || "";
+        if (/^rect\(\s*(0px,\s*){3}0px\s*\)$/.test(clip.replace(/\s+/g, " ").trim())) return true;
+        const clipPath = style.clipPath || "";
+        if (/inset\(\s*(50|100)%/.test(clipPath)) return true;
+        if (style.overflow !== "visible") {
+            const w = parseFloat(style.width);
+            const h = parseFloat(style.height);
+            if ((w > 0 && w <= 1) || (h > 0 && h <= 1)) return true;
+        }
+    }
+    return false;
+}
+
 // 要素が視覚的に存在しているか。スクリーンリーダーが読まないものは読まない。
 function isElementReadable(el) {
     if (!el || el.nodeType !== 1) return false;
@@ -97,8 +148,42 @@ function isElementReadable(el) {
             contentVisibilityAuto: true
         });
     }
-    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    const style = cachedStyle(el);
+    if (!style) return true;
     return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0.1;
+}
+
+// その要素が背景を塗っているか（＝後ろのものを実際に隠すか）。
+function paintsBackground(el) {
+    // 中身を描画する要素は無条件で隠すとみなす
+    if (el.tagName === "IFRAME" || el.tagName === "IMG" || el.tagName === "VIDEO"
+        || el.tagName === "CANVAS" || el.tagName === "OBJECT" || el.tagName === "EMBED") {
+        return true;
+    }
+    const style = cachedStyle(el);
+    if (!style) return true;
+    if (style.backgroundImage && style.backgroundImage !== "none") return true;
+    const match = /^rgba?\(([^)]+)\)/.exec(style.backgroundColor || "");
+    if (!match) return false;
+    const parts = match[1].split(",").map((v) => parseFloat(v));
+    // rgb(...) は不透明、rgba(...) はアルファで判断する
+    return parts.length < 4 || parts[3] > 0.05;
+}
+
+// 当たり判定で前面に出た別要素が、本当にテキストを隠しているかを見る。
+//
+// カード全体をリンクにする実装（透明な <a> を position:absolute で重ねる手法）が
+// 広く使われており、当たり判定だけを見ると本文が「覆われている」と誤判定される。
+// 背景を塗っていない要素は後ろの文字が透けて見えるため、隠しているとは扱わない。
+// モーダルや同意ダイアログは背景を塗るので、これまでどおり除外される。
+function isReallyOccluding(hit, el) {
+    let node = hit;
+    // 共通の祖先に達するまでの間に、背景を塗る要素があるかを見る
+    while (node && node.nodeType === 1 && !node.contains(el)) {
+        if (paintsBackground(node)) return true;
+        node = node.parentElement;
+    }
+    return false;
 }
 
 // その座標で最前面にあるのが自分（またはその祖先・子孫）かを見る。
@@ -115,7 +200,8 @@ function isTopMostAt(el, x, y) {
         return true; // 判定できない場合は読む側に倒す
     }
     if (!hit) return false;
-    return hit === el || el.contains(hit) || hit.contains(el);
+    if (hit === el || el.contains(hit) || hit.contains(el)) return true;
+    return !isReallyOccluding(hit, el);
 }
 
 // テキストが実際に見えているかを、行ごとに複数点で確かめる。
@@ -314,7 +400,7 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
                     if (inner && inner.body) {
                         // 同一オリジンなら中身をそのまま辿れる。
                         // 枠線とパディングの分だけ内側の原点がずれる。
-                        const cs = win.getComputedStyle(el);
+                        const cs = cachedStyle(el) || win.getComputedStyle(el);
                         const childOffset = {
                             x: box.left + parseFloat(cs.borderLeftWidth || 0) + parseFloat(cs.paddingLeft || 0),
                             y: box.top + parseFloat(cs.borderTopWidth || 0) + parseFloat(cs.paddingTop || 0)
@@ -356,7 +442,7 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
 
         // --- テキストノード ---
         const parent = node.parentElement;
-        if (!parent || !isElementReadable(parent)) {
+        if (!parent || !isElementReadable(parent) || isVisuallyHiddenText(parent)) {
             node = walker.nextNode();
             continue;
         }
@@ -372,6 +458,7 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
         const clipped = clipTextNode(node, sel, offset, doc);
         if (clipped.text && clipped.text.trim()
             && isTextVisiblyOnTop(parent, clipped.lineRects, sel, offset)) {
+            for (const r of clipped.lineRects) out.textArea += rectIntersectionArea(r, sel);
             out.units.push({
                 text: clipped.text,
                 rect: clipped.lineRects[0],
@@ -390,7 +477,9 @@ function joinTextUnits(units) {
     let prevBlock = null;
     let prevKey = null;
     for (const unit of units) {
-        const text = unit.text.replace(/[ \t ]+/g, " ");
+        // HTMLの字下げによる改行や連続空白は文章としての意味を持たないので潰す。
+        // 段落の「間」はブロック要素の境界だけで表す。
+        const text = unit.text.replace(/\s+/g, " ");
         if (!text.trim()) continue;
         // 同じ文言が連続する場合は1回だけ読む。
         // 画像の代替テキストとリンクの文字列が同一のカード（ニュース一覧で頻出）や、
@@ -399,11 +488,16 @@ function joinTextUnits(units) {
         if (key.length >= 4 && key === prevKey) continue;
         prevKey = key;
         if (parts.length && unit.block !== prevBlock) parts.push("\n");
-        else if (parts.length) parts.push("");
         parts.push(text);
         prevBlock = unit.block !== undefined ? unit.block : null;
     }
-    return parts.join("").replace(/\n{3,}/g, "\n\n").trim();
+    return parts.join("")
+        // 日本語の文字どうしの間に入った空白は組版上の区切りでしかないため取り除く
+        // （読み上げでは不自然な間として現れてしまう）
+        .replace(/([\u3000-\u9FFF\uF900-\uFAFF\uFF66-\uFF9F]) +(?=[\u3000-\u9FFF\uF900-\uFAFF\uFF66-\uFF9F])/g, "$1")
+        .replace(/[ \t]*\n[ \t]*/g, "\n")
+        .replace(/\n{2,}/g, "\n")
+        .trim();
 }
 
 /**
@@ -423,11 +517,13 @@ function collectRegionText(rect, options = {}) {
         height: rect.height
     };
     const selArea = rectArea(sel);
-    const out = { units: [], foreignArea: 0, opaqueArea: 0 };
+    const out = { units: [], foreignArea: 0, opaqueArea: 0, textArea: 0 };
+    styleCache = new Map();
 
     try {
         collectFromDocument(document.body || document.documentElement, document, sel, null, options, out);
     } catch (err) {
+        styleCache = null;
         return {
             ok: false,
             text: "",
@@ -437,13 +533,18 @@ function collectRegionText(rect, options = {}) {
         };
     }
 
+    styleCache = null;
     const text = joinTextUnits(out.units);
     const chars = text.replace(/\s/g, "").length;
+    // 画像同士が重なると面積が二重に積まれるため、選択範囲を超えないよう抑える
+    const opaqueArea = Math.min(out.opaqueArea, selArea);
     const stats = {
         ms: Date.now() - started,
         units: out.units.length,
+        chars,
         foreignRatio: selArea > 0 ? out.foreignArea / selArea : 0,
-        opaqueRatio: selArea > 0 ? out.opaqueArea / selArea : 0
+        opaqueRatio: selArea > 0 ? opaqueArea / selArea : 0,
+        textRatio: selArea > 0 ? Math.min(out.textArea, selArea) / selArea : 0
     };
 
     // クロスオリジンiframeが選択範囲の大部分を占めるなら、
@@ -453,6 +554,13 @@ function collectRegionText(rect, options = {}) {
     }
     if (chars < DOM_TEXT_MIN_CHARS) {
         return { ok: false, text, chars, reason: "テキストが見つからない（画像・canvas等）", stats };
+    }
+    // 選択範囲の大半が画像で、文字はその周りに少しあるだけ（キャプションや
+    // 見出しだけ）の場合は、画像の中の文字こそが読みたいものと考えられる。
+    // ページ内テキストだけを読むと肝心の中身を飛ばすため、OCRへ回す。
+    if (stats.opaqueRatio >= DOM_TEXT_IMAGE_DOMINANT_RATIO
+        && out.textArea * DOM_TEXT_IMAGE_VS_TEXT_RATIO < opaqueArea) {
+        return { ok: false, text, chars, reason: "選択範囲の大半が画像", stats };
     }
     return { ok: true, text, chars, reason: "", stats };
 }

@@ -573,7 +573,9 @@ class VVRadioReader {
                 if (host) host.style.visibility = prevVisibility;
             }
             if (result && result.ok && result.text) {
-                this.speakText(result.text);
+                // 段落の切れ目はDOM構造から正確に分かっているので、改行のまま渡して
+                // 合成側で「間」にしてもらう（OCR経路と同じ扱い）。
+                this.speakText(result.text, { keepParagraphs: true });
                 return;
             }
         }
@@ -703,10 +705,10 @@ class VVRadioReader {
     }
 
     // 音声再生リクエスト
-    speakText(text) {
+    speakText(text, options = {}) {
         if (!text) return;
 
-        const cleanText = this.cleanMessage(text);
+        const cleanText = this.cleanMessage(text, options.keepParagraphs === true);
         if (!cleanText) return;
 
         chrome.runtime.sendMessage({
@@ -729,12 +731,16 @@ class VVRadioReader {
     }
 
     // メッセージの整形（不要な情報の削除・置換）
-    cleanMessage(text) {
+    // keepParagraphs=true のときは改行を残す。合成側が改行を文の区切りとして扱い、
+    // 段落の「間」になるため（ページ内テキスト経路で段落構造が分かる場合に使う）。
+    cleanMessage(text, keepParagraphs = false) {
         if (!text) return "";
-        return text
-            .replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略")
-            .replace(/\n+/g, " ")
-            .trim();
+        const withoutUrls = text
+            .replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略");
+        if (keepParagraphs) {
+            return withoutUrls.replace(/[ \t]*\n[ \t]*/g, "\n").replace(/\n{2,}/g, "\n").trim();
+        }
+        return withoutUrls.replace(/\n+/g, " ").trim();
     }
 }
 
