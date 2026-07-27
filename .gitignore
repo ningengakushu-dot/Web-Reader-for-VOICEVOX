@@ -6,3 +6,6 @@ CLAUDE.md
 
 # 作業用の音声出力
 audio/
+
+# ストア提出用 zip の出力先（tools/pack.ps1）
+dist/

@@ -81,8 +81,6 @@ async function startCaptureOcr(tab) {
     // 先に読み込ませておく。初回だけ発生する待ち時間を利用者に見せないため。
     // 失敗しても本来の経路で改めて生成されるので無視してよい。
     prewarmOcr();
-
-    startCaptureOcrInTab(tab);
 }
 
 // フォールバック: タブをキャプチャし、範囲選択・OCR用の capture.html を開く。

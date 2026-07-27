@@ -34,6 +34,8 @@ class VVRadioReader {
         this.ocrStallWatchdog = null;
         // ルビ優先読みの設定。ページ内テキスト経路（Tier 0）でも同じ設定に従う。
         this.ocrRemoveRuby = false;
+        // 登録した storage の変更リスナー（deactivate でまとめて解除する）
+        this.storageListeners = [];
         // クロスオリジンの frame プロパティにアクセスせず、window.self/window.top の
         // 比較のみで安全にトップフレーム判定を行う
         this.isTopFrame = window.self === window.top;
@@ -61,12 +63,20 @@ class VVRadioReader {
             if (!this.active) return;
             this.ocrRemoveRuby = res.ocrRemoveRuby === true;
         });
-        chrome.storage.onChanged.addListener((changes, namespace) => {
+        this.addStorageListener((changes, namespace) => {
             if (!this.active || namespace !== "local") return;
             if (changes.ocrRemoveRuby) {
                 this.ocrRemoveRuby = changes.ocrRemoveRuby.newValue === true;
             }
         });
+    }
+
+    // storage の変更リスナーを登録し、deactivate で確実に解除できるよう控えておく。
+    // active フラグだけに頼ると、拡張のリロードと再注入を繰り返した同一ページに
+    // 動かないリスナーが積み上がる。
+    addStorageListener(fn) {
+        chrome.storage.onChanged.addListener(fn);
+        this.storageListeners.push(fn);
     }
 
     // このインスタンスがまだ機能しているか（＝再注入をスキップしてよいか）を返す。
@@ -82,6 +92,10 @@ class VVRadioReader {
     // 以降のメッセージは active=false により無視される。
     deactivate() {
         this.active = false;
+        for (const fn of this.storageListeners || []) {
+            try { chrome.storage.onChanged.removeListener(fn); } catch (e) { /* 無効化済み */ }
+        }
+        this.storageListeners = [];
         // OCR選択オーバーレイの window リスナーと、OCRトースト/進捗ガードタイマーも解放する。
         // host を消すだけでは window に張った mousemove/mouseup/keydown と setTimeout が
         // 取り残され、detached ノードを参照し続けてリークする（OCR選択中の再注入で発生）。
@@ -103,7 +117,7 @@ class VVRadioReader {
             this.indicator.style.height = `${size}px`;
         });
 
-        chrome.storage.onChanged.addListener((changes, namespace) => {
+        this.addStorageListener((changes, namespace) => {
             // deactivate 済み（stale）インスタンスや、インジケーター未生成のフレームでは
             // detached になった indicator を触らないよう早期に抜ける。
             if (!this.active || !this.indicator) return;
