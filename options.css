@@ -106,8 +106,9 @@ h1 {
     flex-wrap: wrap;
 }
 
+/* スライダー 2 列と同じ幅に揃え、右側にプレビューを置く余白を確保する */
 .icon-style-select-wrapper {
-    flex: 1 1 240px;
+    flex: 0 1 300px;
     min-width: 0;
 }
 
