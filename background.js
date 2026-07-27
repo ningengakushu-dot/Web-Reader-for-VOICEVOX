@@ -62,7 +62,7 @@ async function startCaptureOcr(tab) {
         // capture.html も開いてUIが二重に立ち上がる。
         await chrome.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ["content.js"]
+            files: ["dom-text.js", "content.js"]
         });
     } catch (err) {
         // 注入不可ページ（PDFビューア・chrome:// 等）→ タブ方式へフォールバック
@@ -218,7 +218,7 @@ async function sendMessageWithInjection(tabId, message, context, options = {}) {
         try {
             await chrome.scripting.executeScript({
                 target: injectionTarget,
-                files: ["content.js"]
+                files: ["dom-text.js", "content.js"]
             });
             if (messageOptions) {
                 await chrome.tabs.sendMessage(tabId, message, messageOptions);
@@ -264,7 +264,7 @@ async function handleShortcutRequest(tabId, source) {
     try {
         await chrome.scripting.executeScript({
             target: { tabId, allFrames: true },
-            files: ["content.js"]
+            files: ["dom-text.js", "content.js"]
         });
     } catch (err) {
         console.warn(`Background: ショートカット用 content.js 事前注入失敗 (${source}):`, err.message);
