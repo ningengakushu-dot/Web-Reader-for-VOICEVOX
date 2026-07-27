@@ -57,6 +57,14 @@ Tesseract.js本体・WASMコア・日本語学習データ（`jpn.traineddata` /
 ## 3. バージョン別 ストア更新テキスト (Version Update Text)
 ダッシュボードの「公開用メモ」やストア掲載の更新内容として使用できます。
 
+### v1.4.0
+
+#### 日本語
+ページ内アイコンの見た目を選べるようにしました。オプション画面の「アイコンの見た目」から、シンプルな円（既定）／このアプリのアイコン／読み上げキャラクター／好きな画像 の4種類を選べます。アイコンを大きく表示したときの見栄えを改善するための機能です。「読み上げキャラクター」を選ぶと、いまどのキャラクターで読み上げるかがページ上で確認できます。キャラクター画像は拡張機能に同梱しておらず、ユーザーの端末で起動しているVOICEVOXから取得し、ブラウザの外へ送信されることはありません。キャラクター画像の利用が規約で明示的に許可されているキャラクターのみ画像で表示し、それ以外はキャラクター名で表示します。「好きな画像」ではPNG / JPEG / WebP / GIF（2MBまで）を指定でき、128pxの正方形に縮小して端末内に保存します。
+
+#### English (Recommended)
+The on-page icon can now be customized. Under "Icon appearance" in the options page you can choose from four styles: a simple circle (default), the extension's own icon, the current VOICEVOX character, or an image of your choice. This makes the icon look better when displayed at a larger size. Choosing the character style lets you see at a glance which voice is currently selected. Character images are not bundled with the extension: they are retrieved from the VOICEVOX application running on your own computer and never leave your browser. Only characters whose terms explicitly permit in-app use are shown as images; all others are shown by name. For a custom image, PNG / JPEG / WebP / GIF files up to 2 MB are accepted and are resized to a 128 px square stored on your device.
+
 ### v1.3.1
 
 #### 日本語
@@ -95,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 出力: `dist/web-reader-for-voicevox-<version>.zip`
 
-**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `ocr-words.txt` / `ocr-dictionary-NOTICE.md` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
+**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `ocr-ruby.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `ocr-words.txt` / `ocr-dictionary-NOTICE.md` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
 
 **除外するもの**: `README.md`、`docs/`、`tools/`、`dist/`、ストア掲載用の素材（`images/Web-Reader-for-VOICEVOX_*.png`、`images/Web_Reader_for_VOICEVOX.mp4`）、`.claude/`、`AGENTS.md`、`CLAUDE.md`、`audio/`
 

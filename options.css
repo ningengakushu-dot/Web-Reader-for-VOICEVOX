@@ -27,7 +27,7 @@ body {
 .container {
     background: var(--card-bg);
     width: 100%;
-    max-width: 450px;
+    max-width: 620px;
     padding: 32px;
     border-radius: var(--radius);
     box-shadow: var(--shadow);
@@ -52,6 +52,64 @@ h1 {
 
 .settings-section {
     margin-bottom: 24px;
+}
+
+/* 設定を役割ごとにまとめるセクション */
+.settings-group {
+    margin-bottom: 28px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.settings-group:last-of-type {
+    border-bottom: none;
+    margin-bottom: 8px;
+}
+
+.group-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--primary);
+    margin: 0 0 16px;
+}
+
+/* 音声調整スライダーは 2 列に並べ、1 本あたりの操作幅を広く保つ */
+.slider-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 20px;
+}
+
+.slider-grid .settings-section {
+    margin-bottom: 20px;
+    min-width: 0;
+}
+
+.slider-wrapper input[type="range"] {
+    width: 100%;
+    accent-color: var(--primary);
+    margin: 0;
+}
+
+@media (max-width: 520px) {
+    .slider-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* 「アイコンの見た目」のドロップダウンとプレビューを横並びにする */
+.icon-style-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+/* スライダー 2 列と同じ幅に揃え、右側にプレビューを置く余白を確保する */
+.icon-style-select-wrapper {
+    flex: 0 1 300px;
+    min-width: 0;
 }
 
 label {
@@ -104,6 +162,64 @@ select:focus-visible {
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 8px;
+}
+
+/* ページ内アイコンの見た目プレビュー。実際の表示と同じ見え方にする。 */
+.icon-preview-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.icon-preview-row .hint {
+    margin-top: 0;
+}
+
+.icon-preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background-color: #3498db;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    color: #ffffff;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+    overflow: hidden;
+}
+
+.icon-preview.image {
+    background-color: transparent;
+    box-shadow: none;
+    background-size: contain;
+    background-position: center;
+    background-repeat: no-repeat;
+}
+
+#customIcon-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+/* ID セレクタの display:flex が hidden 属性の UA スタイルに勝ってしまうため明示する */
+#customIcon-row[hidden] {
+    display: none;
+}
+
+#customIcon-row .hint {
+    flex-basis: 100%;
+    margin-top: 0;
+}
+
+#customIcon-row .secondary-btn {
+    padding: 6px 12px;
 }
 
 .checkbox-label {

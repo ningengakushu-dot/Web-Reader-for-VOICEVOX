@@ -413,6 +413,86 @@ function imageAltOf(el) {
 }
 
 /**
+ * 画像・フレーム・canvas など「文字として取り出せない要素」を処理する。
+ *
+ * 面積を out に積み、読める代替テキストがあれば単位として追加する。
+ * 同一オリジンの iframe だけは中身をそのまま辿れるので再帰する。
+ *
+ * @param {Element} el
+ * @param {{left:number,top:number,right:number,bottom:number}} sel 選択矩形（最上位ビューポート基準）
+ * @param {{x:number,y:number}|null} offset フレームのオフセット
+ * @param {{removeRuby?: boolean}} options
+ * @param {{units: object[], foreignArea: number, opaqueArea: number, textArea: number}} out
+ * @param {Window} win
+ * @returns {boolean} true ならこの要素の部分木をまとめて飛ばす
+ */
+function collectFromMediaElement(el, sel, offset, options, out, win) {
+    const box = offsetRect(el.getBoundingClientRect(), offset);
+    const overlap = rectIntersectionArea(box, sel);
+    // 手前が別の要素で塞がれている画像・フレームは、面積も代替テキストも
+    // 一切採用しない。ライトボックスや折りたたみの裏にある広告の文言が
+    // 読み上げに混入するのを防ぐ（実機で報告された不具合の直接の原因）。
+    if (overlap > 0 && !isBoxVisiblyOnTop(el, box, sel, offset)) return true;
+
+    if (el.tagName === "IFRAME") {
+        if (overlap > 0) {
+            let inner = null;
+            try {
+                inner = el.contentDocument;
+            } catch (e) {
+                inner = null; // クロスオリジン
+            }
+            if (inner && inner.body) {
+                // 同一オリジンなら中身をそのまま辿れる。
+                // 枠線とパディングの分だけ内側の原点がずれる。
+                const cs = cachedStyle(el) || win.getComputedStyle(el);
+                const childOffset = {
+                    x: box.left + parseFloat(cs.borderLeftWidth || 0) + parseFloat(cs.paddingLeft || 0),
+                    y: box.top + parseFloat(cs.borderTopWidth || 0) + parseFloat(cs.paddingTop || 0)
+                };
+                collectFromDocument(inner.body, inner, sel, childOffset, options, out);
+            } else if (isElementReadable(el) !== false) {
+                out.foreignArea += overlap;
+            }
+        }
+        return true;
+    }
+
+    if (overlap > 0 && (el.tagName === "CANVAS" || el.tagName === "SVG" || el.tagName === "VIDEO")) {
+        // 中身が文字かどうかは分からないので、代替テキストの有無に関わらず
+        // 「文字として取り出せていない面積」として数える。
+        out.opaqueArea += overlap;
+        if (isMostlyInside(box, sel, overlap)) {
+            const label = imageAltOf(el);
+            if (label) out.units.push({ text: label, rect: box, kind: "label" });
+        }
+        return true;
+    }
+
+    // 「選択範囲にかからない部分木をまとめて飛ばす」最適化は入れない。
+    // 親要素の矩形には、浮動要素や絶対配置の子孫が含まれないことがあり
+    // （実測: Wikipedia の infobox が丸ごと落ちた）、安全に飛ばせないため。
+    if (el.tagName === "IMG" && overlap > 0) {
+        if (isElementReadable(el)) {
+            // 代替テキストの有無に関わらず、画像は「文字として取り出せていない
+            // 面積」として数える。代替テキストがあっても、それが画像の中身を
+            // 表しているとは限らないため（広告バナー等）。
+            out.opaqueArea += overlap;
+            // 代替テキストを読むのは、その画像が選択範囲にしっかり入っている
+            // ときだけにする。端に少し掛かっただけの隣の広告の文言を丸ごと
+            // 読み上げてしまう事故を防ぐ。
+            if (isMostlyInside(box, sel, overlap)) {
+                const alt = imageAltOf(el);
+                if (alt) out.units.push({ text: alt, rect: box, kind: "alt" });
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+/**
  * 1つの文書（トップ文書・同一オリジンiframe・open な Shadow Root）を走査して、
  * 選択矩形に入っているテキスト断片を収集する。
  * 座標は全て最上位ビューポート基準に揃える（offset で補正）。
@@ -461,75 +541,9 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
                 node = walker.nextNode();
                 continue;
             }
-            const box = offsetRect(el.getBoundingClientRect(), offset);
-            const overlap = rectIntersectionArea(box, sel);
-            // 手前が別の要素で塞がれている画像・フレームは、面積も代替テキストも
-            // 一切採用しない。ライトボックスや折りたたみの裏にある広告の文言が
-            // 読み上げに混入するのを防ぐ（実機で報告された不具合の直接の原因）。
-            if (overlap > 0 && !isBoxVisiblyOnTop(el, box, sel, offset)) {
-                node = skipSubtree(walker);
-                continue;
-            }
-
-            if (el.tagName === "IFRAME") {
-                if (overlap > 0) {
-                    let inner = null;
-                    try {
-                        inner = el.contentDocument;
-                    } catch (e) {
-                        inner = null; // クロスオリジン
-                    }
-                    if (inner && inner.body) {
-                        // 同一オリジンなら中身をそのまま辿れる。
-                        // 枠線とパディングの分だけ内側の原点がずれる。
-                        const cs = cachedStyle(el) || win.getComputedStyle(el);
-                        const childOffset = {
-                            x: box.left + parseFloat(cs.borderLeftWidth || 0) + parseFloat(cs.paddingLeft || 0),
-                            y: box.top + parseFloat(cs.borderTopWidth || 0) + parseFloat(cs.paddingTop || 0)
-                        };
-                        collectFromDocument(inner.body, inner, sel, childOffset, options, out);
-                    } else if (isElementReadable(el) !== false) {
-                        out.foreignArea += overlap;
-                    }
-                }
-                node = skipSubtree(walker);
-                continue;
-            }
-
-            if (overlap > 0 && (el.tagName === "CANVAS" || el.tagName === "SVG" || el.tagName === "VIDEO")) {
-                // 中身が文字かどうかは分からないので、代替テキストの有無に関わらず
-                // 「文字として取り出せていない面積」として数える。
-                out.opaqueArea += overlap;
-                if (isMostlyInside(box, sel, overlap)) {
-                    const label = imageAltOf(el);
-                    if (label) out.units.push({ text: label, rect: box, kind: "label" });
-                }
-                node = skipSubtree(walker);
-                continue;
-            }
-
-            // 「選択範囲にかからない部分木をまとめて飛ばす」最適化は入れない。
-            // 親要素の矩形には、浮動要素や絶対配置の子孫が含まれないことがあり
-            // （実測: Wikipedia の infobox が丸ごと落ちた）、安全に飛ばせないため。
-            if (el.tagName === "IMG" && overlap > 0) {
-                if (isElementReadable(el)) {
-                    // 代替テキストの有無に関わらず、画像は「文字として取り出せていない
-                    // 面積」として数える。代替テキストがあっても、それが画像の中身を
-                    // 表しているとは限らないため（広告バナー等）。
-                    out.opaqueArea += overlap;
-                    // 代替テキストを読むのは、その画像が選択範囲にしっかり入っている
-                    // ときだけにする。端に少し掛かっただけの隣の広告の文言を丸ごと
-                    // 読み上げてしまう事故を防ぐ。
-                    if (isMostlyInside(box, sel, overlap)) {
-                        const alt = imageAltOf(el);
-                        if (alt) out.units.push({ text: alt, rect: box, kind: "alt" });
-                    }
-                }
-                node = skipSubtree(walker);
-                continue;
-            }
-
-            node = walker.nextNode();
+            node = collectFromMediaElement(el, sel, offset, options, out, win)
+                ? skipSubtree(walker)
+                : walker.nextNode();
             continue;
         }
 

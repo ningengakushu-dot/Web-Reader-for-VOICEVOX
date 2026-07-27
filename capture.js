@@ -24,8 +24,18 @@
 
     // OCRの世代トークン。実行中に新しい選択が行われた場合、古い結果を破棄する。
     let ocrGeneration = 0;
-    // 組版方向（横書き jpn / 縦書き jpn_vert）ごとのワーカーキャッシュ
-    const workerPromises = {};
+
+    // 組版方向（横書き jpn / 縦書き jpn_vert）ごとのワーカーを使い回す。
+    // 生成処理（同梱アセットの指定・タイムアウト保護）と使い回しの管理は
+    // ocr-common.js の createOcrWorkerPool に集約している。
+    const workers = createOcrWorkerPool((m) => {
+        if (m.status === "recognizing text") {
+            ocrProgress.value = m.progress;
+        }
+    });
+    const getWorker = workers.get;
+    // ワーカーを破棄する（ページ離脱時・認識タイムアウト時）。
+    const terminateWorkers = workers.terminate;
 
     // --- 初期化 ---
 
@@ -92,34 +102,6 @@
     function showBanner(message) {
         banner.textContent = message;
         banner.hidden = false;
-    }
-
-    // --- Tesseract.js ワーカー管理 ---
-
-    // ワーカーは組版方向ごとに初回利用時に生成し、以降のOCRで使い回す。
-    // 生成処理（同梱アセットの指定・タイムアウト保護）は ocr-common.js の createOcrWorker に集約。
-    function getWorker(lang) {
-        if (!workerPromises[lang]) {
-            workerPromises[lang] = createOcrWorker(lang, (m) => {
-                if (m.status === "recognizing text") {
-                    ocrProgress.value = m.progress;
-                }
-            }).catch((err) => {
-                // 失敗したPromiseをキャッシュしない（次回のOCRで再試行できるようにする）
-                workerPromises[lang] = null;
-                throw err;
-            });
-        }
-        return workerPromises[lang];
-    }
-
-    // ワーカーを破棄する（ページ離脱時・認識タイムアウト時）。
-    function terminateWorkers() {
-        for (const lang of Object.keys(workerPromises)) {
-            const promise = workerPromises[lang];
-            workerPromises[lang] = null;
-            if (promise) promise.then((worker) => worker.terminate()).catch(() => {});
-        }
     }
 
     // ページを離れるときにワーカーを破棄する

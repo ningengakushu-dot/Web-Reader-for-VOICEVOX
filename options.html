@@ -14,76 +14,117 @@
         </header>
 
         <main>
-            <section class="settings-section">
-                <label for="speaker-select">読み上げキャラクター</label>
-                <div class="select-wrapper">
-                    <select id="speaker-select">
-                        <option value="">キャラクターを取得中...</option>
-                    </select>
-                    <div class="loader" id="loader"></div>
+            <section class="settings-group">
+                <h2 class="group-title">VOICEVOX 音声設定</h2>
+
+                <div class="settings-section">
+                    <label for="speaker-select">読み上げキャラクター</label>
+                    <div class="select-wrapper">
+                        <select id="speaker-select">
+                            <option value="">キャラクターを取得中...</option>
+                        </select>
+                        <div class="loader" id="loader"></div>
+                    </div>
+                    <p class="hint">VOICEVOXエンジンが起動している必要があります。</p>
                 </div>
-                <p class="hint">VOICEVOXエンジンが起動している必要があります。</p>
-            </section>
-            
-            <section class="settings-section">
-                <label for="speed-slider">読み上げ速度: <span id="speed-value">1.0</span>x</label>
-                <div class="slider-wrapper">
-                    <input type="range" id="speed-slider" min="0.5" max="2.0" step="0.1" value="1.0">
+
+                <div class="slider-grid">
+                    <div class="settings-section">
+                        <label for="speed-slider">読み上げ速度: <span id="speed-value">1.0</span>x</label>
+                        <div class="slider-wrapper">
+                            <input type="range" id="speed-slider" min="0.5" max="2.0" step="0.1" value="1.0">
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <label for="pitch-slider">声の高さ(ピッチ): <span id="pitch-value">0.00</span></label>
+                        <div class="slider-wrapper">
+                            <input type="range" id="pitch-slider" min="-0.15" max="0.15" step="0.01" value="0.00">
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <label for="intonation-slider">抑揚: <span id="intonation-value">1.0</span></label>
+                        <div class="slider-wrapper">
+                            <input type="range" id="intonation-slider" min="0.0" max="2.0" step="0.1" value="1.0">
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <label for="volume-slider">音量: <span id="volume-value">1.0</span></label>
+                        <div class="slider-wrapper">
+                            <input type="range" id="volume-slider" min="0.0" max="2.0" step="0.1" value="1.0">
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <label for="pause-slider">間の長さ(倍率): <span id="pause-value">1.0</span>x</label>
+                        <div class="slider-wrapper">
+                            <input type="range" id="pause-slider" min="0.0" max="2.0" step="0.1" value="1.0">
+                        </div>
+                    </div>
                 </div>
             </section>
 
-            <section class="settings-section">
-                <label for="pitch-slider">声の高さ(ピッチ): <span id="pitch-value">0.00</span></label>
-                <div class="slider-wrapper">
-                    <input type="range" id="pitch-slider" min="-0.15" max="0.15" step="0.01" value="0.00">
+            <section class="settings-group">
+                <h2 class="group-title">ページ内アイコン</h2>
+
+                <div class="settings-section">
+                    <label for="iconStyle-select">アイコンの見た目</label>
+                    <div class="icon-style-row">
+                        <div class="select-wrapper icon-style-select-wrapper">
+                            <select id="iconStyle-select">
+                                <option value="dot">シンプルな円（既定）</option>
+                                <option value="app">このアプリのアイコン</option>
+                                <option value="character">読み上げキャラクター</option>
+                                <option value="custom">画像を指定する</option>
+                            </select>
+                        </div>
+                        <div class="icon-preview-row">
+                            <span class="hint">プレビュー:</span>
+                            <span id="iconStyle-preview" class="icon-preview" aria-hidden="true"></span>
+                        </div>
+                    </div>
+                    <p class="hint" id="iconStyle-hint-character" hidden>
+                        今どのキャラクターで読み上げるかがページ上でわかります。画像はお使いのPCのVOICEVOXから取得し、外部へ送信されません。
+                        キャラクター画像の利用が規約で明示的に許可されているキャラクターのみ画像で表示し、それ以外はキャラクター名の頭文字で表示します。
+                    </p>
+                    <div id="customIcon-row" hidden>
+                        <input type="file" id="customIcon-file" accept="image/png,image/jpeg,image/webp,image/gif">
+                        <button type="button" id="customIcon-clear" class="secondary-btn">画像を削除</button>
+                        <p class="hint">PNG / JPEG / WebP / GIF、2MBまで。128px の正方形に縮小して保存します。</p>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <label for="iconSize-slider">アイコンサイズ: <span id="iconSize-value">16</span>px</label>
+                    <div class="slider-wrapper">
+                        <input type="range" id="iconSize-slider" min="16" max="64" step="1" value="16">
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <label for="iconRightClick-select">ページ内アイコンを右クリックしたときの動作</label>
+                    <div class="select-wrapper">
+                        <select id="iconRightClick-select">
+                            <option value="capture">画面OCR読み上げを開始</option>
+                            <option value="options">オプション画面を開く</option>
+                        </select>
+                    </div>
+                    <p class="hint">「画面OCR読み上げを開始」設定時も、ツールバーの拡張機能アイコンを右クリック→「オプション」からこの画面を開けます。</p>
                 </div>
             </section>
 
-            <section class="settings-section">
-                <label for="intonation-slider">抑揚: <span id="intonation-value">1.0</span></label>
-                <div class="slider-wrapper">
-                    <input type="range" id="intonation-slider" min="0.0" max="2.0" step="0.1" value="1.0">
-                </div>
-            </section>
+            <section class="settings-group">
+                <h2 class="group-title">画面OCR読み上げ</h2>
 
-            <section class="settings-section">
-                <label for="volume-slider">音量: <span id="volume-value">1.0</span></label>
-                <div class="slider-wrapper">
-                    <input type="range" id="volume-slider" min="0.0" max="2.0" step="0.1" value="1.0">
+                <div class="settings-section">
+                    <label class="checkbox-label" for="ocrRemoveRuby-check">
+                        <input type="checkbox" id="ocrRemoveRuby-check">
+                        <span>画面OCR読み上げでルビ（ふりがな）を優先して読む</span>
+                    </label>
+                    <p class="hint">縦書きの小説など、ルビが振られたページ向けの設定です。ふりがなの付いた漢字は、漢字の一般的な読みではなく、ふりがなのとおりに読み上げます（例: 「鯨幕」→「くじらまく」）。ルビをうまく読み取れなかった場合は、そのルビを使わず漢字のまま読み上げます。ルビのないページでは影響しません。</p>
                 </div>
-            </section>
-
-            <section class="settings-section">
-                <label for="pause-slider">間の長さ(倍率): <span id="pause-value">1.0</span>x</label>
-                <div class="slider-wrapper">
-                    <input type="range" id="pause-slider" min="0.0" max="2.0" step="0.1" value="1.0">
-                </div>
-            </section>
-
-            <section class="settings-section">
-                <label for="iconSize-slider">アイコンサイズ: <span id="iconSize-value">16</span>px</label>
-                <div class="slider-wrapper">
-                    <input type="range" id="iconSize-slider" min="16" max="64" step="1" value="16">
-                </div>
-            </section>
-
-            <section class="settings-section">
-                <label class="checkbox-label" for="ocrRemoveRuby-check">
-                    <input type="checkbox" id="ocrRemoveRuby-check">
-                    <span>画面OCR読み上げでルビ（ふりがな）を優先して読む</span>
-                </label>
-                <p class="hint">縦書きの小説など、ルビが振られたページ向けの設定です。ふりがなの付いた漢字は、漢字の一般的な読みではなく、ふりがなのとおりに読み上げます（例: 「鯨幕」→「くじらまく」）。ルビをうまく読み取れなかった場合は、そのルビを使わず漢字のまま読み上げます。ルビのないページでは影響しません。</p>
-            </section>
-
-            <section class="settings-section">
-                <label for="iconRightClick-select">ページ内アイコンを右クリックしたときの動作</label>
-                <div class="select-wrapper">
-                    <select id="iconRightClick-select">
-                        <option value="capture">画面OCR読み上げを開始</option>
-                        <option value="options">オプション画面を開く</option>
-                    </select>
-                </div>
-                <p class="hint">「画面OCR読み上げを開始」設定時も、ツールバーの拡張機能アイコンを右クリック→「オプション」からこの画面を開けます。</p>
             </section>
 
             <div class="actions">
@@ -94,7 +135,7 @@
         </main>
 
         <footer>
-            <p>Web Reader for VOICEVOX v1.3.0</p>
+            <p>Web Reader for VOICEVOX v1.4.0</p>
         </footer>
     </div>
     <script src="constants.js"></script>
