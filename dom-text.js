@@ -246,6 +246,30 @@ function isTextVisiblyOnTop(el, lineRects, sel, offset) {
     return checked === 0;
 }
 
+// 画像・canvas・フレームが実際に見えているかを確かめる。
+//
+// テキストと違い、これらは1つの矩形しか持たない。選択範囲と重なっている部分を
+// 3×3で見て、1点でも手前に出ていれば見えているとみなす。
+// この判定を怠ると、ライトボックスや折りたたみの裏に隠れている広告バナーの
+// 代替テキストが、そのまま読み上げに混ざる（実機で報告された不具合の原因）。
+function isBoxVisiblyOnTop(el, box, sel, offset) {
+    const ox = offset ? offset.x : 0;
+    const oy = offset ? offset.y : 0;
+    const left = Math.max(box.left, sel.left);
+    const right = Math.min(box.right, sel.right);
+    const top = Math.max(box.top, sel.top);
+    const bottom = Math.min(box.bottom, sel.bottom);
+    if (right - left < 1 || bottom - top < 1) return false;
+    for (const ty of [0.25, 0.5, 0.75]) {
+        const y = top + (bottom - top) * ty - oy;
+        for (const tx of [0.25, 0.5, 0.75]) {
+            const x = left + (right - left) * tx - ox;
+            if (isTopMostAt(el, x, y)) return true;
+        }
+    }
+    return false;
+}
+
 // ルビの扱い。設定 ocrRemoveRuby=true は「ルビ優先読み」を意味する
 // （OCR経路の実装と同じ意味。true なら本文の代わりに読み rt を読む）。
 // 既定の false では本文（親文字）を読み、rt は読まない。
@@ -439,6 +463,13 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
             }
             const box = offsetRect(el.getBoundingClientRect(), offset);
             const overlap = rectIntersectionArea(box, sel);
+            // 手前が別の要素で塞がれている画像・フレームは、面積も代替テキストも
+            // 一切採用しない。ライトボックスや折りたたみの裏にある広告の文言が
+            // 読み上げに混入するのを防ぐ（実機で報告された不具合の直接の原因）。
+            if (overlap > 0 && !isBoxVisiblyOnTop(el, box, sel, offset)) {
+                node = skipSubtree(walker);
+                continue;
+            }
 
             if (el.tagName === "IFRAME") {
                 if (overlap > 0) {
