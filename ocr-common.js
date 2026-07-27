@@ -1414,8 +1414,12 @@ async function recognizeMangaPage(sourceCanvas, workerProvider, options) {
         // 辞書リランク・ルビ処理）をそのまま適用する。範囲が小さいぶん速い。
         // 日本の漫画の台詞は縦書きが基本。明らかに横長の吹き出しだけ横書き扱いにする。
         const forceOrientation = w > h * OCR_MANGA_HORIZONTAL_RATIO ? "horizontal" : "vertical";
+        // 漫画にはルビ（ふりがな）が大量に振られている。ルビ処理を通さないと
+        // ルビの列が本文とは別の文として読み上げられ、意味が壊れる。
+        // 設定に関わらず漫画モードでは必ず通す（読めなかったルビは捨てられ、
+        // 漢字のまま読まれるので、通して損になることはない）。
         const one = await recognizeWithOrientation(crop, workerProvider,
-            { removeRuby: options.removeRuby, manga: false, forceOrientation, refineBudgetMs: perBalloonBudget });
+            { removeRuby: true, manga: false, forceOrientation, refineBudgetMs: perBalloonBudget });
         if (!isMangaSpeech(one.text, one.confidence)) continue;
         parts.push(one.text.trim());
         confidenceSum += one.confidence;
