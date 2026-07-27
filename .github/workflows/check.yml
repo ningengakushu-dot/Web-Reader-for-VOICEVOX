@@ -1,0 +1,67 @@
+# 拡張機能が壊れた状態で main に入るのを防ぐ最小限の検査。
+# OCR・読み上げの精度検証はブラウザ実機が必要なため CI では行わない（手元で実施する）。
+name: check
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: JavaScript の構文チェック
+        run: |
+          for f in *.js; do
+            node --check "$f"
+            echo "OK  $f"
+          done
+
+      - name: manifest.json の妥当性と参照ファイルの存在確認
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            const refs = [
+              m.background.service_worker,
+              m.options_page,
+              ...Object.values(m.icons),
+              ...m.content_scripts.flatMap((c) => c.js),
+            ];
+            let ng = 0;
+            for (const r of refs) {
+              if (!fs.existsSync(r)) { console.error("参照先が無い: " + r); ng++; }
+            }
+            if (m.manifest_version !== 3) { console.error("MV3 ではない"); ng++; }
+            if (!/^\d+\.\d+\.\d+$/.test(m.version)) { console.error("version の形式が不正"); ng++; }
+            if (ng) process.exit(1);
+            console.log("manifest OK (v" + m.version + ")");
+          '
+
+      - name: リモートコードを実行していないことの確認
+        run: |
+          # importScripts は同梱ファイルの読み込みに使うため、外部URLの場合だけを弾く。
+          if grep -rnE '\beval\(|new Function\(|importScripts\(["'"'"']https?:' \
+              --include=*.js --include=*.html . \
+              | grep -v '^./vendor/'; then
+            echo "リモートコード実行に該当し得る記述があります（ストア審査で不可）"
+            exit 1
+          fi
+          echo "OK  該当なし"
+
+      - name: 提出用パッケージに含めるファイルが揃っているか
+        run: |
+          missing=0
+          for f in $(grep -oE "'[A-Za-z0-9_.-]+'" tools/pack.ps1 \
+                     | tr -d "'" | grep -E '\.(js|html|css|json|txt|md)$|^LICENSE'); do
+            [ -e "$f" ] || { echo "同梱対象が無い: $f"; missing=1; }
+          done
+          [ -d vendor ] || { echo "vendor/ が無い"; missing=1; }
+          exit $missing

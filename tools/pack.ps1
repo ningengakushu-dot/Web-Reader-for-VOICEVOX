@@ -25,7 +25,8 @@ $files = @(
     'options.js', 'capture.js', 'constants.js', 'ocr-common.js',
     'offscreen.html', 'options.html', 'capture.html',
     'options.css', 'capture.css',
-    'ocr-words.txt', 'ocr-dictionary-NOTICE.md', 'LICENSE-APACHE-2.0'
+    'ocr-words.txt', 'ocr-dictionary-NOTICE.md',
+    'LICENSE', 'LICENSE-APACHE-2.0'
 )
 $dirs = @('vendor')
 $iconGlob = 'images\icon*.png'

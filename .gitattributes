@@ -1,0 +1,14 @@
+# 改行コードをリポジトリ内で LF に統一する。
+# 指定が無いと Windows の作業コピーが CRLF になり、コミットのたびに
+# 「LF will be replaced by CRLF」の警告と、実体のない差分が出る。
+* text=auto eol=lf
+
+# バイナリ（誤って改行変換されると壊れる）
+*.png binary
+*.mp4 binary
+*.wav binary
+*.traineddata binary
+
+# 同梱物は差分表示・言語統計から外す（レビューの妨げになるため）
+vendor/** linguist-vendored
+ocr-words.txt linguist-generated

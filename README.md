@@ -72,7 +72,7 @@ Chrome Web Store のページから「Chrome に追加」をクリックする�
   - 起動方法: ページ内アイコンの右クリック／右クリックメニュー「画面をキャプチャしてOCR読み上げ」／ショートカット `Alt+Shift+O`／ツールバーの拡張機能アイコンをクリック。
   - ページ内アイコンの右クリック動作は、オプション画面で従来の「オプション画面を開く」に戻せます。
   - PDFビューア等のページ内で範囲選択できない画面では、キャプチャ画像のタブが開き、範囲選択と認識結果の編集ができます。
-  - **認識精度の向上**: 語彙辞書を用いて、誤認識で意味の通らない熟語（非語）になった箇所を、複数倍率の認識結果の中の正しい語へ自動補正します。辞書データは SudachiDict（Apache-2.0）から作成しています（[出典](../ocr-dictionary-NOTICE.md)）。
+  - **認識精度の向上**: 語彙辞書を用いて、誤認識で意味の通らない熟語（非語）になった箇所を、複数倍率の認識結果の中の正しい語へ自動補正します。辞書データは SudachiDict（Apache-2.0）から作成しています（[出典](ocr-dictionary-NOTICE.md)）。
   - 文字認識はオープンソースのOCRエンジン「Tesseract」（Tesseract.js / Apache-2.0）を拡張機能に同梱して使用します。処理はすべてお使いのブラウザ内で完結します。
 
 ### v1.2.1
@@ -107,7 +107,8 @@ Chrome Web Store のページから「Chrome に追加」をクリックする�
 - 本アプリの使用によって生じた、いかなる損害（PCの不具合、法的トラブル等）についても開発者は責任を負いません。すべて**利用者の自己責任**においてご利用ください。
 
 **【ライセンス・権利関係】**
-- ソースコードの利用はMIT Licenseに準じます。
+- 本リポジトリで開発したソースコードは [MIT License](LICENSE) です。
+- 同梱している第三者の著作物（Tesseract.js・日本語学習データ・OCR語彙辞書）は Apache License 2.0 です。全文は `LICENSE-APACHE-2.0` にあります。
 - 音声の生成には[VOICEVOX](https://voicevox.hiroshiba.jp/)を使用しています。生成された音声の利用（動画への使用など）については、必ずVOICEVOXおよび各ボイスキャラクターの利用規約を遵守してください。
 - 文字認識（OCR）には[Tesseract.js](https://github.com/naptha/tesseract.js)（Apache License 2.0）および tessdata_best の日本語学習データを同梱・使用しています。詳細は `vendor/tesseract/LICENSE-NOTICE.md` を参照してください。
 - **【重要】** 本ツールで生成した音声を公開する場合、必ず「VOICEVOX:（使用キャラクター名）」のようなクレジット表記が必要です。詳細は[利用規約](https://github.com/ningengakushu-dot/Web-Reader-for-VOICEVOX/blob/main/docs/TERMS.md)をご確認ください。
