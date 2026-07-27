@@ -5,7 +5,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusMsg = document.getElementById('status-msg');
     const loader = document.getElementById('loader');
     const ocrRemoveRubyCheck = document.getElementById('ocrRemoveRuby-check');
-    const ocrMangaModeCheck = document.getElementById('ocrMangaMode-check');
     const iconRightClickSelect = document.getElementById('iconRightClick-select');
 
     // スライダー設定定義: デフォルト値は constants.js の SETTING_DEFAULTS を単一の真実源とする
@@ -34,7 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const speakers = await getSpeakers();
             renderSpeakers(speakers);
 
-            const storageKeys = ['speakerId', 'ocrRemoveRuby', 'ocrMangaMode', 'iconRightClickAction', ...sliders.map(s => s.key)];
+            const storageKeys = ['speakerId', 'ocrRemoveRuby', 'iconRightClickAction', ...sliders.map(s => s.key)];
             const result = await chrome.storage.local.get(storageKeys);
 
             // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
@@ -49,7 +48,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 s.valueEl.textContent = Number(value).toFixed(s.decimals);
             }
             ocrRemoveRubyCheck.checked = result.ocrRemoveRuby === true;
-            ocrMangaModeCheck.checked = result.ocrMangaMode === true;
             // 既定は「画面OCR読み上げを開始」（content.js 側の既定値と揃える）
             iconRightClickSelect.value = result.iconRightClickAction === 'options' ? 'options' : 'capture';
         } catch (error) {
@@ -101,7 +99,6 @@ document.addEventListener('DOMContentLoaded', () => {
             settings[s.key] = val;
         }
         settings.ocrRemoveRuby = ocrRemoveRubyCheck.checked;
-        settings.ocrMangaMode = ocrMangaModeCheck.checked;
         settings.iconRightClickAction = iconRightClickSelect.value === 'options' ? 'options' : 'capture';
 
         try {

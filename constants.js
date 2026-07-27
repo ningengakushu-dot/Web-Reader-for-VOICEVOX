@@ -32,8 +32,5 @@ const OCR_WORKER_IDLE_RELEASE_MS = 5 * 60 * 1000;
 // OCR関連の設定デフォルト値（音声合成設定とは別に管理）
 const OCR_SETTING_DEFAULTS = {
     // OCR読み上げでルビ（ふりがな）を除去するか。既定はOFF（利用者が任意で有効化）。
-    ocrRemoveRuby: false,
-    // 漫画モード。コマ・吹き出しの読み順（右上→左下）に並べ替えて読む。
-    // 既定はOFF（自動判定で誤ると台詞の順序が崩れるため、利用者が明示的に有効化する）。
-    ocrMangaMode: false
+    ocrRemoveRuby: false
 };

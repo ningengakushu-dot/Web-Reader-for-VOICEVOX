@@ -118,7 +118,7 @@ function resetOcrWorkers() {
  * rect はビューポートのCSSピクセル座標、キャプチャ画像は物理ピクセルのため、
  * 画像幅とビューポート幅の比率で座標変換する（devicePixelRatio・ズーム両対応）。
  */
-async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby, manga }) {
+async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby }) {
     ocrProgressTabId = tabId ?? null;
     resetOcrProgress();
     cancelOcrWorkerIdleRelease();
@@ -140,8 +140,7 @@ async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby
         // background がメッセージに載せて渡す（既定OFF）。
         // 認識がハングしても進捗トーストが残り続けないよう、タイムアウトで打ち切る。
         const data = await withOcrTimeout(
-            recognizeWithOrientation(canvas, getOcrWorker,
-                { removeRuby: removeRuby === true, manga: manga === true }),
+            recognizeWithOrientation(canvas, getOcrWorker, { removeRuby: removeRuby === true }),
             OCR_RECOGNIZE_TIMEOUT_MS,
             "文字認識に時間がかかりすぎました。範囲を狭めてお試しください。"
         );
