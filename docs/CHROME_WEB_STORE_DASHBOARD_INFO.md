@@ -57,6 +57,14 @@ Tesseract.js本体・WASMコア・日本語学習データ（`jpn.traineddata` /
 ## 3. バージョン別 ストア更新テキスト (Version Update Text)
 ダッシュボードの「公開用メモ」やストア掲載の更新内容として使用できます。
 
+### v1.3.1
+
+#### 日本語
+安定性の修正です。短い文が続く場合に読み上げ中のアイコンが途中で待機状態に戻る問題、VOICEVOXエンジンが応答しないときに読み上げが止まったまま操作できなくなる問題、拡張機能の更新後に右クリックメニューが表示されなくなることがある問題をそれぞれ修正しました。あわせて、動作に必要なChromeのバージョン（119以降）を明示しました。
+
+#### English (Recommended)
+Stability fixes. Resolved an issue where the icon could return to the idle state mid-playback when reading a series of short sentences, an issue where playback could hang with no way to recover when the VOICEVOX engine stopped responding, and an issue where the context menu could disappear after the extension was updated. The minimum supported Chrome version (119+) is now declared explicitly.
+
 ### v1.3.0
 
 #### 日本語

@@ -13,6 +13,13 @@ const CAPTURE_STORAGE_KEY = "vv_ocr_capture";
 // session に控え、休止から復帰した SW でも再生終了通知を正しいタブへ転送できるようにする。
 const PLAYBACK_TAB_STORAGE_KEY = "vv_playback_tab_id";
 
+// VOICEVOXエンジンへの通信を諦めるまでの時間。
+// エンジンが起動直後で応答しない・処理中に固まった場合、待ち続けると
+// 合成キューが永久に詰まり、以降どの操作にも反応しなくなる。
+// 長文の合成は時間がかかるため、合成だけ長めに取る。
+const VOICEVOX_FETCH_TIMEOUT_MS = 15000;
+const VOICEVOX_SYNTHESIS_TIMEOUT_MS = 60000;
+
 // 設定のデフォルト値
 const SETTING_DEFAULTS = {
     speakerId: 1,
