@@ -1,10 +1,10 @@
-name: check-temporarily-paused
+name: bootstrap-check-disabled
 
 on:
   workflow_dispatch:
 
 jobs:
-  paused:
+  disabled:
     runs-on: ubuntu-latest
     steps:
-      - run: echo paused
+      - run: echo disabled
