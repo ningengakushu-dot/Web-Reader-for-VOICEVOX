@@ -31,6 +31,9 @@ jobs:
       - name: アップデートお知らせ機能の単体・結合検査
         run: node tests/update-notice.test.js
 
+      - name: 拡張コンテキスト無効化の回帰検査
+        run: node tests/context-invalidation.test.js
+
       - name: manifest.json の妥当性と参照ファイルの存在確認
         run: |
           node -e '
