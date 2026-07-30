@@ -21,7 +21,7 @@ $zip = Join-Path $root "dist\web-reader-for-voicevox-$version.zip"
 # プライバシーポリシー・利用規約はストアのダッシュボードに URL で登録する）。
 $files = @(
     'manifest.json',
-    'background.js', 'content.js', 'dom-text.js', 'offscreen.js',
+    'background.js', 'content-guard.js', 'content.js', 'dom-text.js', 'offscreen.js',
     'options.js', 'capture.js', 'constants.js',
     'ocr-common.js', 'ocr-image.js', 'ocr-refine.js', 'ocr-ruby.js',
     'offscreen.html', 'options.html', 'capture.html',
