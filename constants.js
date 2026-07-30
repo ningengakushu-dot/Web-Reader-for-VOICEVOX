@@ -48,6 +48,92 @@ async function fetchWithTimeout(url, options, timeoutMs) {
     }
 }
 
+// ローカルサーバーを別プロセスが占有している場合でも、巨大応答で拡張機能の
+// メモリを使い切らないよう、VOICEVOX応答を読み込むサイズに上限を設ける。
+const VOICEVOX_JSON_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+const VOICEVOX_AUDIO_RESPONSE_MAX_BYTES = 128 * 1024 * 1024;
+
+async function readResponseBytesWithLimit(response, maxBytes, timeoutMs = VOICEVOX_FETCH_TIMEOUT_MS) {
+    const declared = Number(response.headers?.get?.("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+        throw new Error("VOICEVOXエンジンの応答が大きすぎます");
+    }
+
+    const timeoutError = () => new Error(
+        `VOICEVOXエンジンの応答受信が完了しません（${Math.round(timeoutMs / 1000)}秒）`);
+    const withDeadline = (promise, remainingMs, onTimeout) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            try { onTimeout?.(); } catch (error) { /* タイムアウトを優先 */ }
+            reject(timeoutError());
+        }, Math.max(1, remainingMs));
+        Promise.resolve(promise).then(
+            (value) => { clearTimeout(timer); resolve(value); },
+            (error) => { clearTimeout(timer); reject(error); }
+        );
+    });
+    const deadline = Date.now() + timeoutMs;
+
+    if (!response.body?.getReader) {
+        const bytes = new Uint8Array(await withDeadline(
+            response.arrayBuffer(), timeoutMs, () => {
+                const cancellation = response.body?.cancel?.();
+                cancellation?.catch?.(() => {});
+            }));
+        if (bytes.byteLength > maxBytes) throw new Error("VOICEVOXエンジンの応答が大きすぎます");
+        return bytes;
+    }
+
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+        while (true) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) {
+                try { await reader.cancel(); } catch (error) { /* タイムアウトを優先 */ }
+                throw timeoutError();
+            }
+            const { done, value } = await withDeadline(
+                reader.read(), remaining, () => { void reader.cancel().catch(() => {}); });
+            if (done) break;
+            total += value.byteLength;
+            if (total > maxBytes) {
+                try { await reader.cancel(); } catch (error) { /* サイズ超過を優先 */ }
+                throw new Error("VOICEVOXエンジンの応答が大きすぎます");
+            }
+            chunks.push(value);
+        }
+    } finally {
+        reader.releaseLock?.();
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes;
+}
+
+async function readJsonResponseWithLimit(
+    response,
+    maxBytes = VOICEVOX_JSON_RESPONSE_MAX_BYTES,
+    timeoutMs = VOICEVOX_FETCH_TIMEOUT_MS
+) {
+    const bytes = await readResponseBytesWithLimit(response, maxBytes, timeoutMs);
+    return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+async function readBlobResponseWithLimit(
+    response,
+    maxBytes = VOICEVOX_AUDIO_RESPONSE_MAX_BYTES,
+    timeoutMs = VOICEVOX_SYNTHESIS_TIMEOUT_MS
+) {
+    const bytes = await readResponseBytesWithLimit(response, maxBytes, timeoutMs);
+    const ascii = (start, end) => String.fromCharCode(...bytes.subarray(start, end));
+    if (bytes.byteLength < 12 || ascii(0, 4) !== "RIFF" || ascii(8, 12) !== "WAVE") {
+        throw new Error("VOICEVOXエンジンから不正な音声データが返されました");
+    }
+    return new Blob([bytes], { type: "audio/wav" });
+}
+
 // 設定のデフォルト値
 const SETTING_DEFAULTS = {
     speakerId: 1,

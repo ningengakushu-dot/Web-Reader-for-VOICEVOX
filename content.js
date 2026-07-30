@@ -34,8 +34,10 @@ class VVRadioReader {
         this.ocrStallWatchdog = null;
         // ルビ優先読みの設定。ページ内テキスト経路（Tier 0）でも同じ設定に従う。
         this.ocrRemoveRuby = false;
-        // 登録した storage の変更リスナー（deactivate でまとめて解除する）
+        // 登録したリスナー（deactivate でまとめて解除する）
         this.storageListeners = [];
+        this.keyboardShortcutListener = null;
+        this.messageListener = null;
         // 非同期のDOM抽出結果が、後から開始した範囲選択を上書きしないための世代番号。
         this.regionReadGeneration = 0;
         // DOM抽出が重なってもインジケーターの visibility を正しく復元するための参照数。
@@ -103,6 +105,14 @@ class VVRadioReader {
             try { chrome.storage.onChanged.removeListener(fn); } catch (e) { /* 無効化済み */ }
         }
         this.storageListeners = [];
+        if (this.keyboardShortcutListener) {
+            document.removeEventListener("keydown", this.keyboardShortcutListener, true);
+            this.keyboardShortcutListener = null;
+        }
+        if (this.messageListener) {
+            try { chrome.runtime.onMessage.removeListener(this.messageListener); } catch (e) { /* 無効化済み */ }
+            this.messageListener = null;
+        }
         // OCR選択オーバーレイの window リスナーと、OCRトースト/進捗ガードタイマーも解放する。
         // host を消すだけでは window に張った mousemove/mouseup/keydown と setTimeout が
         // 取り残され、detached ノードを参照し続けてリークする（OCR選択中の再注入で発生）。
@@ -122,7 +132,7 @@ class VVRadioReader {
     applyIconAppearance() {
         const keys = ["iconSize", "iconStyle", "vv_character_icon", "vv_custom_icon"];
         chrome.storage.local.get(keys, (res) => {
-            if (!this.indicator) return;
+            if (!this.active || !this.indicator || chrome.runtime.lastError) return;
             this.applyIndicatorSize(res.iconSize || 16);
             this.applyIndicatorStyle(res);
         });
@@ -142,7 +152,7 @@ class VVRadioReader {
             // 画像データは storage 側にしか無いため、変更があれば毎回まとめて読み直す。
             if (changes.iconStyle || changes.vv_character_icon || changes.vv_custom_icon) {
                 chrome.storage.local.get(keys, (res) => {
-                    if (!this.active || !this.indicator) return;
+                    if (!this.active || !this.indicator || chrome.runtime.lastError) return;
                     this.applyIndicatorStyle(res);
                 });
             }
@@ -160,9 +170,11 @@ class VVRadioReader {
     // アイコンの一辺のサイズを適用する。
     // キャラクター名の文字表示は円に内接させたいので、文字サイズも連動させる。
     applyIndicatorSize(size) {
-        this.indicator.style.width = `${size}px`;
-        this.indicator.style.height = `${size}px`;
-        this.indicator.style.fontSize = `${Math.max(8, Math.round(size * 0.62))}px`;
+        const numeric = Number(size);
+        const safeSize = Number.isFinite(numeric) ? Math.min(64, Math.max(16, numeric)) : 16;
+        this.indicator.style.width = `${safeSize}px`;
+        this.indicator.style.height = `${safeSize}px`;
+        this.indicator.style.fontSize = `${Math.max(8, Math.round(safeSize * 0.62))}px`;
     }
 
     // アイコンの見た目（従来の円／拡張機能のアイコン／読み上げキャラクター／
@@ -175,22 +187,29 @@ class VVRadioReader {
         el.textContent = '';
         el.removeAttribute('title');
 
-        const style = res.iconStyle || 'dot';
+        const style = ['dot', 'app', 'character', 'custom'].includes(res.iconStyle) ? res.iconStyle : 'dot';
+        const safeRasterDataUrl = (url) => typeof url === 'string'
+            && url.length <= 2 * 1024 * 1024
+            && /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i.test(url);
         const asImage = (url) => {
             el.classList.add('image');
-            // storage 由来のデータURL/拡張機能内URLのみ。外部URLは入らない。
             el.style.backgroundImage = `url("${url}")`;
         };
 
         if (style === 'app') {
-            asImage(chrome.runtime.getURL('images/icon128.png'));
-            el.title = 'Web Reader for VOICEVOX';
+            try {
+                if (!chrome.runtime?.id) return;
+                asImage(chrome.runtime.getURL('images/icon128.png'));
+                el.title = 'Web Reader for VOICEVOX';
+            } catch (error) {
+                // 更新直後の古いcontent scriptでは既定の円へフォールバックする。
+            }
             return;
         }
 
         if (style === 'custom') {
             const custom = res.vv_custom_icon;
-            if (typeof custom === 'string' && custom.startsWith('data:image/')) {
+            if (safeRasterDataUrl(custom)) {
                 asImage(custom);
                 return;
             }
@@ -199,14 +218,15 @@ class VVRadioReader {
 
         if (style === 'character') {
             const character = res.vv_character_icon;
-            if (!character || !character.name) return;
-            el.title = character.name;
-            if (typeof character.dataUrl === 'string' && character.dataUrl.startsWith('data:image/')) {
+            const name = typeof character?.name === 'string' ? character.name.trim().slice(0, 100) : '';
+            if (!name) return;
+            el.title = name;
+            if (safeRasterDataUrl(character.dataUrl)) {
                 asImage(character.dataUrl);
             } else {
                 // 画像の利用許諾が確認できないキャラクターは名前の頭文字で表示する。
                 el.classList.add('text');
-                el.textContent = character.name.slice(0, 1);
+                el.textContent = name.slice(0, 1);
             }
         }
     }
@@ -219,7 +239,12 @@ class VVRadioReader {
 
         const host = document.createElement("div");
         host.id = "vvradio-host";
-        document.body.appendChild(host);
+        const parent = document.body || document.documentElement;
+        if (!parent || typeof host.attachShadow !== "function") {
+            this.indicator = null;
+            return;
+        }
+        parent.appendChild(host);
 
         // Shadow DOM でカプセル化
         this.shadowRoot = host.attachShadow({ mode: "closed" });
@@ -246,15 +271,23 @@ class VVRadioReader {
         // "options" にすることで維持できる。
         this.indicator.addEventListener("contextmenu", (e) => {
             e.preventDefault();
-            chrome.storage.local.get({ iconRightClickAction: "capture" }, (res) => {
-                if (res.iconRightClickAction === "options") {
-                    chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
-                } else {
-                    // ページ内の範囲選択オーバーレイを直接開始する
-                    // （インジケーターはトップフレームにのみ存在する）
-                    this.startOcrSelection();
-                }
-            });
+            try {
+                if (!this.active || !chrome.runtime?.id) return;
+                chrome.storage.local.get({ iconRightClickAction: "capture" }, (res) => {
+                    if (!this.active || chrome.runtime.lastError) return;
+                    if (res.iconRightClickAction === "options") {
+                        chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" }, () => {
+                            void chrome.runtime.lastError;
+                        });
+                    } else {
+                        // ページ内の範囲選択オーバーレイを直接開始する
+                        // （インジケーターはトップフレームにのみ存在する）
+                        this.startOcrSelection();
+                    }
+                });
+            } catch (error) {
+                // 更新・再読み込み直後の古いcontent scriptでは何もしない。
+            }
         });
 
         this.shadowRoot.appendChild(this.indicator);
@@ -399,9 +432,13 @@ class VVRadioReader {
     // 保存された位置があれば復元する
     restoreIndicatorPosition() {
         chrome.storage.local.get(["vvradio_icon_pos", "iconSize"], (res) => {
+            if (!this.active || !this.indicator || chrome.runtime.lastError) return;
             if (res.vvradio_icon_pos) {
-                const { left, top } = res.vvradio_icon_pos;
-                const size = res.iconSize || 16;
+                const left = Number(res.vvradio_icon_pos.left);
+                const top = Number(res.vvradio_icon_pos.top);
+                if (!Number.isFinite(left) || !Number.isFinite(top)) return;
+                const rawSize = Number(res.iconSize);
+                const size = Number.isFinite(rawSize) ? Math.min(64, Math.max(16, rawSize)) : 16;
                 // 画面サイズ変更などで画面外に出ないように補正
                 const maxLeft = window.innerWidth - size;
                 const maxTop = window.innerHeight - size;
@@ -421,6 +458,8 @@ class VVRadioReader {
     getSelectedText() {
         const active = document.activeElement;
         if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+            // Password fields must never be read or sent to the local speech engine.
+            if (active.tagName === "INPUT" && String(active.type).toLowerCase() === "password") return "";
             try {
                 const { selectionStart, selectionEnd, value } = active;
                 // type=number/email など selection 非対応の input では selectionStart が null になる
@@ -447,7 +486,7 @@ class VVRadioReader {
     }
 
     setupKeyboardShortcutFallback() {
-        document.addEventListener("keydown", (event) => {
+        this.keyboardShortcutListener = (event) => {
             if (!this.active || event.repeat || !event.isTrusted) return;
             if (!this.isShortcutEvent(event)) return;
             if (!this.shouldHandleToggleReading()) return;
@@ -457,13 +496,19 @@ class VVRadioReader {
             event.preventDefault();
             event.stopPropagation();
 
-            chrome.runtime.sendMessage({ type: "SHORTCUT_PRESSED" }, () => {
-                if (chrome.runtime.lastError) {
-                    console.warn("Web Reader for VOICEVOX: ショートカット通知に失敗:",
-                        chrome.runtime.lastError.message);
-                }
-            });
-        }, true);
+            try {
+                if (!chrome.runtime?.id) return;
+                chrome.runtime.sendMessage({ type: "SHORTCUT_PRESSED" }, () => {
+                    if (chrome.runtime.lastError) {
+                        console.warn("Web Reader for VOICEVOX: ショートカット通知に失敗:",
+                            chrome.runtime.lastError.message);
+                    }
+                });
+            } catch (error) {
+                // 更新・再読み込み直後の古いcontent scriptでは何もしない。
+            }
+        };
+        document.addEventListener("keydown", this.keyboardShortcutListener, true);
     }
 
     isShortcutEvent(event) {
@@ -505,7 +550,7 @@ class VVRadioReader {
 
     // バックグラウンド等からのメッセージのリスナーを設定
     setupMessageListener() {
-        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        this.messageListener = (request, sender, sendResponse) => {
             // 停止済み（stale）インスタンスのリスナーは何もしない
             if (!this.active) return;
             switch (request.type) {
@@ -550,12 +595,14 @@ class VVRadioReader {
                     this.showPlaybackErrorToast(request.error);
                     break;
             }
-        });
+        };
+        chrome.runtime.onMessage.addListener(this.messageListener);
     }
 
     // バックグラウンド経由でVOICEVOXエンジンの接続確認
     checkVoicevoxConnection() {
         chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
+            if (!this.active) return;
             if (chrome.runtime.lastError || !res || !res.success) {
                 console.warn("Web Reader for VOICEVOX: VOICEVOXに接続できません。");
                 this.updateUIState('error');
@@ -581,7 +628,9 @@ class VVRadioReader {
 
         const host = document.createElement("div");
         host.id = "vvradio-update-notice-host";
-        (document.body || document.documentElement).appendChild(host);
+        const parent = document.body || document.documentElement;
+        if (!parent || typeof host.attachShadow !== "function") return;
+        parent.appendChild(host);
         const root = host.attachShadow({ mode: "open" });
 
         const style = document.createElement("style");
@@ -696,10 +745,10 @@ class VVRadioReader {
                 ・アイコンの位置移動＆自動保存<br>
                 ・アイコン右クリックの動作をOCR起動に変更（※オプションから「設定を開く」に変更可能）<br>
                 ・読み上げ動作と安定性の向上<br><br>
-                気に入っていただけましたら、高評価（★5）をいただけると嬉しいです！
+                気に入っていただけましたら、ストアでレビューをお寄せいただけると励みになります。
             </div>
             <div class="notice-actions">
-                <button class="btn-primary" id="btn-rate">⭐ ストアで高評価する</button>
+                <button class="btn-primary" id="btn-rate">ストアでレビューする</button>
                 <button class="btn-secondary" id="btn-close">閉じる</button>
             </div>
         `;
@@ -710,7 +759,8 @@ class VVRadioReader {
         const closeNotice = () => host.remove();
 
         card.querySelector("#btn-rate").addEventListener("click", () => {
-            window.open("https://chromewebstore.google.com/detail/web-reader-for-voicevox", "_blank");
+            const storeUrl = `https://chromewebstore.google.com/detail/web-reader-for-voicevox/${chrome.runtime.id}`;
+            window.open(storeUrl, "_blank", "noopener,noreferrer");
             closeNotice();
         });
 
@@ -733,7 +783,9 @@ class VVRadioReader {
 
         const host = document.createElement("div");
         host.id = "vvradio-ocr-host";
-        (document.body || document.documentElement).appendChild(host);
+        const parent = document.body || document.documentElement;
+        if (!parent || typeof host.attachShadow !== "function") return;
+        parent.appendChild(host);
         const root = host.attachShadow({ mode: "closed" });
 
         const style = document.createElement("style");
@@ -893,12 +945,17 @@ class VVRadioReader {
     // 選択範囲（ビューポートCSS座標）を background に渡してキャプチャ→OCR→読み上げを依頼する。
     // オーバーレイ除去の再描画がキャプチャに反映されるよう、2フレーム＋少し待ってから送る。
     requestRegionOcr(rect) {
+        if (!this.active) return;
         // キャプチャに自前UI（インジケーター・準備中トースト）が写り込むと、その文言まで
         // OCRされて読み上げに混入する（画面全体の選択で確実に起きる）。撮影前にインジケーターを
         // 隠し、進捗トーストは撮影完了後（sendMessage 応答後＝captureVisibleTab 済み）にのみ表示する。
         if (this.indicator) this.indicator.style.visibility = "hidden";
         requestAnimationFrame(() => requestAnimationFrame(() => {
             setTimeout(() => {
+                if (!this.active) {
+                    if (this.indicator) this.indicator.style.visibility = "";
+                    return;
+                }
                 // OCRが長引いた場合・応答が途絶えた場合にトーストが残り続けないための保険。
                 // ここでエラー扱いにすると、後から認識完了→読み上げ開始したときに表示と矛盾する
                 // ため（巨大範囲・低速端末で発生）、中立的に待たせるに留める。
@@ -908,22 +965,30 @@ class VVRadioReader {
                     this.showOcrToast("文字認識に時間がかかっています。しばらくお待ちください…");
                 }, 90000);
 
-                chrome.runtime.sendMessage({
-                    type: "CAPTURE_OCR_REGION",
-                    rect,
-                    viewportWidth: window.innerWidth
-                }, (response) => {
-                    // 応答は background が captureVisibleTab を終えた後に届く＝撮影済み。
-                    // ここで初めてインジケーターを戻し、進捗トーストを出す（写り込み防止）。
+                try {
+                    if (!chrome.runtime?.id) throw new Error("Extension context invalidated");
+                    chrome.runtime.sendMessage({
+                        type: "CAPTURE_OCR_REGION",
+                        rect,
+                        viewportWidth: window.innerWidth
+                    }, (response) => {
+                        if (!this.active) return;
+                        // 応答は background が captureVisibleTab を終えた後に届く＝撮影済み。
+                        // ここで初めてインジケーターを戻し、進捗トーストを出す（写り込み防止）。
+                        if (this.indicator) this.indicator.style.visibility = "";
+                        if (chrome.runtime.lastError || !response || !response.success) {
+                            const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
+                            this.handleOcrStatus({ status: "error", message: `キャプチャに失敗しました: ${reason}` });
+                        } else {
+                            this.showOcrToast("文字認識中...");
+                            this.armOcrStallWatchdog();
+                        }
+                    });
+                } catch (error) {
                     if (this.indicator) this.indicator.style.visibility = "";
-                    if (chrome.runtime.lastError || !response || !response.success) {
-                        const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
-                        this.handleOcrStatus({ status: "error", message: `キャプチャに失敗しました: ${reason}` });
-                    } else {
-                        this.showOcrToast("文字認識中...");
-                        this.armOcrStallWatchdog();
-                    }
-                });
+                    this.clearOcrToastGuard();
+                    // 更新直後の古いcontent scriptは静かに停止する。
+                }
             }, 60);
         }));
     }
@@ -1021,21 +1086,30 @@ class VVRadioReader {
         const cleanText = this.cleanMessage(text, options.keepParagraphs === true);
         if (!cleanText) return;
 
-        chrome.runtime.sendMessage({
-            type: "GENERATE_VOICE",
-            text: cleanText
-        }, (response) => {
-            if (chrome.runtime.lastError || !response || !response.success) {
-                console.error("Web Reader for VOICEVOX: 依頼失敗:",
-                    chrome.runtime.lastError?.message || response?.error || "応答なし");
-                this.updateUIState('error');
-            }
-        });
+        try {
+            chrome.runtime.sendMessage({
+                type: "GENERATE_VOICE",
+                text: cleanText
+            }, (response) => {
+                if (!this.active) return;
+                if (chrome.runtime.lastError || !response || !response.success) {
+                    console.error("Web Reader for VOICEVOX: 依頼失敗:",
+                        chrome.runtime.lastError?.message || response?.error || "応答なし");
+                    this.updateUIState('error');
+                }
+            });
+        } catch (error) {
+            // 拡張機能の更新・再読み込み直後は何もしない。
+        }
     }
 
     // 再生の完全停止とキューのクリア要求
     stopAll() {
-        chrome.runtime.sendMessage({ type: "STOP_ALL" });
+        try {
+            chrome.runtime.sendMessage({ type: "STOP_ALL" }, () => { void chrome.runtime.lastError; });
+        } catch (error) {
+            // 拡張機能の更新・再読み込み直後は何もしない。
+        }
         this.isPlaying = false;
         this.updateUIState('idle');
     }

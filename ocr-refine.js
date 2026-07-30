@@ -51,7 +51,14 @@ async function ensureOcrDictionaries() {
         try {
             if (typeof fetch === "undefined" || typeof chrome === "undefined"
                 || !chrome.runtime || !chrome.runtime.getURL) return;
-            const wordsText = await fetch(chrome.runtime.getURL("ocr-words.txt")).then((r) => r.text());
+            const response = await fetch(chrome.runtime.getURL("ocr-words.txt"));
+            if (!response.ok) throw new Error(`辞書の読み込みに失敗しました (${response.status})`);
+            const declared = Number(response.headers?.get?.("content-length"));
+            if (Number.isFinite(declared) && declared > 2 * 1024 * 1024) {
+                throw new Error("辞書ファイルが大きすぎます");
+            }
+            const wordsText = await response.text();
+            if (wordsText.length > 2 * 1024 * 1024) throw new Error("辞書ファイルが大きすぎます");
             ocrWordSet = new Set(wordsText.split("\n").filter(Boolean));
         } catch (error) {
             // 辞書は任意機能。失敗しても以降は素通りする

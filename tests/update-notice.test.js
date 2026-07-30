@@ -62,8 +62,10 @@ const bgChromeMock = {
     },
     action: { onClicked: { addListener: () => {} } },
     commands: { onCommand: { addListener: () => {} } },
+    scripting: { executeScript: () => Promise.resolve() },
     tabs: {
         sendMessage: () => Promise.resolve(),
+        query: () => Promise.resolve([]),
         onRemoved: { addListener: () => {} },
         onUpdated: { addListener: () => {} }
     },
@@ -104,11 +106,22 @@ setImmediate(() => {
     assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, undefined, 'install では update_notice_pending が設定されないこと');
     console.log(' -> PASSED: install では表示対象にならない');
 
-    bgContext.__onInstalledListener({ reason: "update" });
+    bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.2.1" });
 
     setImmediate(async () => {
-        assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, true, 'update では update_notice_pending が true になること');
-        console.log(' -> PASSED: update では表示対象になる');
+        assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, true, '旧版からの update では update_notice_pending が true になること');
+        console.log(' -> PASSED: v1.2.1からのupdateでは表示対象になる');
+
+        // 1.4.1以降の修正版では同じ案内を再登録しない
+        bgChromeMock.storage.local.data.update_notice_pending = false;
+        bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.4.1" });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, false,
+            '1.4.1以降からの更新では通知フラグを再設定しないこと');
+        console.log(' -> PASSED: 修正版への更新では同じ案内を再表示しない');
+
+        // claim テスト用に、旧版からの更新後と同じ状態へ戻す
+        bgChromeMock.storage.local.data.update_notice_pending = true;
 
         // --- 2-2. CLAIM_UPDATE_NOTICE メッセージのトップフレーム検証 ---
         const callOnMessage = (request, sender) => {
@@ -253,6 +266,6 @@ setImmediate(() => {
         assert.strictEqual(elementsMock['vvradio-update-notice-host'].removed, true, 'deactivate で通知ホストが削除されていること');
         console.log(' -> PASSED: deactivate で通知ホストを削除する\n');
 
-        console.log('=== すべての実ソースコード検証テスト（10/10）が正常に合格しました！ ===');
+        console.log('=== すべての実ソースコード検証テストが正常に合格しました！ ===');
     });
 });

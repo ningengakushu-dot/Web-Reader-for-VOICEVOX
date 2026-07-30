@@ -197,6 +197,8 @@ async function testAudioBackpressure() {
         VOICEVOX_BASE_URL: "http://127.0.0.1:50021",
         VOICEVOX_FETCH_TIMEOUT_MS: 15000,
         VOICEVOX_SYNTHESIS_TIMEOUT_MS: 60000,
+        async readJsonResponseWithLimit(response) { return response.json(); },
+        async readBlobResponseWithLimit(response) { return response.blob(); },
         async fetchWithTimeout(url) {
             if (url.includes("/audio_query")) {
                 return {

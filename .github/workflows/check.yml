@@ -7,13 +7,16 @@ on:
     branches: ["**"]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
 
@@ -23,13 +26,50 @@ jobs:
             node --check "$f"
             echo "OK  $f"
           done
-          node --check tools/test-reading-performance.mjs
+          for f in tests/*.js; do
+            node --check "$f"
+            echo "OK  $f"
+          done
+          for f in tools/*.mjs; do
+            node --check "$f"
+            echo "OK  $f"
+          done
 
       - name: 読み上げ精度と負荷制御の回帰検査
         run: node tools/test-reading-performance.mjs
 
       - name: アップデートお知らせ機能の単体・結合検査
         run: node tests/update-notice.test.js
+
+      - name: 拡張コンテキスト無効化の回帰検査
+        run: node tests/context-invalidation.test.js
+
+      - name: メッセージ境界と入力検証の回帰検査
+        run: node tests/security-boundary.test.js
+
+      - name: コンテンツのプライバシー境界検査
+        run: node tests/content-privacy.test.js
+
+      - name: 設定値とアイコン表示の安全性検査
+        run: node tests/options-safety.test.js
+
+      - name: バックグラウンド失敗伝播の回帰検査
+        run: node tests/background-robustness.test.js
+
+      - name: 複数タブ音声要求の直列化検査
+        run: node tests/background-concurrency.test.js
+
+      - name: 音声再生終了状態の回帰検査
+        run: node tests/offscreen-playback.test.js
+
+      - name: OCR要求キュー上限の回帰検査
+        run: node tests/offscreen-queue.test.js
+
+      - name: VOICEVOX応答サイズ・タイムアウト検査
+        run: node tests/response-limits.test.js
+
+      - name: 静的セキュリティ監査
+        run: node tools/security-audit.mjs
 
       - name: manifest.json の妥当性と参照ファイルの存在確認
         run: |

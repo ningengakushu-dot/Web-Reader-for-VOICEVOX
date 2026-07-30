@@ -5,7 +5,7 @@ const OCR_MENU_ID = "capture-ocr-read";
 
 // タブへ動的注入するコンテンツスクリプト。manifest の content_scripts と同じ並びにする
 // （dom-text.js が先。content.js が globalThis.VVRadioDomText を参照するため）。
-const CONTENT_SCRIPT_FILES = ["dom-text.js", "content.js"];
+const CONTENT_SCRIPT_FILES = ["content-guard.js", "dom-text.js", "content.js"];
 
 /**
  * 指定した対象へコンテンツスクリプトを注入する。
@@ -14,6 +14,16 @@ const CONTENT_SCRIPT_FILES = ["dom-text.js", "content.js"];
  */
 function injectContentScripts(target) {
     return chrome.scripting.executeScript({ target, files: CONTENT_SCRIPT_FILES });
+}
+
+// 更新前から開かれているタブは古い content script を保持するため、更新完了時に
+// 現在の一式を再注入する。注入不可ページは個別に失敗させ、他のタブは継続する。
+function reinjectContentScriptsAfterUpdate() {
+    chrome.tabs.query({}).then((tabs) => Promise.allSettled(
+        tabs.filter((tab) => Number.isInteger(tab.id)).map((tab) =>
+            injectContentScripts({ tabId: tab.id, allFrames: true })
+        )
+    )).catch(() => {});
 }
 
 /**
@@ -43,18 +53,39 @@ function notifyTab(tabId, message, context) {
     sending.catch(context ? warn(context) : () => {});
 }
 
+// この版より前から更新した利用者にだけ、機能追加のお知らせを表示する。
+// 以降のバグ修正版へ更新するたびに同じお知らせが再表示されるのを防ぐ。
+const UPDATE_NOTICE_INTRODUCED_VERSION = "1.4.1";
+function isVersionBefore(version, target) {
+    const parse = (value) => String(value || "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+    const a = parse(version);
+    const b = parse(target);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        const diff = (a[i] || 0) - (b[i] || 0);
+        if (diff !== 0) return diff < 0;
+    }
+    return false;
+}
+
 // 拡張機能のインストール／更新時にコンテキストメニューを作成する。
 // onInstalled は更新時にも発火し、既存メニューが残っていることがある。
 // 同一 id の create は "Cannot create item with duplicate id" で失敗するため、
 // 必ず removeAll してから作り直す（更新後にメニューが消える不具合の原因）。
 chrome.runtime.onInstalled.addListener((details) => {
     // 既存ユーザーのアップデート時のみ初回お知らせフラグを立てる（install では立てない）
-    if (details?.reason === "update") {
+    const isUpdate = details?.reason === "update";
+    const shouldSetNotice = isUpdate
+        && (!details.previousVersion || isVersionBefore(details.previousVersion, UPDATE_NOTICE_INTRODUCED_VERSION));
+    if (shouldSetNotice) {
+        // フラグ保存後に再注入し、新しい content script の初期確認との競合を防ぐ。
         chrome.storage.local.set({ update_notice_pending: true }, () => {
             if (chrome.runtime.lastError) {
                 console.warn("Background: update_notice_pending 保存失敗:", chrome.runtime.lastError.message);
             }
+            reinjectContentScriptsAfterUpdate();
         });
+    } else if (isUpdate) {
+        reinjectContentScriptsAfterUpdate();
     }
 
     chrome.contextMenus.removeAll(() => {
@@ -149,6 +180,7 @@ async function startCaptureOcr(tab) {
 // 固定キーへの上書き保存なので並行実行しても last-write-wins となり、
 // 追い越された側のタブは captureId の不一致で明示的なエラーを表示できる。
 async function startCaptureOcrInTab(tab) {
+    let captureStored = false;
     try {
         let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
         if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
@@ -157,21 +189,27 @@ async function startCaptureOcrInTab(tab) {
             dataUrl = await reencodeCaptureAsJpeg(dataUrl);
         }
 
-        const captureId = String(Date.now());
+        const captureId = typeof crypto?.randomUUID === "function"
+            ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         await chrome.storage.session.set({
             [CAPTURE_STORAGE_KEY]: {
                 captureId,
                 dataUrl,
-                sourceTitle: tab.title ?? "",
-                sourceUrl: tab.url ?? ""
+                sourceTitle: String(tab.title ?? "").slice(0, 1000),
+                sourceUrl: String(tab.url ?? "").slice(0, 4000),
+                createdAt: Date.now()
             }
         });
+        captureStored = true;
 
         await chrome.tabs.create({
             url: chrome.runtime.getURL(`capture.html?cid=${captureId}`),
             index: tab.index + 1
         });
     } catch (err) {
+        if (captureStored) {
+            try { await chrome.storage.session.remove(CAPTURE_STORAGE_KEY); } catch (error) { /* best effort */ }
+        }
         // chrome:// ページ等のキャプチャ不可画面ではここに到達する。
         // ページ内にUIを出せない場面もあるため、ツールバーバッジで簡易通知する。
         console.warn("Background: 画面キャプチャに失敗:", err.message);
@@ -183,7 +221,13 @@ async function startCaptureOcrInTab(tab) {
 // OCRの完了は offscreen からの OCR_COMPLETE メッセージで受け取り（イベント駆動）、
 // メッセージ応答チャネルを長時間保持しない（Service Worker の休止対策）。
 async function captureAndRecognizeRegion(request, tab) {
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+        dataUrl = await reencodeCaptureAsJpeg(dataUrl);
+    }
+    if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+        throw new Error("キャプチャ画像が大きすぎます。表示倍率を下げて再度お試しください。");
+    }
     await setupOffscreen();
     // offscreen ドキュメントは chrome.storage を参照できないため、
     // ルビ除去設定はここで読み取ってメッセージに載せて渡す。
@@ -204,12 +248,14 @@ async function reencodeCaptureAsJpeg(pngDataUrl) {
     const blob = await (await fetch(pngDataUrl)).blob();
     const bitmap = await createImageBitmap(blob);
     try {
-        let dataUrl = await drawToJpegDataUrl(bitmap, 1);
-        if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
-            const scale = Math.sqrt(CAPTURE_MAX_DATAURL_LENGTH / dataUrl.length) * 0.9;
+        let scale = 1;
+        let dataUrl = "";
+        for (let attempt = 0; attempt < 4; attempt++) {
             dataUrl = await drawToJpegDataUrl(bitmap, scale);
+            if (dataUrl.length <= CAPTURE_MAX_DATAURL_LENGTH) return dataUrl;
+            scale *= Math.sqrt(CAPTURE_MAX_DATAURL_LENGTH / dataUrl.length) * 0.85;
         }
-        return dataUrl;
+        throw new Error("キャプチャ画像を安全なサイズまで縮小できませんでした。");
     } finally {
         bitmap.close();
     }
@@ -357,12 +403,17 @@ chrome.commands.onCommand.addListener((command) => {
 let playbackTabId = null;
 
 // 宛先タブIDを更新し、storage.session にも反映する（null はクリア）。
-function setPlaybackTabId(tabId) {
+async function setPlaybackTabId(tabId) {
     playbackTabId = tabId;
-    if (tabId == null) {
-        chrome.storage.session.remove(PLAYBACK_TAB_STORAGE_KEY).catch(() => {});
-    } else {
-        chrome.storage.session.set({ [PLAYBACK_TAB_STORAGE_KEY]: tabId }).catch(() => {});
+    try {
+        if (tabId == null) {
+            await chrome.storage.session.remove(PLAYBACK_TAB_STORAGE_KEY);
+        } else {
+            await chrome.storage.session.set({ [PLAYBACK_TAB_STORAGE_KEY]: tabId });
+        }
+    } catch (error) {
+        // メモリ上の宛先は維持し、同じService Workerの生存中は通知を継続する。
+        console.warn("Background: 再生タブ状態の保存に失敗:", error.message);
     }
 }
 
@@ -386,21 +437,20 @@ async function getPlaybackTabId() {
  * 取り残されるのを防ぐ（GENERATE_VOICE と OCR_COMPLETE の共通処理）。
  * @param {number|null} tabId
  */
-function switchPlaybackTabTo(tabId) {
+async function switchPlaybackTabTo(tabId) {
     if (tabId == null) return;
-    getPlaybackTabId().then((prev) => {
-        if (prev != null && prev !== tabId) {
-            notifyTab(prev, { type: "PLAYBACK_STOPPED" }, "旧再生タブへの停止通知失敗");
-        }
-        setPlaybackTabId(tabId);
-    });
+    const prev = await getPlaybackTabId();
+    if (prev != null && prev !== tabId) {
+        notifyTab(prev, { type: "PLAYBACK_STOPPED" }, "旧再生タブへの停止通知失敗");
+    }
+    await setPlaybackTabId(tabId);
 }
 
 // タブが閉じられたら、保持している状態（再生宛先・ショートカット重複抑制）を掃除する。
 chrome.tabs.onRemoved.addListener(async (tabId) => {
     lastShortcut.delete(tabId);
     if (await getPlaybackTabId() === tabId) {
-        setPlaybackTabId(null);
+        await setPlaybackTabId(null);
     }
 });
 
@@ -410,7 +460,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
     if (changeInfo.status !== "loading") return;
     if (await getPlaybackTabId() !== tabId) return;
-    setPlaybackTabId(null);
+    await setPlaybackTabId(null);
     try {
         const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
         if (contexts.length > 0) {
@@ -452,7 +502,7 @@ async function setupOffscreen() {
         offscreenCreating = chrome.offscreen.createDocument({
             url: 'offscreen.html',
             reasons: ['AUDIO_PLAYBACK', 'WORKERS'],
-            justification: '音声再生によるアクセシビリティ向上（CSP制限サイト回避）と、画面OCR読み上げの文字認識ワーカー実行のため'
+            justification: 'ページに依存しない音声再生と、画面OCR読み上げの文字認識ワーカー実行のため'
         });
 
         await offscreenCreating;
@@ -466,8 +516,12 @@ async function setupOffscreen() {
 
 // Offscreen にメッセージを送信するヘルパー
 // 配信の成否を呼び出し元で扱えるよう Promise をそのまま返す
-function sendToOffscreen(message) {
-    return chrome.runtime.sendMessage({ ...message, target: 'offscreen' });
+async function sendToOffscreen(message) {
+    const response = await chrome.runtime.sendMessage({ ...message, target: 'offscreen' });
+    if (!response || response.success !== true) {
+        throw new Error(response?.error || "Offscreen ドキュメントから応答がありません");
+    }
+    return response;
 }
 
 // 警告ログを出力するヘルパー（.catch() 用）
@@ -503,9 +557,56 @@ function claimUpdateNotice() {
     return next;
 }
 
+// ローカルのVOICEVOX互換APIが予期しないJSONを返しても、拡張ページへ巨大・不正な
+// オブジェクトを渡さないよう、設定画面で必要な項目だけへ正規化する。
+function normalizeSpeakerList(value) {
+    if (!Array.isArray(value)) throw new Error("キャラクター一覧の形式が不正です");
+    const speakers = [];
+    for (const speaker of value.slice(0, 1000)) {
+        if (!speaker || typeof speaker.name !== "string" || !Array.isArray(speaker.styles)) continue;
+        const name = speaker.name.trim().slice(0, 100);
+        if (!name) continue;
+        const styles = [];
+        for (const style of speaker.styles.slice(0, 1000)) {
+            const id = Number(style?.id);
+            if (!Number.isInteger(id) || id < 0 || id > 1000000) continue;
+            const styleName = typeof style?.name === "string" ? style.name.trim().slice(0, 100) : "";
+            styles.push({ id, name: styleName });
+        }
+        if (styles.length) {
+            speakers.push({
+                name,
+                speaker_uuid: typeof speaker.speaker_uuid === "string"
+                    ? speaker.speaker_uuid.slice(0, 200) : "",
+                styles
+            });
+        }
+    }
+    if (!speakers.length) throw new Error("利用可能なキャラクターが見つかりません");
+    return speakers;
+}
+
+// 音声の開始・停止要求を到着順に処理する。複数タブから同時に要求された場合でも、
+// 「宛先切替 → 既存再生停止 → 新規キュー追加」の順序が交差しないようにする。
+let voiceOperationQueue = Promise.resolve();
+function enqueueVoiceOperation(operation) {
+    const next = voiceOperationQueue.then(operation);
+    voiceOperationQueue = next.catch(() => {});
+    return next;
+}
+
 // Content Scriptからのメッセージを処理するリスナー
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.target && request.target !== 'background') return;
+    const security = globalThis.VVRadioBackgroundSecurity;
+    if (security) {
+        const checked = security.validateRequest(request, sender);
+        if (!checked.ok) {
+            sendResponse(security.invalidResponse(request?.type, checked.error));
+            return false;
+        }
+        request = checked.request;
+    }
     // target:'background' は offscreen ドキュメントからの通知（PLAYBACK_* / OCR_*）に限る。
     // 送信元が offscreen.html であることを確認し、他コンテキストからの偽装を排除する（多層防御）。
     // content script/拡張ページからの要求は target を付けず、sender.tab で正しく扱っている。
@@ -536,21 +637,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
 
         case "OPEN_OPTIONS":
-            chrome.runtime.openOptionsPage();
-            sendResponse({ success: true });
-            return false;
+            respondWith(chrome.runtime.openOptionsPage(), sendResponse);
+            return true;
 
         case "CHECK_CONNECTION":
             respondWith(
-                fetchWithTimeout(`${VOICEVOX_BASE_URL}/version`, {}, VOICEVOX_FETCH_TIMEOUT_MS),
+                fetchWithTimeout(`${VOICEVOX_BASE_URL}/version`, {}, VOICEVOX_FETCH_TIMEOUT_MS)
+                    .then((res) => {
+                        const cancellation = res.body?.cancel?.();
+                        cancellation?.catch?.(() => {});
+                        return res.ok;
+                    }),
                 sendResponse,
-                (res) => ({ success: res.ok }));
+                (ok) => ({ success: ok }));
             return true;
 
         case "GET_SPEAKERS":
             respondWith(
                 fetchWithTimeout(`${VOICEVOX_BASE_URL}/speakers`, {}, VOICEVOX_FETCH_TIMEOUT_MS)
-                    .then((res) => res.json()),
+                    .then((res) => {
+                        if (!res.ok) throw new Error(`キャラクター一覧の取得に失敗しました (${res.status})`);
+                        return readJsonResponseWithLimit(res).then(normalizeSpeakerList);
+                    }),
                 sendResponse,
                 (speakers) => ({ success: true, speakers }));
             return true;
@@ -565,19 +673,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
 
         case "GENERATE_VOICE":
-            // 要求元タブを再生状態通知の宛先として記録する。
-            // ショートカット/コンテキストメニュー経由でも content.js から送信されるため
-            // sender.tab.id で正しい要求元タブが取得できる。
-            switchPlaybackTabTo(sender.tab?.id ?? null);
-            handleGenerateVoice(request.text, sendResponse);
+            // 宛先の保存を完了してから合成を開始し、直後の PLAYBACK_STARTED を取りこぼさない。
+            enqueueVoiceOperation(async () => {
+                await switchPlaybackTabTo(sender.tab?.id ?? null);
+                await handleGenerateVoice(request.text, sendResponse);
+            }).catch((err) => sendResponse({ success: false, error: err.message }));
             return true;
 
         case "STOP_ALL":
-            setupOffscreen()
-                .then(() => sendToOffscreen({ type: 'STOP_AUDIO' }))
-                .catch(warn("再生停止メッセージ送信失敗"));
-            sendResponse({ success: true });
-            return false;
+            respondWith(
+                enqueueVoiceOperation(() =>
+                    setupOffscreen().then(() => sendToOffscreen({ type: 'STOP_AUDIO' }))),
+                sendResponse);
+            return true;
 
         case "CAPTURE_OCR_REGION": {
             // ページ内オーバーレイで選択された範囲のキャプチャ→OCR開始要求
@@ -616,19 +724,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }, "OCRエラー通知の送信失敗");
                 return false;
             }
-            // GENERATE_VOICE と同様に、再生状態通知の宛先を要求元タブへ切り替える
-            switchPlaybackTabTo(tabId);
-            notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
-            // 読み上げ準備の失敗（offscreen 生成不可等）も要求元タブへ通知する。
-            // VOICEVOX への接続失敗は合成時に PLAYBACK_ERROR として別途届く。
-            handleGenerateVoice(request.text, (res) => {
-                if (res && res.success === false) {
-                    notifyTab(tabId, {
-                        type: "OCR_STATUS",
-                        status: "error",
-                        message: `読み上げを開始できませんでした: ${res.error}`
-                    }, "読み上げ開始エラー通知の送信失敗");
-                }
+            // 宛先の保存完了後に読み上げを始め、開始通知の転送先を確実にする。
+            enqueueVoiceOperation(async () => {
+                await switchPlaybackTabTo(tabId);
+                notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
+                await handleGenerateVoice(request.text, (res) => {
+                    if (res && res.success === false) {
+                        notifyTab(tabId, {
+                            type: "OCR_STATUS",
+                            status: "error",
+                            message: `読み上げを開始できませんでした: ${res.error}`
+                        }, "読み上げ開始エラー通知の送信失敗");
+                    }
+                });
+            }).catch((err) => {
+                notifyTab(tabId, {
+                    type: "OCR_STATUS", status: "error",
+                    message: `読み上げを開始できませんでした: ${err.message}`
+                }, "読み上げ開始エラー通知の送信失敗");
             });
             return false;
         }
@@ -696,9 +809,9 @@ async function fetchSpeakerIcon(speakerId) {
     const speakersRes = await fetchWithTimeout(
         `${VOICEVOX_BASE_URL}/speakers`, {}, VOICEVOX_FETCH_TIMEOUT_MS);
     if (!speakersRes.ok) throw new Error(`キャラクター一覧の取得に失敗しました (${speakersRes.status})`);
-    const speakers = await speakersRes.json();
+    const speakers = normalizeSpeakerList(await readJsonResponseWithLimit(speakersRes));
 
-    const speaker = speakers.find(s => (s.styles || []).some(st => st.id === id));
+    const speaker = speakers.find(s => s.styles.some(st => st.id === id));
     if (!speaker) throw new Error("選択中のキャラクターが見つかりません");
 
     // speaker_uuid が無いエンジンでも名前だけは返し、文字表示にフォールバックさせる。
@@ -708,12 +821,16 @@ async function fetchSpeakerIcon(speakerId) {
         `${VOICEVOX_BASE_URL}/speaker_info?speaker_uuid=${encodeURIComponent(speaker.speaker_uuid)}`,
         {}, VOICEVOX_FETCH_TIMEOUT_MS);
     if (!infoRes.ok) return { name: speaker.name, icon: null };
-    const info = await infoRes.json();
+    const info = await readJsonResponseWithLimit(infoRes);
 
     // スタイルごとにアイコンが違うため、選択中のスタイルのものを優先する。
-    const styleInfos = info.style_infos || [];
-    const matched = styleInfos.find(si => si.id === id) || styleInfos[0];
-    return { name: speaker.name, icon: matched?.icon || null };
+    const styleInfos = Array.isArray(info?.style_infos) ? info.style_infos.slice(0, 1000) : [];
+    const matched = styleInfos.find(si => Number(si?.id) === id) || styleInfos[0];
+    const icon = typeof matched?.icon === "string"
+        && matched.icon.length <= 3 * 1024 * 1024
+        && /^[A-Za-z0-9+/=]+$/.test(matched.icon)
+        ? matched.icon : null;
+    return { name: speaker.name, icon };
 }
 
 /**
@@ -723,9 +840,15 @@ async function fetchSpeakerIcon(speakerId) {
 function splitText(text) {
     if (!text) return [];
 
-    const chunks = text.match(/[^。！？\n]+[。！？\n]?/g);
-    if (!chunks) return [text];
-
-    const result = chunks.map(s => s.trim()).filter(Boolean);
-    return result.length > 0 ? result : [text];
+    const MAX_CHUNK_CHARS = 5000;
+    const sentences = text.match(/[^。！？\n]+[。！？\n]?/g) || [text];
+    const result = [];
+    for (const sentence of sentences) {
+        const trimmed = sentence.trim();
+        if (!trimmed) continue;
+        for (let offset = 0; offset < trimmed.length; offset += MAX_CHUNK_CHARS) {
+            result.push(trimmed.slice(offset, offset + MAX_CHUNK_CHARS));
+        }
+    }
+    return result.length > 0 ? result : [text.slice(0, MAX_CHUNK_CHARS)];
 }

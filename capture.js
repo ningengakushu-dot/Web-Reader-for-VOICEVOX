@@ -8,6 +8,7 @@
 (() => {
     // これ未満（表示px）のドラッグはクリック操作とみなして無視する
     const MIN_SELECTION_SIZE = 12;
+    const CAPTURE_MAX_AGE_MS = 5 * 60 * 1000;
 
     const image = document.getElementById("capture-image");
     const container = document.getElementById("capture-container");
@@ -24,6 +25,17 @@
 
     // OCRの世代トークン。実行中に新しい選択が行われた場合、古い結果を破棄する。
     let ocrGeneration = 0;
+
+    function sendRuntimeMessage(message, callback) {
+        try {
+            if (!chrome.runtime?.id) return false;
+            chrome.runtime.sendMessage(message, callback);
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+    let ocrInProgress = false;
 
     // 組版方向（横書き jpn / 縦書き jpn_vert）ごとのワーカーを使い回す。
     // 生成処理（同梱アセットの指定・タイムアウト保護）と使い回しの管理は
@@ -59,6 +71,12 @@
                 showBanner("キャプチャ画像が見つかりません（このタブの再読み込み、またはブラウザの再起動で破棄されています）。元のページからもう一度実行してください。");
                 return;
             }
+            const createdAt = Number(capture.createdAt);
+            if (!Number.isFinite(createdAt) || Date.now() - createdAt > CAPTURE_MAX_AGE_MS) {
+                await chrome.storage.session.remove(CAPTURE_STORAGE_KEY).catch(() => {});
+                showBanner("キャプチャ情報の有効期限が切れました。元のページからもう一度実行してください。");
+                return;
+            }
             // 固定キーは常に最新のキャプチャで上書きされるため、このタブが対象とする
             // captureId と一致しない場合（古いタブの再読み込み等）は明示的に案内する。
             if (capture.captureId !== captureId) {
@@ -92,11 +110,12 @@
 
     // VOICEVOXエンジンへの接続を確認し、未起動なら警告を表示する（読み上げ時の躓き防止）
     function checkVoicevoxConnection() {
-        chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
+        const sent = sendRuntimeMessage({ type: "CHECK_CONNECTION" }, (res) => {
             if (chrome.runtime.lastError || !res || !res.success) {
                 showBanner("VOICEVOXエンジンに接続できません。読み上げにはVOICEVOXの起動が必要です（OCRは利用できます）。");
             }
         });
+        if (!sent) showBanner("拡張機能が更新されました。このタブを再読み込みしてください。");
     }
 
     function showBanner(message) {
@@ -202,6 +221,10 @@
         const canvas = cropToOcrCanvas(image, sx, sy, sw, sh);
 
         const generation = ++ocrGeneration;
+        // Tesseractワーカーは同一ワーカー上の並行recognizeに対応しないため、
+        // 新しい選択を優先するときは前のワーカーを破棄して競合を防ぐ。
+        if (ocrInProgress) terminateWorkers();
+        ocrInProgress = true;
         setOcrStatus("文字認識を実行中...");
         ocrProgress.value = 0;
         ocrProgress.hidden = false;
@@ -235,6 +258,7 @@
             setOcrStatus(`文字認識に失敗しました: ${err.message}`, true);
         } finally {
             if (generation === ocrGeneration) {
+                ocrInProgress = false;
                 ocrProgress.hidden = true;
             }
         }
@@ -254,18 +278,20 @@
             return;
         }
 
-        chrome.runtime.sendMessage({ type: "GENERATE_VOICE", text }, (response) => {
+        const sent = sendRuntimeMessage({ type: "GENERATE_VOICE", text }, (response) => {
             if (chrome.runtime.lastError || !response || !response.success) {
                 const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
                 setPlaybackStatus(`読み上げの開始に失敗しました: ${reason}`, "error");
             }
         });
+        if (!sent) setPlaybackStatus("拡張機能が更新されました。このタブを再読み込みしてください。", "error");
     });
 
     stopBtn.addEventListener("click", () => {
-        chrome.runtime.sendMessage({ type: "STOP_ALL" });
+        const sent = sendRuntimeMessage({ type: "STOP_ALL" }, () => { void chrome.runtime.lastError; });
         setPlayingState(false);
-        setPlaybackStatus("停止しました。");
+        setPlaybackStatus(sent ? "停止しました。" : "拡張機能が更新されました。このタブを再読み込みしてください。",
+            sent ? "" : "error");
     });
 
     // background から転送される再生状態（target:'tab'）を反映する。
