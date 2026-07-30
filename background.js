@@ -47,7 +47,12 @@ function notifyTab(tabId, message, context) {
 // onInstalled は更新時にも発火し、既存メニューが残っていることがある。
 // 同一 id の create は "Cannot create item with duplicate id" で失敗するため、
 // 必ず removeAll してから作り直す（更新後にメニューが消える不具合の原因）。
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
+    // 既存ユーザーのアップデート時のみ初回お知らせフラグを立てる
+    if (details.reason === "update") {
+        chrome.storage.local.set({ update_notice_pending: true });
+    }
+
     chrome.contextMenus.removeAll(() => {
         // コールバック内で lastError を読まないと未処理エラーになる
         void chrome.runtime.lastError;

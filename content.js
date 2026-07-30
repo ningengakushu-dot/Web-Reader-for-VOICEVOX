@@ -54,6 +54,7 @@ class VVRadioReader {
             this.injectIndicator();
             this.applyIconAppearance();
             this.checkVoicevoxConnection();
+            this.checkUpdateNotice();
         }
         this.setupMessageListener();
         this.setupKeyboardShortcutFallback();
@@ -558,6 +559,161 @@ class VVRadioReader {
                 this.updateUIState('error');
             }
         });
+    }
+
+    // 既存ユーザー向けアップデート初回お知らせの確認と表示
+    checkUpdateNotice() {
+        if (!chrome.storage?.local) return;
+        chrome.storage.local.get(["update_notice_pending"], (res) => {
+            if (chrome.runtime.lastError) return;
+            if (res && res.update_notice_pending) {
+                // 表示済みフラグを更新して次回以降の表示を抑止
+                chrome.storage.local.set({ update_notice_pending: false });
+                this.showUpdateNoticeModal();
+            }
+        });
+    }
+
+    // アップデートお知らせモーダル（洗練されたモダンUI）の表示
+    showUpdateNoticeModal() {
+        if (document.getElementById("vvradio-update-notice-host")) return;
+
+        const host = document.createElement("div");
+        host.id = "vvradio-update-notice-host";
+        (document.body || document.documentElement).appendChild(host);
+        const root = host.attachShadow({ mode: "open" });
+
+        const style = document.createElement("style");
+        style.textContent = `
+            :host {
+                all: initial;
+            }
+            .notice-card {
+                position: fixed;
+                bottom: 24px;
+                right: 24px;
+                width: 360px;
+                max-width: calc(100vw - 48px);
+                background: rgba(24, 28, 38, 0.94);
+                backdrop-filter: blur(16px);
+                -webkit-backdrop-filter: blur(16px);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 16px;
+                padding: 20px 22px;
+                box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.05);
+                color: #f3f4f6;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                z-index: 2147483647;
+                box-sizing: border-box;
+                animation: vvNoticeSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            }
+            @keyframes vvNoticeSlideIn {
+                from { opacity: 0; transform: translateY(20px) scale(0.96); }
+                to { opacity: 1; transform: translateY(0) scale(1); }
+            }
+            .notice-header {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+            }
+            .notice-badge {
+                background: linear-gradient(135deg, #2eb67d, #1fa86c);
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 3px 8px;
+                border-radius: 20px;
+                letter-spacing: 0.5px;
+            }
+            .notice-title {
+                font-size: 15px;
+                font-weight: 700;
+                color: #ffffff;
+                margin: 0;
+            }
+            .notice-body {
+                font-size: 13px;
+                line-height: 1.55;
+                color: #d1d5db;
+                margin-bottom: 16px;
+            }
+            .notice-actions {
+                display: flex;
+                gap: 10px;
+                align-items: center;
+            }
+            .btn-primary {
+                flex: 1;
+                background: linear-gradient(135deg, #a855f7, #6366f1);
+                color: #ffffff;
+                border: none;
+                border-radius: 10px;
+                padding: 9px 14px;
+                font-size: 13px;
+                font-weight: 600;
+                cursor: pointer;
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                transition: transform 0.15s ease, box-shadow 0.15s ease;
+                box-shadow: 0 4px 12px rgba(168, 85, 247, 0.3);
+            }
+            .btn-primary:hover {
+                transform: translateY(-1px);
+                box-shadow: 0 6px 16px rgba(168, 85, 247, 0.45);
+            }
+            .btn-secondary {
+                background: rgba(255, 255, 255, 0.08);
+                color: #9ca3af;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                padding: 9px 14px;
+                font-size: 13px;
+                font-weight: 500;
+                cursor: pointer;
+                transition: background 0.15s ease, color 0.15s ease;
+            }
+            .btn-secondary:hover {
+                background: rgba(255, 255, 255, 0.15);
+                color: #ffffff;
+            }
+        `;
+
+        const card = document.createElement("div");
+        card.className = "notice-card";
+        card.innerHTML = `
+            <div class="notice-header">
+                <span class="notice-badge">UPDATE v1.4.1</span>
+                <h4 class="notice-title">Web Reader for VOICEVOX</h4>
+            </div>
+            <div class="notice-body">
+                【新機能・変更点のお知らせ】<br>
+                ・画像やPDFの文字認識（OCR）読み上げ対応<br>
+                ・アイコンの位置移動＆自動保存<br>
+                ・アイコン右クリックの動作をOCR起動に変更（※オプションから「設定を開く」に変更可能）<br>
+                ・読み上げ動作と安定性の向上<br><br>
+                気に入っていただけましたら、高評価（★5）をいただけると嬉しいです！
+            </div>
+            <div class="notice-actions">
+                <button class="btn-primary" id="btn-rate">⭐ ストアで高評価する</button>
+                <button class="btn-secondary" id="btn-close">閉じる</button>
+            </div>
+        `;
+
+        root.appendChild(style);
+        root.appendChild(card);
+
+        const closeNotice = () => host.remove();
+
+        card.querySelector("#btn-rate").addEventListener("click", () => {
+            window.open("https://chromewebstore.google.com/detail/web-reader-for-voicevox", "_blank");
+            closeNotice();
+        });
+
+        card.querySelector("#btn-close").addEventListener("click", closeNotice);
     }
 
     // --- ページ内OCR範囲選択 ---
