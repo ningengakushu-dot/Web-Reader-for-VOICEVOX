@@ -38,6 +38,12 @@ const DOM_TEXT_FOREIGN_FRAME_RATIO = 0.25;
 const DOM_TEXT_IMAGE_DOMINANT_RATIO = 0.5;
 const DOM_TEXT_IMAGE_VS_TEXT_RATIO = 4;
 
+// DOM走査がこの時間以上メインスレッドを使い続けたら、いったんブラウザへ処理を返す。
+// 判定処理や走査順は変えず、長いページでも描画・入力・ブラウザの応答確認を
+// 処理できるようにする。短いページでは一度も yield しないため従来の速度を保てる。
+const DOM_TEXT_WORK_SLICE_MS = 12;
+const DOM_TEXT_CHAR_YIELD_STEP = 32;
+
 // 画像の代替テキストを読むのは、その画像がこの割合以上選択範囲に入っているときだけ。
 const DOM_TEXT_LABEL_MIN_INSIDE_RATIO = 0.6;
 
@@ -55,23 +61,38 @@ const DOM_TEXT_BLOCK_TAGS = new Set([
     "TABLE", "ADDRESS", "HR", "BR"
 ]);
 
-// getComputedStyle はレイアウト情報の読み出しを伴い、テキストノードごとに
-// 祖先を遡って呼ぶと無視できないコストになる。1回の抽出の間だけ結果を覚えておく
-// （抽出中にページのスタイルが変わることは想定しない）。
-let styleCache = null;
-// 祖先の overflow による切り取り枠も同様に1回の抽出の間だけ覚えておく
-let clipBoxCache = null;
+function workNow() {
+    return globalThis.performance && typeof globalThis.performance.now === "function"
+        ? globalThis.performance.now()
+        : Date.now();
+}
 
-function cachedStyle(el) {
-    if (!styleCache) {
-        const view = el.ownerDocument.defaultView;
-        return view ? view.getComputedStyle(el) : null;
-    }
-    let style = styleCache.get(el);
+function createWorkContext() {
+    return {
+        // getComputedStyle と overflow の切り取り枠はレイアウト情報の読み出しを伴うため、
+        // 1回の抽出内だけキャッシュする。呼び出しごとに独立させ、非同期走査が
+        // 重なっても別の抽出結果を壊さないようにする。
+        styleCache: new Map(),
+        clipBoxCache: new Map(),
+        sliceStarted: workNow()
+    };
+}
+
+function shouldYieldWork(context) {
+    return workNow() - context.sliceStarted >= DOM_TEXT_WORK_SLICE_MS;
+}
+
+async function yieldWork(context) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    context.sliceStarted = workNow();
+}
+
+function cachedStyle(el, context) {
+    let style = context.styleCache.get(el);
     if (style === undefined) {
         const view = el.ownerDocument.defaultView;
         style = view ? view.getComputedStyle(el) : null;
-        styleCache.set(el, style);
+        context.styleCache.set(el, style);
     }
     return style;
 }
@@ -128,11 +149,11 @@ function offsetRect(rect, offset) {
 // これらはレイアウト上の矩形が通常サイズのまま残るため、行矩形の大きさでは判別できず、
 // 祖先の指定を見る必要がある。本アプリは「画面で見えている範囲」を読み上げるため、
 // 目に見えない補助ラベルは読まない（OCR経路の挙動とも揃う）。
-function isVisuallyHiddenText(el) {
+function isVisuallyHiddenText(el, context) {
     let node = el;
     // 定型手法は数階層以内に収まるため、遡る範囲を限定してコストを抑える
     for (let depth = 0; node && node.nodeType === 1 && depth < 5; depth++, node = node.parentElement) {
-        const style = cachedStyle(node);
+        const style = cachedStyle(node, context);
         if (!style) return false;
         const clip = style.clip || "";
         if (/^rect\(\s*(0px,\s*){3}0px\s*\)$/.test(clip.replace(/\s+/g, " ").trim())) return true;
@@ -148,7 +169,7 @@ function isVisuallyHiddenText(el) {
 }
 
 // 要素が視覚的に存在しているか。スクリーンリーダーが読まないものは読まない。
-function isElementReadable(el) {
+function isElementReadable(el, context) {
     if (!el || el.nodeType !== 1) return false;
     if (DOM_TEXT_SKIP_TAGS.has(el.tagName)) return false;
     // aria-hidden の配下は支援技術から隠されている＝読み上げ対象外
@@ -162,19 +183,19 @@ function isElementReadable(el) {
             contentVisibilityAuto: true
         });
     }
-    const style = cachedStyle(el);
+    const style = cachedStyle(el, context);
     if (!style) return true;
     return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0.1;
 }
 
 // その要素が背景を塗っているか（＝後ろのものを実際に隠すか）。
-function paintsBackground(el) {
+function paintsBackground(el, context) {
     // 中身を描画する要素は無条件で隠すとみなす
     if (el.tagName === "IFRAME" || el.tagName === "IMG" || el.tagName === "VIDEO"
         || el.tagName === "CANVAS" || el.tagName === "OBJECT" || el.tagName === "EMBED") {
         return true;
     }
-    const style = cachedStyle(el);
+    const style = cachedStyle(el, context);
     if (!style) return true;
     if (style.backgroundImage && style.backgroundImage !== "none") return true;
     const match = /^rgba?\(([^)]+)\)/.exec(style.backgroundColor || "");
@@ -195,7 +216,7 @@ function paintsBackground(el) {
 //
 // そこで、手前から順に要素をたどり、自分に到達する前に「背景を塗る要素」が
 // あれば覆われているとみなす。透明な要素は何枚あっても素通しにする。
-function isTopMostAt(el, x, y) {
+function isTopMostAt(el, x, y, context) {
     const root = el.getRootNode();
     // Shadow DOM 内の要素は、その ShadowRoot 側で判定しないと常にホストが返る
     const picker = root && typeof root.elementsFromPoint === "function" ? root : el.ownerDocument;
@@ -209,7 +230,7 @@ function isTopMostAt(el, x, y) {
     for (const node of stack) {
         // 自分（またはその祖先・子孫）に到達した＝手前に遮るものが無かった
         if (node === el || el.contains(node) || node.contains(el)) return true;
-        if (paintsBackground(node)) return false;
+        if (paintsBackground(node, context)) return false;
     }
     // 重なりの中に自分が現れない＝別の階層に隠れている
     return false;
@@ -221,7 +242,7 @@ function isTopMostAt(el, x, y) {
 // 当たることが多い。そこを1点だけ見て判定すると、覆われてもいないテキストを
 // 大量に捨てることになる（実測: note・朝日・NHKの取りこぼしのほぼ全てがこれだった）。
 // 行矩形ごとに幅方向の3点を見て、1つでも通れば見えているとみなす。
-function isTextVisiblyOnTop(el, lineRects, sel, offset) {
+function isTextVisiblyOnTop(el, lineRects, sel, offset, context) {
     const ox = offset ? offset.x : 0;
     const oy = offset ? offset.y : 0;
     let checked = 0;
@@ -237,7 +258,7 @@ function isTextVisiblyOnTop(el, lineRects, sel, offset) {
         for (const t of [0.25, 0.5, 0.75]) {
             const cx = left + (right - left) * t - ox;
             checked++;
-            if (isTopMostAt(el, cx, cy)) return true;
+            if (isTopMostAt(el, cx, cy, context)) return true;
         }
         // 行数が多い場合は先頭の数行だけで判断する（コスト抑制）
         if (checked >= 12) break;
@@ -252,7 +273,7 @@ function isTextVisiblyOnTop(el, lineRects, sel, offset) {
 // 3×3で見て、1点でも手前に出ていれば見えているとみなす。
 // この判定を怠ると、ライトボックスや折りたたみの裏に隠れている広告バナーの
 // 代替テキストが、そのまま読み上げに混ざる（実機で報告された不具合の原因）。
-function isBoxVisiblyOnTop(el, box, sel, offset) {
+function isBoxVisiblyOnTop(el, box, sel, offset, context) {
     const ox = offset ? offset.x : 0;
     const oy = offset ? offset.y : 0;
     const left = Math.max(box.left, sel.left);
@@ -264,7 +285,7 @@ function isBoxVisiblyOnTop(el, box, sel, offset) {
         const y = top + (bottom - top) * ty - oy;
         for (const tx of [0.25, 0.5, 0.75]) {
             const x = left + (right - left) * tx - ox;
-            if (isTopMostAt(el, x, y)) return true;
+            if (isTopMostAt(el, x, y, context)) return true;
         }
     }
     return false;
@@ -301,18 +322,18 @@ function blockAncestorOf(node) {
 // 折りたたみ（max-height:0 + overflow:hidden）やカルーセルでは、画面に出ていない
 // 文字の行矩形が、はみ出した位置＝別の内容の上に重なって返ってくる。そのまま扱うと
 // 「画面に無い文章が読み上げられる」ことになるため、実際に見えている部分だけに絞る。
-function clipRectsByAncestorOverflow(rects, el, offset) {
+function clipRectsByAncestorOverflow(rects, el, offset, context) {
     // 同じ親を持つテキストノードが多数あるため、祖先の切り取り枠は覚えておく
-    let boxes = clipBoxCache ? clipBoxCache.get(el) : null;
+    let boxes = context.clipBoxCache.get(el);
     if (!boxes) {
         boxes = [];
         for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
-            const style = cachedStyle(node);
+            const style = cachedStyle(node, context);
             if (style && style.overflow && style.overflow !== "visible") {
                 boxes.push(offsetRect(node.getBoundingClientRect(), offset));
             }
         }
-        if (clipBoxCache) clipBoxCache.set(el, boxes);
+        context.clipBoxCache.set(el, boxes);
     }
     let clipped = rects;
     for (const box of boxes) {
@@ -332,13 +353,19 @@ function clipRectsByAncestorOverflow(rects, el, offset) {
 
 // テキストノードのうち、選択矩形に入っている部分だけを取り出す。
 // 行矩形との重なりで粗く判定し、境界にかかった行だけ文字単位で切り出す。
-function clipTextNode(node, sel, offset, doc) {
+async function clipTextNode(node, sel, offset, doc, context) {
     const empty = { text: "", lineRects: [] };
     const value = node.nodeValue;
     if (!value || !value.trim()) return empty;
 
     const range = doc.createRange();
     range.selectNodeContents(node);
+    // 大半のテキストノードは選択範囲外にある。まず外接矩形1個だけで安全に
+    // 粗判定し、範囲外なら行矩形配列・祖先スタイル・重なり判定を一切行わない。
+    // 行のどれかが選択範囲と交差するなら外接矩形も必ず交差するため、
+    // 採用対象を落とすことはない（隙間による偽陽性は後段の従来判定で除外する）。
+    const bounds = offsetRect(range.getBoundingClientRect(), offset);
+    if (rectArea(bounds) <= 0 || rectIntersectionArea(bounds, sel) <= 0) return empty;
     const rawRects = Array.from(range.getClientRects())
         .map((r) => offsetRect(r, offset))
         .filter((r) => rectArea(r) > 0);
@@ -347,7 +374,7 @@ function clipTextNode(node, sel, offset, doc) {
     // 祖先の overflow で切り取られて画面に出ていない部分を落とす。
     // これをしないと、折りたたみやカルーセルの中の見えない文字が
     // 別の内容の上に重なった矩形として拾われてしまう。
-    const lineRects = clipRectsByAncestorOverflow(rawRects, node.parentElement, offset);
+    const lineRects = clipRectsByAncestorOverflow(rawRects, node.parentElement, offset, context);
     if (!lineRects.length) return empty;
 
     let fullyInside = 0;
@@ -375,6 +402,9 @@ function clipTextNode(node, sel, offset, doc) {
     // 文字単位で切り出す。文字の中心が選択範囲に入っているものだけを残す。
     let out = "";
     for (let i = 0; i < value.length; i++) {
+        if (i > 0 && i % DOM_TEXT_CHAR_YIELD_STEP === 0 && shouldYieldWork(context)) {
+            await yieldWork(context);
+        }
         try {
             range.setStart(node, i);
             range.setEnd(node, i + 1);
@@ -424,15 +454,16 @@ function imageAltOf(el) {
  * @param {{removeRuby?: boolean}} options
  * @param {{units: object[], foreignArea: number, opaqueArea: number, textArea: number}} out
  * @param {Window} win
- * @returns {boolean} true ならこの要素の部分木をまとめて飛ばす
+ * @param {object} context 抽出ごとのキャッシュと協調スケジューラ
+ * @returns {Promise<boolean>} true ならこの要素の部分木をまとめて飛ばす
  */
-function collectFromMediaElement(el, sel, offset, options, out, win) {
+async function collectFromMediaElement(el, sel, offset, options, out, win, context) {
     const box = offsetRect(el.getBoundingClientRect(), offset);
     const overlap = rectIntersectionArea(box, sel);
     // 手前が別の要素で塞がれている画像・フレームは、面積も代替テキストも
     // 一切採用しない。ライトボックスや折りたたみの裏にある広告の文言が
     // 読み上げに混入するのを防ぐ（実機で報告された不具合の直接の原因）。
-    if (overlap > 0 && !isBoxVisiblyOnTop(el, box, sel, offset)) return true;
+    if (overlap > 0 && !isBoxVisiblyOnTop(el, box, sel, offset, context)) return true;
 
     if (el.tagName === "IFRAME") {
         if (overlap > 0) {
@@ -445,13 +476,13 @@ function collectFromMediaElement(el, sel, offset, options, out, win) {
             if (inner && inner.body) {
                 // 同一オリジンなら中身をそのまま辿れる。
                 // 枠線とパディングの分だけ内側の原点がずれる。
-                const cs = cachedStyle(el) || win.getComputedStyle(el);
+                const cs = cachedStyle(el, context) || win.getComputedStyle(el);
                 const childOffset = {
                     x: box.left + parseFloat(cs.borderLeftWidth || 0) + parseFloat(cs.paddingLeft || 0),
                     y: box.top + parseFloat(cs.borderTopWidth || 0) + parseFloat(cs.paddingTop || 0)
                 };
-                collectFromDocument(inner.body, inner, sel, childOffset, options, out);
-            } else if (isElementReadable(el) !== false) {
+                await collectFromDocument(inner.body, inner, sel, childOffset, options, out, context);
+            } else if (isElementReadable(el, context) !== false) {
                 out.foreignArea += overlap;
             }
         }
@@ -473,7 +504,7 @@ function collectFromMediaElement(el, sel, offset, options, out, win) {
     // 親要素の矩形には、浮動要素や絶対配置の子孫が含まれないことがあり
     // （実測: Wikipedia の infobox が丸ごと落ちた）、安全に飛ばせないため。
     if (el.tagName === "IMG" && overlap > 0) {
-        if (isElementReadable(el)) {
+        if (isElementReadable(el, context)) {
             // 代替テキストの有無に関わらず、画像は「文字として取り出せていない
             // 面積」として数える。代替テキストがあっても、それが画像の中身を
             // 表しているとは限らないため（広告バナー等）。
@@ -497,7 +528,7 @@ function collectFromMediaElement(el, sel, offset, options, out, win) {
  * 選択矩形に入っているテキスト断片を収集する。
  * 座標は全て最上位ビューポート基準に揃える（offset で補正）。
  */
-function collectFromDocument(root, doc, sel, offset, options, out) {
+async function collectFromDocument(root, doc, sel, offset, options, out, context) {
     const win = doc.defaultView;
     if (!win) return;
 
@@ -525,12 +556,14 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
     if (node === root) node = walker.nextNode();
 
     while (node) {
+        if (shouldYieldWork(context)) await yieldWork(context);
+
         if (node.nodeType === 1) {
             const el = node;
 
             // open な Shadow Root は中へ潜る。closed なものは読めない（OCR行き）。
             if (el.shadowRoot) {
-                collectFromDocument(el.shadowRoot, doc, sel, offset, options, out);
+                await collectFromDocument(el.shadowRoot, doc, sel, offset, options, out, context);
             }
 
             // 矩形の取得はレイアウト計算を伴うため、必要な要素だけで行う。
@@ -541,7 +574,7 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
                 node = walker.nextNode();
                 continue;
             }
-            node = collectFromMediaElement(el, sel, offset, options, out, win)
+            node = await collectFromMediaElement(el, sel, offset, options, out, win, context)
                 ? skipSubtree(walker)
                 : walker.nextNode();
             continue;
@@ -549,7 +582,7 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
 
         // --- テキストノード ---
         const parent = node.parentElement;
-        if (!parent || !isElementReadable(parent) || isVisuallyHiddenText(parent)) {
+        if (!parent) {
             node = walker.nextNode();
             continue;
         }
@@ -562,9 +595,24 @@ function collectFromDocument(root, doc, sel, offset, options, out) {
             continue;
         }
 
-        const clipped = clipTextNode(node, sel, offset, doc);
+        // 先に矩形で選択範囲外を落とす。従来は全テキストノードについて
+        // checkVisibility と最大5階層の getComputedStyle を実行していたため、
+        // 長いページでは範囲外の判定が処理時間の大半を占めていた。
+        const clipped = await clipTextNode(node, sel, offset, doc, context);
+        if (!clipped.text || !clipped.text.trim()) {
+            node = walker.nextNode();
+            continue;
+        }
+
+        // 可視性・視覚的隠しテキスト・重なりの判定内容は従来どおり。
+        // 順番だけを範囲判定の後へ移し、精度を変えず対象ノード数を絞る。
+        if (!isElementReadable(parent, context) || isVisuallyHiddenText(parent, context)) {
+            node = walker.nextNode();
+            continue;
+        }
+
         if (clipped.text && clipped.text.trim()
-            && isTextVisiblyOnTop(parent, clipped.lineRects, sel, offset)) {
+            && isTextVisiblyOnTop(parent, clipped.lineRects, sel, offset, context)) {
             for (const r of clipped.lineRects) out.textArea += rectIntersectionArea(r, sel);
             out.units.push({
                 text: clipped.text,
@@ -657,7 +705,7 @@ function joinTextUnits(units) {
  * @returns {{ok: boolean, text: string, chars: number, reason: string, stats: object}}
  *   ok=false のときは OCR 経路へ回すべきことを示し、reason にその理由が入る。
  */
-function collectRegionText(rect, options = {}) {
+async function collectRegionText(rect, options = {}) {
     const started = Date.now();
     const sel = {
         left: rect.x,
@@ -669,14 +717,19 @@ function collectRegionText(rect, options = {}) {
     };
     const selArea = rectArea(sel);
     const out = { units: [], foreignArea: 0, opaqueArea: 0, textArea: 0 };
-    styleCache = new Map();
-    clipBoxCache = new Map();
+    const context = createWorkContext();
 
     try {
-        collectFromDocument(document.body || document.documentElement, document, sel, null, options, out);
+        await collectFromDocument(
+            document.body || document.documentElement,
+            document,
+            sel,
+            null,
+            options,
+            out,
+            context
+        );
     } catch (err) {
-        styleCache = null;
-        clipBoxCache = null;
         return {
             ok: false,
             text: "",
@@ -686,8 +739,6 @@ function collectRegionText(rect, options = {}) {
         };
     }
 
-    styleCache = null;
-    clipBoxCache = null;
     const text = joinTextUnits(out.units);
     const chars = text.replace(/\s/g, "").length;
     // 画像同士が重なると面積が二重に積まれるため、選択範囲を超えないよう抑える

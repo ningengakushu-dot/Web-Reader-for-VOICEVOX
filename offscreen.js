@@ -6,6 +6,11 @@ let isSynthesizing = false;
 let isPlaying = false;
 let currentAudio = null;
 let currentAudioUrl = null;
+// 再生中の音声とは別に、完成済み音声を何件まで先読みするか。
+// 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が
+// 読み上げ終了まで増え続ける。次の1件だけを用意すれば文間の途切れを防ぎつつ、
+// メモリとCPUの使用量を文章量に依存しない一定範囲へ抑えられる。
+const MAX_READY_AUDIO_QUEUE = 1;
 // 合成の世代トークン。stopAll() で繰り上げることで、停止前に開始済みの
 // 合成（in-flight）が完了しても、その結果を破棄して状態に反映させない。
 let synthesisGeneration = 0;
@@ -184,7 +189,8 @@ function enqueueTexts(texts, settings) {
  * 合成待ちキューを処理し、音声を生成する
  */
 async function processSynthesis() {
-    if (isSynthesizing || textQueue.length === 0) return;
+    if (isSynthesizing || textQueue.length === 0
+        || audioQueue.length >= MAX_READY_AUDIO_QUEUE) return;
 
     isSynthesizing = true;
     const item = textQueue.shift();
@@ -262,6 +268,9 @@ async function processPlayback() {
     const generation = playbackGeneration;
 
     const current = audioQueue.shift();
+    // 完成済みキューに空きができたので、再生と並行して次の1件だけを合成する。
+    // processSynthesis 側の上限判定により、それより先の文はテキストのまま待機する。
+    processSynthesis();
     const audio = new Audio(current.url);
     currentAudio = audio;
     currentAudioUrl = current.url;

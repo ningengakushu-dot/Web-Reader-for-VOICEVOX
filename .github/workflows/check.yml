@@ -23,6 +23,10 @@ jobs:
             node --check "$f"
             echo "OK  $f"
           done
+          node --check tools/test-reading-performance.mjs
+
+      - name: 読み上げ精度と負荷制御の回帰検査
+        run: node tools/test-reading-performance.mjs
 
       - name: manifest.json の妥当性と参照ファイルの存在確認
         run: |

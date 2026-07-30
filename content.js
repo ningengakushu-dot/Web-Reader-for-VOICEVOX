@@ -36,6 +36,11 @@ class VVRadioReader {
         this.ocrRemoveRuby = false;
         // 登録した storage の変更リスナー（deactivate でまとめて解除する）
         this.storageListeners = [];
+        // 非同期のDOM抽出結果が、後から開始した範囲選択を上書きしないための世代番号。
+        this.regionReadGeneration = 0;
+        // DOM抽出が重なってもインジケーターの visibility を正しく復元するための参照数。
+        this.regionExtractionCount = 0;
+        this.regionExtractionPrevVisibility = "";
         // クロスオリジンの frame プロパティにアクセスせず、window.self/window.top の
         // 比較のみで安全にトップフレーム判定を行う
         this.isTopFrame = window.self === window.top;
@@ -92,6 +97,7 @@ class VVRadioReader {
     // 以降のメッセージは active=false により無視される。
     deactivate() {
         this.active = false;
+        this.regionReadGeneration++;
         for (const fn of this.storageListeners || []) {
             try { chrome.storage.onChanged.removeListener(fn); } catch (e) { /* 無効化済み */ }
         }
@@ -347,9 +353,15 @@ class VVRadioReader {
 
             // 移動した場合、その位置を永続化（次回ロード時に復元するため）
             if (dragMoved) {
-                chrome.storage.local.set({ 
-                    vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop } 
-                });
+                try {
+                    if (chrome.runtime?.id) {
+                        chrome.storage.local.set({
+                            vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop }
+                        });
+                    }
+                } catch (e) {
+                    // コンテキスト無効化時のエラーを無視
+                }
             }
         };
 
@@ -554,6 +566,8 @@ class VVRadioReader {
     // キャプチャとOCRを依頼する（オーバーレイが写り込まないようにするため）。
 
     startOcrSelection() {
+        // 進行中のDOM抽出があれば、その結果から読み上げを開始しない。
+        this.regionReadGeneration++;
         this.removeOcrOverlay();
         this.removeOcrToast();
         // 旧インスタンスが残したオーバーレイがあれば除去する（再注入時の保険）
@@ -638,7 +652,7 @@ class VVRadioReader {
             this.removeOcrOverlay();
             // 微小ドラッグ（クリック）はキャンセル扱い
             if (rect.width < 12 || rect.height < 12) return;
-            this.startRegionReading(rect);
+            void this.startRegionReading(rect);
         };
 
         const onKeyDown = (e) => {
@@ -677,22 +691,38 @@ class VVRadioReader {
     //
     // Tier 0 で取れる場合、認識誤りが原理的に起こらず、待ち時間も桁違いに短い
     // （実測: 実サイト8件で読み取れた率 61.0%→84.7%、11.5秒→52ミリ秒）。
-    startRegionReading(rect) {
+    async startRegionReading(rect) {
+        const generation = ++this.regionReadGeneration;
         const dom = globalThis.VVRadioDomText;
         if (dom) {
             let result = null;
             // 自前のインジケーターが最前面判定を妨げ、その下の文字を
             // 「覆われている」と誤判定するため、抽出の間だけ隠す。
             const host = document.getElementById("vvradio-host");
-            const prevVisibility = host ? host.style.visibility : null;
-            if (host) host.style.visibility = "hidden";
+            if (host) {
+                if (this.regionExtractionCount === 0) {
+                    this.regionExtractionPrevVisibility = host.style.visibility;
+                    host.style.visibility = "hidden";
+                }
+                this.regionExtractionCount++;
+            }
             try {
-                result = dom.collectRegionText(rect, { removeRuby: this.ocrRemoveRuby === true });
+                result = await dom.collectRegionText(rect, {
+                    removeRuby: this.ocrRemoveRuby === true
+                });
             } catch (err) {
                 console.warn("VVRadio: ページ内テキストの取得に失敗:", err.message);
             } finally {
-                if (host) host.style.visibility = prevVisibility;
+                if (host) {
+                    this.regionExtractionCount = Math.max(0, this.regionExtractionCount - 1);
+                    if (this.regionExtractionCount === 0) {
+                        host.style.visibility = this.regionExtractionPrevVisibility;
+                    }
+                }
             }
+            // 抽出中に別の範囲選択が始まった、または拡張コンテキストが停止した場合、
+            // 古い結果を読み上げない。
+            if (!this.active || generation !== this.regionReadGeneration) return;
             if (result && result.ok && result.text) {
                 // 段落の切れ目はDOM構造から正確に分かっているので、改行のまま渡して
                 // 合成側で「間」にしてもらう（OCR経路と同じ扱い）。
