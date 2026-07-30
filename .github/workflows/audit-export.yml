@@ -25,15 +25,15 @@ jobs:
         shell: bash
         run: |
           expected="$(git rev-parse HEAD)"
-          cat .audit-patch/part* > /tmp/audit-final.patch.gz.b64
-          base64 -d /tmp/audit-final.patch.gz.b64 | gzip -d > /tmp/audit-final.patch
+          cat .audit-patch2/part* > /tmp/audit-final.patch.xz.b64
+          base64 -d /tmp/audit-final.patch.xz.b64 | xz -d > /tmp/audit-final.patch
           git reset --hard 1472cc49db030043c5961ed8b209ae263b87ddb9
           git clean -fdx
           git apply --check /tmp/audit-final.patch
           git apply /tmp/audit-final.patch
           echo "EXPECTED_REMOTE_SHA=$expected" >> "$GITHUB_ENV"
 
-      - uses: github/codeql-action/init@v4.36.0
+      - uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           languages: javascript-typescript
           queries: security-extended
@@ -48,8 +48,9 @@ jobs:
             node "$t"
           done
           node tools/security-audit.mjs
+          node tools/test-reading-performance.mjs
 
-      - uses: github/codeql-action/analyze@v4.36.0
+      - uses: github/codeql-action/analyze@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
 
       - name: Commit audited fixes
         shell: bash
