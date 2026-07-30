@@ -1,8 +1,8 @@
 name: finalize-audit
 
 on:
-  pull_request:
-    branches: ["main"]
+  push:
+    branches: ["audit/full-codebase"]
 
 permissions:
   contents: write
