@@ -28,6 +28,9 @@ jobs:
       - name: 読み上げ精度と負荷制御の回帰検査
         run: node tools/test-reading-performance.mjs
 
+      - name: アップデートお知らせ機能の単体・結合検査
+        run: node tests/update-notice.test.js
+
       - name: manifest.json の妥当性と参照ファイルの存在確認
         run: |
           node -e '

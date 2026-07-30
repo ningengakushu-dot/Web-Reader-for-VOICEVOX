@@ -47,7 +47,16 @@ function notifyTab(tabId, message, context) {
 // onInstalled は更新時にも発火し、既存メニューが残っていることがある。
 // 同一 id の create は "Cannot create item with duplicate id" で失敗するため、
 // 必ず removeAll してから作り直す（更新後にメニューが消える不具合の原因）。
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
+    // 既存ユーザーのアップデート時のみ初回お知らせフラグを立てる（install では立てない）
+    if (details?.reason === "update") {
+        chrome.storage.local.set({ update_notice_pending: true }, () => {
+            if (chrome.runtime.lastError) {
+                console.warn("Background: update_notice_pending 保存失敗:", chrome.runtime.lastError.message);
+            }
+        });
+    }
+
     chrome.contextMenus.removeAll(() => {
         // コールバック内で lastError を読まないと未処理エラーになる
         void chrome.runtime.lastError;
@@ -466,6 +475,34 @@ function warn(context) {
     return (err) => console.warn(`Background: ${context}:`, err.message);
 }
 
+// 複数タブからの同時表示権要求を Promise チェーンで直列化し、1回のみ true を返す
+let updateNoticeQueue = Promise.resolve();
+
+function claimUpdateNotice() {
+    const next = updateNoticeQueue.then(() => new Promise((resolve) => {
+        if (!chrome.storage?.local) {
+            resolve({ shouldShow: false });
+            return;
+        }
+        chrome.storage.local.get(["update_notice_pending"], (res) => {
+            if (chrome.runtime.lastError || !res || !res.update_notice_pending) {
+                resolve({ shouldShow: false });
+                return;
+            }
+            chrome.storage.local.set({ update_notice_pending: false }, () => {
+                if (chrome.runtime.lastError) {
+                    resolve({ shouldShow: false });
+                    return;
+                }
+                resolve({ shouldShow: true });
+            });
+        });
+    })).catch(() => ({ shouldShow: false }));
+
+    updateNoticeQueue = next.catch(() => {});
+    return next;
+}
+
 // Content Scriptからのメッセージを処理するリスナー
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.target && request.target !== 'background') return;
@@ -478,6 +515,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     switch (request.type) {
+        case "CLAIM_UPDATE_NOTICE": {
+            // タブのトップフレーム (frameId === undefined || frameId === 0) からの要求のみ許可する
+            const isTopFrame = sender?.tab != null && (sender.frameId === undefined || sender.frameId === 0);
+            if (!isTopFrame) {
+                sendResponse({ shouldShow: false });
+                return false;
+            }
+            claimUpdateNotice()
+                .then(res => sendResponse(res))
+                .catch(() => sendResponse({ shouldShow: false }));
+            return true;
+        }
         case "SHORTCUT_PRESSED":
             // content.js の trusted keydown フォールバックからの要求。
             // commands.onCommand と同じ共通処理に集約する。
