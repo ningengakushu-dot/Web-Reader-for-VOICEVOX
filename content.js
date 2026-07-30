@@ -353,9 +353,15 @@ class VVRadioReader {
 
             // 移動した場合、その位置を永続化（次回ロード時に復元するため）
             if (dragMoved) {
-                chrome.storage.local.set({ 
-                    vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop } 
-                });
+                try {
+                    if (chrome.runtime?.id) {
+                        chrome.storage.local.set({
+                            vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop }
+                        });
+                    }
+                } catch (e) {
+                    // コンテキスト無効化時のエラーを無視
+                }
             }
         };
 
