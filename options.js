@@ -36,6 +36,31 @@ document.addEventListener('DOMContentLoaded', () => {
         return { ...config, slider, valueEl };
     });
 
+    const STORED_ICON_DATA_URL_MAX_CHARS = 2 * 1024 * 1024;
+    const ICON_DECODE_MAX_DIMENSION = 16384;
+    const ICON_DECODE_MAX_PIXELS = 40 * 1024 * 1024;
+
+    function clampSliderValue(slider, value, fallback) {
+        const min = Number(slider.min);
+        const max = Number(slider.max);
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return fallback;
+        return Math.min(max, Math.max(min, numeric));
+    }
+
+    function isSafeRasterDataUrl(value) {
+        return typeof value === 'string'
+            && value.length <= STORED_ICON_DATA_URL_MAX_CHARS
+            && /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(value);
+    }
+
+    function sanitizeCharacterIcon(value) {
+        if (!value || typeof value !== 'object') return null;
+        const name = typeof value.name === 'string' ? value.name.trim().slice(0, 100) : '';
+        if (!name) return null;
+        return { name, dataUrl: isSafeRasterDataUrl(value.dataUrl) ? value.dataUrl : null };
+    }
+
     async function init() {
         showLoader(true);
         // 保存済み設定の復元はエンジンの起動状態に依存しない。
@@ -52,8 +77,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             for (const s of sliders) {
-                // storage に保存値が無ければ SETTING_DEFAULTS 由来の既定値を表示する
-                const value = result[s.key] !== undefined ? result[s.key] : s.defaultVal;
+                // storage が破損・改変されていても、UIで許可する範囲へ正規化する。
+                const stored = result[s.key] !== undefined ? result[s.key] : s.defaultVal;
+                const value = clampSliderValue(s.slider, stored, s.defaultVal);
                 s.slider.value = value;
                 s.valueEl.textContent = Number(value).toFixed(s.decimals);
             }
@@ -64,9 +90,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const savedStyle = result.iconStyle;
             iconStyleSelect.value = ICON_STYLE_VALUES.includes(savedStyle)
                 ? savedStyle : SETTING_DEFAULTS.iconStyle;
-            pendingCustomIcon = typeof result[CUSTOM_ICON_STORAGE_KEY] === 'string'
+            pendingCustomIcon = isSafeRasterDataUrl(result[CUSTOM_ICON_STORAGE_KEY])
                 ? result[CUSTOM_ICON_STORAGE_KEY] : null;
-            updateIconStyleUI(result[CHARACTER_ICON_STORAGE_KEY] || null);
+            updateIconStyleUI(sanitizeCharacterIcon(result[CHARACTER_ICON_STORAGE_KEY]));
         } catch (error) {
             console.error('Error restoring settings:', error);
         }
@@ -78,7 +104,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
             // undefined/null を除外する判定にする。
             if (result.speakerId !== undefined && result.speakerId !== null) {
-                speakerSelect.value = result.speakerId;
+                const savedId = String(result.speakerId);
+                if ([...speakerSelect.options].some((option) => option.value === savedId)) {
+                    speakerSelect.value = savedId;
+                }
             }
         } catch (error) {
             console.error('Error during init:', error);
@@ -104,15 +133,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderSpeakers(speakers) {
-        speakerSelect.innerHTML = '';
-        for (const speaker of speakers) {
-            for (const style of speaker.styles) {
+        if (!Array.isArray(speakers)) throw new Error('キャラクター一覧の形式が不正です');
+        speakerSelect.textContent = '';
+        let count = 0;
+        for (const speaker of speakers.slice(0, 1000)) {
+            if (!speaker || typeof speaker.name !== 'string' || !Array.isArray(speaker.styles)) continue;
+            const speakerName = speaker.name.trim().slice(0, 100);
+            if (!speakerName) continue;
+            for (const style of speaker.styles.slice(0, 1000)) {
+                const id = Number(style?.id);
+                if (!Number.isInteger(id) || id < 0 || id > 1000000) continue;
+                const styleName = typeof style?.name === 'string' ? style.name.trim().slice(0, 100) : '';
                 const option = document.createElement('option');
-                option.value = style.id;
-                option.textContent = `${speaker.name} (${style.name})`;
+                option.value = String(id);
+                option.textContent = styleName ? `${speakerName} (${styleName})` : speakerName;
                 speakerSelect.appendChild(option);
+                count++;
             }
         }
+        if (count === 0) throw new Error('利用可能なキャラクターが見つかりません');
     }
 
     // ===== ページ内アイコンの見た目 =====
@@ -137,11 +176,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (style === 'app') {
             iconStylePreview.classList.add('image');
             iconStylePreview.style.backgroundImage = `url("${chrome.runtime.getURL('images/icon128.png')}")`;
-        } else if (style === 'custom' && pendingCustomIcon) {
+        } else if (style === 'custom' && isSafeRasterDataUrl(pendingCustomIcon)) {
             iconStylePreview.classList.add('image');
             iconStylePreview.style.backgroundImage = `url("${pendingCustomIcon}")`;
         } else if (style === 'character' && characterIcon && characterIcon.name) {
-            if (characterIcon.dataUrl) {
+            if (isSafeRasterDataUrl(characterIcon.dataUrl)) {
                 iconStylePreview.classList.add('image');
                 iconStylePreview.style.backgroundImage = `url("${characterIcon.dataUrl}")`;
             } else {
@@ -210,6 +249,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const img = new Image();
             img.onload = () => {
                 try {
+                    if (!(img.naturalWidth > 0) || !(img.naturalHeight > 0)
+                        || img.naturalWidth > ICON_DECODE_MAX_DIMENSION
+                        || img.naturalHeight > ICON_DECODE_MAX_DIMENSION
+                        || img.naturalWidth * img.naturalHeight > ICON_DECODE_MAX_PIXELS) {
+                        throw new Error('画像の縦横サイズが大きすぎます');
+                    }
                     const side = ICON_IMAGE_MAX_PX;
                     const canvas = document.createElement('canvas');
                     canvas.width = side;
@@ -245,21 +290,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // エンジンが止まっていても名前だけは選択欄から取れるので、まず控えておく。
         const optionText = speakerSelect.selectedOptions[0]?.textContent || '';
-        const fallbackName = optionText.replace(/\s*\([^)]*\)\s*$/, '').trim();
+        const fallbackName = optionText.replace(/\s*\([^)]*\)\s*$/, '').trim().slice(0, 100);
 
         const response = await sendMessage({ type: 'GET_SPEAKER_ICON', speakerId });
         if (!response || !response.success) {
             return fallbackName ? { name: fallbackName, dataUrl: null } : null;
         }
 
-        const name = response.name || fallbackName;
+        const name = (typeof response.name === 'string' ? response.name : fallbackName).trim().slice(0, 100);
         if (!name) return null;
-        if (!ICON_IMAGE_ALLOWED_CHARACTERS.includes(name) || !response.icon) {
+        const icon = typeof response.icon === 'string' && response.icon.length <= STORED_ICON_DATA_URL_MAX_CHARS
+            && /^[A-Za-z0-9+/=]+$/.test(response.icon) ? response.icon : null;
+        if (!ICON_IMAGE_ALLOWED_CHARACTERS.includes(name) || !icon) {
             return { name, dataUrl: null };
         }
 
         try {
-            const dataUrl = await toSquareIconDataUrl(`data:image/png;base64,${response.icon}`);
+            const dataUrl = await toSquareIconDataUrl(`data:image/png;base64,${icon}`);
             return { name, dataUrl };
         } catch (error) {
             return { name, dataUrl: null };
@@ -284,15 +331,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const settings = { speakerId };
         for (const s of sliders) {
-            const val = parseFloat(s.slider.value);
-            if (isNaN(val)) return;
+            const val = clampSliderValue(s.slider, s.slider.value, s.defaultVal);
             settings[s.key] = val;
+            s.slider.value = val;
+            s.valueEl.textContent = Number(val).toFixed(s.decimals);
         }
         settings.ocrRemoveRuby = ocrRemoveRubyCheck.checked;
         settings.iconRightClickAction = iconRightClickSelect.value === 'options' ? 'options' : 'capture';
         settings.iconStyle = ICON_STYLE_VALUES.includes(iconStyleSelect.value)
             ? iconStyleSelect.value : SETTING_DEFAULTS.iconStyle;
-        settings[CUSTOM_ICON_STORAGE_KEY] = pendingCustomIcon;
+        settings[CUSTOM_ICON_STORAGE_KEY] = isSafeRasterDataUrl(pendingCustomIcon)
+            ? pendingCustomIcon : null;
 
         // キャラクター表示のときだけ、保存時点の選択キャラで表示情報を作り直す。
         // キャラクターを変えて保存した場合にページ内アイコンが古いままにならないようにする。

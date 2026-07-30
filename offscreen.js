@@ -22,6 +22,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.target !== 'offscreen') return;
     // 拡張自身（background）からのメッセージに限る（多層防御）
     if (sender.id !== chrome.runtime.id) return;
+    const security = globalThis.VVRadioOffscreenSecurity;
+    if (security) {
+        const checked = security.validate(message);
+        if (!checked.ok) {
+            sendResponse({ success: false, error: checked.error });
+            return false;
+        }
+        message = checked.message;
+    }
 
     switch (message.type) {
         case 'ENQUEUE_TEXTS':
@@ -45,8 +54,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             // OCRは数秒かかるため応答チャネルは保持せず、完了時に
             // OCR_COMPLETE を background へ送るイベント駆動にする。
             // 共有ワーカーと進捗通知先（ocrProgressTabId）が競合しないよう直列化する。
-            enqueueOcrRecognition(message);
-            sendResponse({ success: true });
+            if (!enqueueOcrRecognition(message)) {
+                sendResponse({ success: false, error: "文字認識の要求が混み合っています。少し待ってから再度お試しください。" });
+            } else {
+                sendResponse({ success: true });
+            }
             break;
     }
     return false;
@@ -95,9 +107,15 @@ const getOcrWorker = ocrWorkers.get;
 // 並行呼び出しに耐えず、進捗通知先 ocrProgressTabId もモジュールグローバルのため、
 // 複数タブからの同時要求が混線しないよう直列化する。recognizeRegion は自身で
 // OCR_COMPLETE を送るため、チェーンは失敗も飲み込んで（catch）次の要求へ進める。
+const MAX_PENDING_OCR_REQUESTS = 3;
+let pendingOcrRequests = 0;
 let ocrChain = Promise.resolve();
 function enqueueOcrRecognition(message) {
-    ocrChain = ocrChain.then(() => recognizeRegion(message)).catch(() => {});
+    if (pendingOcrRequests >= MAX_PENDING_OCR_REQUESTS) return false;
+    pendingOcrRequests++;
+    const run = ocrChain.then(() => recognizeRegion(message));
+    ocrChain = run.catch(() => {}).finally(() => { pendingOcrRequests--; });
+    return true;
 }
 
 // ハングした可能性のあるワーカーを破棄し、次回のOCRで作り直させる（認識タイムアウト時に使用）。
@@ -115,15 +133,17 @@ async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby
     try {
         const blob = await (await fetch(dataUrl)).blob();
         const bitmap = await createImageBitmap(blob);
-        const scale = viewportWidth > 0 ? bitmap.width / viewportWidth : 1;
-
-        const sx = Math.max(0, Math.min(Math.round(rect.x * scale), bitmap.width - 1));
-        const sy = Math.max(0, Math.min(Math.round(rect.y * scale), bitmap.height - 1));
-        const sw = Math.max(1, Math.min(Math.round(rect.width * scale), bitmap.width - sx));
-        const sh = Math.max(1, Math.min(Math.round(rect.height * scale), bitmap.height - sy));
-
-        const canvas = cropToOcrCanvas(bitmap, sx, sy, sw, sh);
-        bitmap.close();
+        let canvas;
+        try {
+            const scale = viewportWidth > 0 ? bitmap.width / viewportWidth : 1;
+            const sx = Math.max(0, Math.min(Math.round(rect.x * scale), bitmap.width - 1));
+            const sy = Math.max(0, Math.min(Math.round(rect.y * scale), bitmap.height - 1));
+            const sw = Math.max(1, Math.min(Math.round(rect.width * scale), bitmap.width - sx));
+            const sh = Math.max(1, Math.min(Math.round(rect.height * scale), bitmap.height - sy));
+            canvas = cropToOcrCanvas(bitmap, sx, sy, sw, sh);
+        } finally {
+            bitmap.close();
+        }
 
         // 組版方向（横書き/縦書き）を自動判定して認識する。
         // ルビ除去設定は offscreen では chrome.storage を参照できないため、
@@ -235,7 +255,7 @@ async function generateVoiceBlob(text, settings) {
         queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
     if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
 
-    const queryJson = await queryResponse.json();
+    const queryJson = await readJsonResponseWithLimit(queryResponse);
 
     queryJson.prePhonemeLength = 0.1 * speedScale;
     queryJson.postPhonemeLength = 0.1 * speedScale;
@@ -253,7 +273,7 @@ async function generateVoiceBlob(text, settings) {
     }, VOICEVOX_SYNTHESIS_TIMEOUT_MS);
     if (!synthResponse.ok) throw new Error(`Synthesis失敗(${synthResponse.status})`);
 
-    const audioBlob = await synthResponse.blob();
+    const audioBlob = await readBlobResponseWithLimit(synthResponse);
     return URL.createObjectURL(audioBlob);
 }
 
@@ -277,7 +297,7 @@ async function processPlayback() {
 
     let isCleanedUp = false;
 
-    const cleanup = () => {
+    const cleanup = (completedNormally) => {
         if (isCleanedUp) return;
         isCleanedUp = true;
 
@@ -291,21 +311,21 @@ async function processPlayback() {
         if (currentAudio === audio) currentAudio = null;
         isPlaying = false;
 
-        if (audioQueue.length === 0 && textQueue.length === 0 && !isSynthesizing) {
+        if (completedNormally && audioQueue.length === 0 && textQueue.length === 0 && !isSynthesizing) {
             notifyBackground("PLAYBACK_ENDED");
         }
 
         processPlayback();
     };
 
-    audio.onended = cleanup;
+    audio.onended = () => cleanup(true);
     audio.onerror = (e) => {
         const errorInfo = audio.error
             ? `Code: ${audio.error.code}, Message: ${audio.error.message}`
             : "Details unavailable";
         console.error(`Offscreen: Audioエラー [${errorInfo}]`, e);
         notifyBackground("PLAYBACK_ERROR", { error: errorInfo });
-        cleanup();
+        cleanup(false);
     };
 
     try {
@@ -314,7 +334,7 @@ async function processPlayback() {
         if (generation !== playbackGeneration) return;
         console.error("Offscreen: play()失敗:", err.name, err.message);
         notifyBackground("PLAYBACK_ERROR", { error: `${err.name}: ${err.message}` });
-        cleanup();
+        cleanup(false);
     }
 }
 
