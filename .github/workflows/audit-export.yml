@@ -3,6 +3,8 @@ name: audit-export
 on:
   push:
     branches: ["audit/full-codebase"]
+  pull_request:
+    branches: ["main"]
 
 jobs:
   export:
