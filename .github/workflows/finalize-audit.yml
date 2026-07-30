@@ -1,6 +1,8 @@
 name: Finalize security audit
 
 on:
+  push:
+    branches: ["main"]
   issue_comment:
     types: [created]
   schedule:
@@ -15,6 +17,7 @@ permissions:
 jobs:
   finalize:
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'schedule' ||
       (github.repository == 'ningengakushu-dot/Web-Reader-for-VOICEVOX' &&
        github.actor == 'ningengakushu-dot' &&
