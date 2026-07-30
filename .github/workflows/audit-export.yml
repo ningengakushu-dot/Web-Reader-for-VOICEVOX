@@ -48,11 +48,11 @@ jobs:
           path = Path('tools/test-reading-performance.mjs')
           source = path.read_text()
           old = '''        VOICEVOX_SYNTHESIS_TIMEOUT_MS: 60000,
-          async fetchWithTimeout(url) {'''
+        async fetchWithTimeout(url) {'''
           new = '''        VOICEVOX_SYNTHESIS_TIMEOUT_MS: 60000,
-          async readJsonResponseWithLimit(response) { return response.json(); },
-          async readBlobResponseWithLimit(response) { return response.blob(); },
-          async fetchWithTimeout(url) {'''
+        async readJsonResponseWithLimit(response) { return response.json(); },
+        async readBlobResponseWithLimit(response) { return response.blob(); },
+        async fetchWithTimeout(url) {'''
           if old not in source:
               raise SystemExit('性能テストの補正対象が見つかりません')
           path.write_text(source.replace(old, new, 1))
