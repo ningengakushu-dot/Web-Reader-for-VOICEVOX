@@ -1,8 +1,8 @@
 name: finalize-audit
 
 on:
-  push:
-    branches: ["audit/full-codebase"]
+  pull_request:
+    branches: ["main"]
 
 permissions:
   contents: write
@@ -42,7 +42,6 @@ jobs:
           git apply --check /tmp/audit.patch
           git apply /tmp/audit.patch
 
-          # 安全なレスポンス読取関数を追加したため、性能テストのVMにも同等の模擬関数を渡す。
           python3 - <<'PY'
           from pathlib import Path
           path = Path('tools/test-reading-performance.mjs')
