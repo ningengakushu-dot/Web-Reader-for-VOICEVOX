@@ -41,6 +41,23 @@ jobs:
           git clean -fdx
           git apply --check /tmp/audit.patch
           git apply /tmp/audit.patch
+
+          # 安全なレスポンス読取関数を追加したため、性能テストのVMにも同等の模擬関数を渡す。
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/test-reading-performance.mjs')
+          source = path.read_text()
+          old = '''        VOICEVOX_SYNTHESIS_TIMEOUT_MS: 60000,
+          async fetchWithTimeout(url) {'''
+          new = '''        VOICEVOX_SYNTHESIS_TIMEOUT_MS: 60000,
+          async readJsonResponseWithLimit(response) { return response.json(); },
+          async readBlobResponseWithLimit(response) { return response.blob(); },
+          async fetchWithTimeout(url) {'''
+          if old not in source:
+              raise SystemExit('性能テストの補正対象が見つかりません')
+          path.write_text(source.replace(old, new, 1))
+          PY
+
           git diff --binary --full-index 56a461377fab9d49cb8d69c070e766304ee05c81 > /tmp/final-main.patch
           test -s /tmp/final-main.patch
           git reset --hard 56a461377fab9d49cb8d69c070e766304ee05c81
