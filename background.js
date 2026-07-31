@@ -55,7 +55,7 @@ function notifyTab(tabId, message, context) {
 
 // この版より前から更新した利用者にだけ、機能追加のお知らせを表示する。
 // 以降のバグ修正版へ更新するたびに同じお知らせが再表示されるのを防ぐ。
-const UPDATE_NOTICE_INTRODUCED_VERSION = "1.4.1";
+const UPDATE_NOTICE_INTRODUCED_VERSION = "1.4.3";
 function isVersionBefore(version, target) {
     const parse = (value) => String(value || "").split(".").map((part) => Number.parseInt(part, 10) || 0);
     const a = parse(version);

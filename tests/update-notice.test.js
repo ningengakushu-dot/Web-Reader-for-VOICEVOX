@@ -112,12 +112,12 @@ setImmediate(() => {
         assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, true, '旧版からの update では update_notice_pending が true になること');
         console.log(' -> PASSED: v1.2.1からのupdateでは表示対象になる');
 
-        // 1.4.1以降の修正版では同じ案内を再登録しない
+        // 1.4.3以降の修正版では同じ案内を再登録しない
         bgChromeMock.storage.local.data.update_notice_pending = false;
-        bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.4.1" });
+        bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.4.3" });
         await new Promise((resolve) => setImmediate(resolve));
         assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, false,
-            '1.4.1以降からの更新では通知フラグを再設定しないこと');
+            '1.4.3以降からの更新では通知フラグを再設定しないこと');
         console.log(' -> PASSED: 修正版への更新では同じ案内を再表示しない');
 
         // claim テスト用に、旧版からの更新後と同じ状態へ戻す
