@@ -1,4 +1,4 @@
-name: apply-empty-selection-fix
+name: apply-release-link-and-feedback-fix
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Remove expected-user-action warning and add regression test
+      - name: Apply fixes and development workflow policy
         shell: bash
         run: |
           python3 - <<'PY'
@@ -30,10 +30,32 @@ jobs:
 
           path = Path('content.js')
           source = path.read_text(encoding='utf-8')
-          target = '            console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。(ショートカット)");\n'
-          if source.count(target) != 1:
-              raise SystemExit('対象の警告行が一意に見つかりません')
-          path.write_text(source.replace(target, '', 1), encoding='utf-8')
+
+          warning = '            console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。(ショートカット)");\n'
+          source = source.replace(warning, '', 1)
+
+          old_url = '            const storeUrl = `https://chromewebstore.google.com/detail/web-reader-for-voicevox/${chrome.runtime.id}`;'
+          new_url = '            const storeUrl = "https://chromewebstore.google.com/detail/web-reader-for-voicevox/ilcfondcjhaalpcghnhcejioopcbhhla/reviews";'
+          if old_url in source:
+              source = source.replace(old_url, new_url, 1)
+          elif new_url not in source:
+              raise SystemExit('レビューURLの修正対象が見つかりません')
+
+          old_copy = '                気に入っていただけましたら、ストアでレビューをお寄せいただけると励みになります。'
+          new_copy = '                率直なご感想や評価をお寄せください。今後の改善に活用します。'
+          if old_copy in source:
+              source = source.replace(old_copy, new_copy, 1)
+          elif new_copy not in source:
+              raise SystemExit('レビュー案内文の修正対象が見つかりません')
+
+          old_button = '                <button class="btn-primary" id="btn-rate">ストアでレビューする</button>'
+          new_button = '                <button class="btn-primary" id="btn-rate">率直な評価を送る</button>'
+          if old_button in source:
+              source = source.replace(old_button, new_button, 1)
+          elif new_button not in source:
+              raise SystemExit('レビューボタン文言の修正対象が見つかりません')
+
+          path.write_text(source, encoding='utf-8')
           PY
 
           cat > tests/expected-user-actions.test.js <<'JS'
@@ -52,21 +74,52 @@ jobs:
           assert.doesNotMatch(body, /console\.(?:warn|error)\s*\(/,
             'テキスト未選択は想定内操作のため拡張機能エラーへ記録しない');
 
-          console.log('expected user actions: PASSED');
+          const reviewUrl = 'https://chromewebstore.google.com/detail/web-reader-for-voicevox/ilcfondcjhaalpcghnhcejioopcbhhla/reviews';
+          assert.ok(source.includes(reviewUrl), '公開済み拡張機能のレビューページを開く');
+          assert.ok(!source.includes('detail/web-reader-for-voicevox/${chrome.runtime.id}'),
+            '開発者モードの一時的な拡張機能IDをストアURLに使用しない');
+          assert.ok(source.includes('率直なご感想や評価をお寄せください。今後の改善に活用します。'),
+            '評価を特定の星数へ誘導しない中立的な案内文を表示する');
+          assert.ok(source.includes('率直な評価を送る'), '中立的なボタン文言を表示する');
+          assert.doesNotMatch(source, /(?:星\s*5|5\s*つ星|★\s*5)/,
+            '特定の高評価を促す文言を含めない');
+
+          console.log('expected user actions and store feedback link: PASSED');
           JS
 
-      - name: Verify
+          cat > CONTRIBUTING.md <<'MD'
+          # Development workflow
+
+          ## ブランチの役割
+
+          - `main`: Chrome Web Storeへ提出可能な本番ブランチ。利用者による実機確認が完了した変更だけを統合します。
+          - `develop`: 開発版の統合ブランチ。機能追加や不具合修正は、まずこのブランチへ統合します。
+          - `feature/*` / `fix/*`: 個別作業用ブランチ。原則として`develop`から作成し、`develop`へPull Requestを出します。
+
+          ## リリース手順
+
+          1. 個別変更を`develop`へ統合し、自動テストとCodeQLを通します。
+          2. `develop`版をChromeへ読み込み、利用者が主要機能を実機確認します。
+          3. 実機確認で問題がない場合だけ、`develop`から`main`へのリリースPull Requestを作成します。
+          4. `main`へ統合後、`tools/pack.ps1`でChrome Web Store提出用ZIPを作成します。
+
+          自動検査の成功だけを理由に`main`へ統合しません。
+          MD
+
+      - name: Verify complete test suite
+        shell: bash
         run: |
-          node --check content.js
-          node --check tests/expected-user-actions.test.js
-          node tests/expected-user-actions.test.js
+          for f in *.js tests/*.js tools/*.mjs; do node --check "$f"; done
+          node tools/test-reading-performance.mjs
+          for t in tests/*.test.js; do node "$t"; done
+          node tools/security-audit.mjs
 
       - name: Commit source fix
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add content.js tests/expected-user-actions.test.js
+          git add content.js tests/expected-user-actions.test.js CONTRIBUTING.md
           git diff --cached --check
-          git commit -m "fix: 未選択時の想定内警告をエラー一覧へ残さない [skip ci]"
+          git commit -m "fix: レビュー導線と想定内警告を修正 [skip ci]"
           git push origin HEAD:fix/expected-empty-selection-warning
