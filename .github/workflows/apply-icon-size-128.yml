@@ -1,0 +1,98 @@
+name: apply-icon-size-128
+
+on:
+  push:
+    branches:
+      - release/1.4.3
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: release/1.4.3
+          fetch-depth: 0
+
+      - name: Allow icon sizes up to 128px
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path('options.html'): [
+                  ('id="iconSize-slider" min="16" max="64" step="1" value="16"',
+                   'id="iconSize-slider" min="16" max="128" step="1" value="16"'),
+              ],
+              Path('content.js'): [
+                  ('Math.min(64, Math.max(16, numeric))',
+                   'Math.min(128, Math.max(16, numeric))'),
+                  ('Math.min(64, Math.max(16, rawSize))',
+                   'Math.min(128, Math.max(16, rawSize))'),
+              ],
+              Path('constants.js'): [
+                  ('最大表示サイズ64pxで粗く見えない値',
+                   '最大表示サイズ128pxで粗く見えない値'),
+              ],
+          }
+
+          for path, pairs in replacements.items():
+              source = path.read_text(encoding='utf-8')
+              for old, new in pairs:
+                  if source.count(old) != 1:
+                      raise SystemExit(f'{path}: replacement target is not unique: {old}')
+                  source = source.replace(old, new, 1)
+              path.write_text(source, encoding='utf-8')
+
+          test = Path('tests/icon-size-range.test.js')
+          test.write_text(r'''const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const root = path.join(__dirname, '..');
+          const optionsHtml = fs.readFileSync(path.join(root, 'options.html'), 'utf8');
+          const contentSource = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
+
+          assert.match(optionsHtml, /id="iconSize-slider"[^>]*min="16"[^>]*max="128"/,
+              '設定画面でアイコンサイズを16pxから128pxまで選択できる');
+          assert.match(contentSource, /Math\.min\(128, Math\.max\(16, numeric\)\)/,
+              '表示時のアイコンサイズを128pxまで許可する');
+          assert.match(contentSource, /Math\.min\(128, Math\.max\(16, rawSize\)\)/,
+              '保存位置の復元時も128pxのサイズを考慮する');
+          assert.doesNotMatch(contentSource, /Math\.min\(64, Math\.max\(16, (?:numeric|rawSize)\)\)/,
+              '旧64px上限を残さない');
+
+          console.log('icon size range 16-128px: PASSED');
+          ''', encoding='utf-8')
+
+          release_notes = Path('docs/RELEASE-1.4.3.md')
+          notes = release_notes.read_text(encoding='utf-8')
+          bullet = '- ページ内アイコンのサイズ上限を64pxから128pxへ拡張\n'
+          if bullet not in notes:
+              marker = '## Release gate\n'
+              if marker not in notes:
+                  raise SystemExit('release note marker not found')
+              notes = notes.replace(marker, bullet + '\n' + marker, 1)
+              release_notes.write_text(notes, encoding='utf-8')
+          PY
+
+          node --check content.js
+          node --check constants.js
+          node tests/icon-size-range.test.js
+
+      - name: Commit the release-candidate change
+        shell: bash
+        run: |
+          rm .github/workflows/apply-icon-size-128.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add content.js constants.js options.html tests/icon-size-range.test.js docs/RELEASE-1.4.3.md
+          git add -u .github/workflows/apply-icon-size-128.yml
+          git diff --cached --check
+          git commit -m "feat: アイコンサイズを128pxまで拡張"
+          git push origin HEAD:release/1.4.3
