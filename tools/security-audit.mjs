@@ -34,7 +34,7 @@ const offscreenSource = read('offscreen.js');
 const optionsSource = read('options.js');
 const constantsSource = read('constants.js');
 if (!/String\(active\.type\)\.toLowerCase\(\) === "password"/.test(contentSource)) fail('password input exclusion is missing');
-if (!/chromewebstore\.google\.com\/detail\/web-reader-for-voicevox\/\$\{chrome\.runtime\.id\}/.test(contentSource)) fail('store URL must include the extension id');
+if (!/chromewebstore\.google\.com\/detail\/web-reader-for-voicevox\/ilcfondcjhaalpcghnhcejioopcbhhla\/reviews/.test(contentSource)) fail('store URL must use the published review page');
 if (/高評価（★5）|高評価する/.test(contentSource)) fail('review UI must not demand a specific rating');
 const captureSource = read('capture.js');
 if (!/if \(ocrInProgress\) terminateWorkers\(\)/.test(captureSource)) fail('capture OCR concurrency guard is missing');
