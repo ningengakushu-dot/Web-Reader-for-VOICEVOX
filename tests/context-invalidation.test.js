@@ -42,7 +42,8 @@ function invalidated() {
     assert.throws(() => realErrorChrome.storage.local.get({}), /real failure/);
 
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-    assert.strictEqual(manifest.version, '1.4.2');
+    assert.match(manifest.version, /^\d+\.\d+\.\d+$/,
+        'release version must use the Chrome Web Store compatible x.y.z format');
     assert.strictEqual(manifest.background.service_worker, 'background-entry.js');
     assert.deepStrictEqual(manifest.content_scripts[0].js.slice(0, 3),
         ['content-guard.js', 'dom-text.js', 'content.js']);
