@@ -531,7 +531,6 @@ class VVRadioReader {
             this.speakText(text);
         } else {
             this.updateUIState('error');
-            console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。(ショートカット)");
         }
     }
 
