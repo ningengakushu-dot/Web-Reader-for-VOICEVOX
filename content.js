@@ -171,7 +171,7 @@ class VVRadioReader {
     // キャラクター名の文字表示は円に内接させたいので、文字サイズも連動させる。
     applyIndicatorSize(size) {
         const numeric = Number(size);
-        const safeSize = Number.isFinite(numeric) ? Math.min(64, Math.max(16, numeric)) : 16;
+        const safeSize = Number.isFinite(numeric) ? Math.min(128, Math.max(16, numeric)) : 16;
         this.indicator.style.width = `${safeSize}px`;
         this.indicator.style.height = `${safeSize}px`;
         this.indicator.style.fontSize = `${Math.max(8, Math.round(safeSize * 0.62))}px`;
@@ -438,7 +438,7 @@ class VVRadioReader {
                 const top = Number(res.vvradio_icon_pos.top);
                 if (!Number.isFinite(left) || !Number.isFinite(top)) return;
                 const rawSize = Number(res.iconSize);
-                const size = Number.isFinite(rawSize) ? Math.min(64, Math.max(16, rawSize)) : 16;
+                const size = Number.isFinite(rawSize) ? Math.min(128, Math.max(16, rawSize)) : 16;
                 // 画面サイズ変更などで画面外に出ないように補正
                 const maxLeft = window.innerWidth - size;
                 const maxTop = window.innerHeight - size;

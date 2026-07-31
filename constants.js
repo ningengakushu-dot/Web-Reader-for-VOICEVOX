@@ -176,7 +176,7 @@ const ICON_IMAGE_ALLOWED_CHARACTERS = [
 ];
 
 // アイコン画像の保存サイズ（一辺のピクセル数）。
-// storage.local を圧迫させず、かつ最大表示サイズ64pxで粗く見えない値。
+// storage.local を圧迫させず、かつ最大表示サイズ128pxで粗く見えない値。
 const ICON_IMAGE_MAX_PX = 128;
 
 // 利用者がアップロードできるアイコン画像の制限。
