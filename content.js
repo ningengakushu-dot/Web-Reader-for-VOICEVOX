@@ -531,7 +531,6 @@ class VVRadioReader {
             this.speakText(text);
         } else {
             this.updateUIState('error');
-            console.warn("Web Reader for VOICEVOX: 読み上げるテキストが選択されていません。(ショートカット)");
         }
     }
 
@@ -745,10 +744,10 @@ class VVRadioReader {
                 ・アイコンの位置移動＆自動保存<br>
                 ・アイコン右クリックの動作をOCR起動に変更（※オプションから「設定を開く」に変更可能）<br>
                 ・読み上げ動作と安定性の向上<br><br>
-                気に入っていただけましたら、ストアでレビューをお寄せいただけると励みになります。
+                率直なご感想や評価をお寄せください。今後の改善に活用します。
             </div>
             <div class="notice-actions">
-                <button class="btn-primary" id="btn-rate">ストアでレビューする</button>
+                <button class="btn-primary" id="btn-rate">率直な評価を送る</button>
                 <button class="btn-secondary" id="btn-close">閉じる</button>
             </div>
         `;
@@ -759,7 +758,7 @@ class VVRadioReader {
         const closeNotice = () => host.remove();
 
         card.querySelector("#btn-rate").addEventListener("click", () => {
-            const storeUrl = `https://chromewebstore.google.com/detail/web-reader-for-voicevox/${chrome.runtime.id}`;
+            const storeUrl = "https://chromewebstore.google.com/detail/web-reader-for-voicevox/ilcfondcjhaalpcghnhcejioopcbhhla/reviews";
             window.open(storeUrl, "_blank", "noopener,noreferrer");
             closeNotice();
         });
