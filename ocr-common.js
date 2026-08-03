@@ -364,6 +364,15 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         }
     }
 
+    // 複数倍率が同じ字形誤認を返すケースは多数決では救えないため、最後に辞書で一意に
+    // 確定できる視覚的混同だけを補正する。追加のOCRは行わないので、高確信度で精錬を
+    // 省略した入力にも適用でき、処理時間への影響は辞書検索だけに限られる。
+    const visuallyCorrected = best.blocks
+        ? correctOcrVisualConfusionsByDictionary(best.blocks) : 0;
+    if (visuallyCorrected > 0) {
+        text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
+    }
+
     return { text, confidence: best.confidence };
 }
 

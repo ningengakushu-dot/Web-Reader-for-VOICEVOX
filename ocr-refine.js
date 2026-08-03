@@ -368,3 +368,83 @@ function rerankOcrByDictionary(baseBlocks, otherBlocksList) {
     rebuildOcrWordTexts(touchedWords);
     return replaced;
 }
+
+// OCRモデルが構造の近い漢字を全倍率で同じように誤る場合や、時間・面積の予算により
+// 拡大再認識を行えない場合、上の多数決リランキングでは候補を得られず補正できない。
+// 提示された実画像でも低解像度の元寸認識は「自巳主張」になり、そのままVOICEVOXへ
+// 渡すと「ジミシュチョウ」と読まれることを確認した。
+// そこで、字形がほぼ同じ文字だけを対象に、非辞書語から辞書語への置換が一意に決まる場合に
+// 限って補正する。正しい珍しい語を一般語へ寄せないため、元が辞書語・候補が複数・一度に
+// 2文字以上変わるケースはすべて触らない。
+const OCR_VISUAL_CONFUSION_GROUPS = [
+    ["己", "已", "巳"]
+];
+const OCR_VISUAL_CONFUSIONS = new Map();
+for (const group of OCR_VISUAL_CONFUSION_GROUPS) {
+    for (const char of group) OCR_VISUAL_CONFUSIONS.set(char, group.filter((other) => other !== char));
+}
+
+function correctOcrVisualConfusionsByDictionary(blocks) {
+    if (!ocrWordSet || !ocrWordSet.size) return 0;
+    const entries = collectOcrSymbols(blocks);
+    if (!entries.length) return 0;
+    const isKanji = (text) => OCR_KANJI_ONE_RE.test(text);
+    const kanji = entries.map((entry) => isKanji(entry.symbol.text));
+    const candidates = [];
+
+    let i = 0;
+    while (i < entries.length) {
+        if (!kanji[i]) { i++; continue; }
+        let j = i;
+        while (j < entries.length && kanji[j]) j++;
+        for (let len = Math.min(4, j - i); len >= 2; len--) {
+            for (let start = i; start + len <= j; start++) {
+                const chars = entries.slice(start, start + len).map((entry) => entry.symbol.text);
+                const baseStr = chars.join("");
+                if (ocrWordSet.has(baseStr)) continue;
+
+                const replacements = new Set();
+                for (let offset = 0; offset < chars.length; offset++) {
+                    for (const replacement of (OCR_VISUAL_CONFUSIONS.get(chars[offset]) || [])) {
+                        const changed = chars.slice();
+                        changed[offset] = replacement;
+                        const word = changed.join("");
+                        if (ocrWordSet.has(word)) replacements.add(`${offset}\u0000${word}`);
+                    }
+                }
+                // 一意性は「置換後の語」だけでなく位置も含めて判定する。同じ語を別位置の
+                // 変更で作れる場合も、根拠が一つに定まらないため補正しない。
+                if (replacements.size !== 1) continue;
+                const [encoded] = replacements;
+                const separator = encoded.indexOf("\u0000");
+                candidates.push({
+                    start,
+                    len,
+                    offset: Number(encoded.slice(0, separator)),
+                    word: encoded.slice(separator + 1)
+                });
+            }
+        }
+        i = j;
+    }
+
+    // 長い語の根拠を優先し、重なる短い窓による二重補正を避ける。
+    candidates.sort((a, b) => b.len - a.len);
+    const used = new Uint8Array(entries.length);
+    const touchedWords = new Set();
+    let replaced = 0;
+    for (const candidate of candidates) {
+        let overlaps = false;
+        for (let k = 0; k < candidate.len; k++) {
+            if (used[candidate.start + k]) { overlaps = true; break; }
+        }
+        if (overlaps) continue;
+        const index = candidate.start + candidate.offset;
+        entries[index].symbol.text = candidate.word[candidate.offset];
+        for (let k = 0; k < candidate.len; k++) used[candidate.start + k] = 1;
+        touchedWords.add(entries[index].word);
+        replaced++;
+    }
+    rebuildOcrWordTexts(touchedWords);
+    return replaced;
+}
