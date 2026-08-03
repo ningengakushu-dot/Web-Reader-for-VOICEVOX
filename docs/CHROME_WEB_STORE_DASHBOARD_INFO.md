@@ -9,7 +9,7 @@
 This extension is designed to provide text-to-speech functionality using the locally installed VOICEVOX engine. All data processing is performed within the user's local environment. Specifically:
 1. **No Data Collection**: The extension does not collect, store, or transmit any user data to external servers managed by the developer or any third parties.
 2. **Local Processing Only**: Selected text for reading is sent only to the local VOICEVOX engine (`http://127.0.0.1:50021`) on the user's machine.
-3. **Storage**: User settings (e.g., character ID, speech rate, pitch, intonation, volume, inter-sentence pause length, icon position and size, and the OCR ruby-reading preference) are stored locally in the browser using `chrome.storage.local`.
+3. **Storage**: User settings (e.g., character ID, speech rate, pitch, intonation, volume, inter-sentence pause length, and icon position and size) are stored locally in the browser using `chrome.storage.local`.
 4. **Text-First Reading**: When the user selects a region to read, the extension first reads the text that already exists in the page's DOM. On ordinary web pages this completes the request and **no screenshot is taken at all**. A screenshot is captured only when the selected region contains no retrievable text (text inside images, canvas drawings, cross-origin frames, PDFs).
 5. **On-Device OCR**: In that fallback case, the captured screenshot is processed entirely within the browser using the bundled Tesseract.js (WASM) engine. On normal web pages the capture is passed to OCR in memory only; only on pages that open a dedicated region-selection tab (e.g. the PDF viewer) is the image — together with the source page title and URL, used solely to label the tab — briefly held in `chrome.storage.session` (discarded on browser exit or when a new capture is taken). In neither case is it ever transmitted anywhere.
 
@@ -17,7 +17,7 @@ This extension is designed to provide text-to-speech functionality using the loc
 この拡張機能は、ユーザーのローカル環境にインストールされたVOICEVOXエンジンを使用してテキスト読み上げ機能を提供します。
 1. **データ収集なし**: 開発者や第三者のサーバーにユーザーデータを送信・保存することはありません。
 2. **ローカル完結**: 読み上げ用のテキストは、ユーザーのPC内でのみ動作するVOICEVOXエンジン（デフォルト：127.0.0.1:50021）に送信されます。
-3. **ストレージ**: 音声設定（キャラクター・速度・音の高さ・抑揚・音量・文の間）、アイコンの位置・サイズ・右クリック動作、OCRのルビ優先読み設定は、ブラウザのローカルストレージ（chrome.storage.local）にのみ保存されます。
+3. **ストレージ**: 音声設定（キャラクター・速度・音の高さ・抑揚・音量・文の間）、アイコンの位置・サイズ・右クリック動作は、ブラウザのローカルストレージ（chrome.storage.local）にのみ保存されます。
 4. **テキスト優先**: 範囲読み上げでは、まずページ内に既に存在するテキストをそのまま読み取ります。通常のWebページではこれで完結し、**スクリーンショットは一切取得しません**。画像内の文字・canvas描画・別オリジンのフレーム・PDFなど、テキストとして取り出せない範囲を選択した場合に限りキャプチャを行います。
 5. **端末内OCR**: そのキャプチャは、同梱のTesseract.js（WASM）によりブラウザ内でのみ処理されます。通常のWebページではキャプチャ画像はメモリ上でのみOCRに渡され、PDFビューア等で範囲選択タブを開く場合に限り、画像とタブ表示用の元ページのタイトル・URLが `chrome.storage.session` に一時保持されます（ブラウザ終了時・新規キャプチャ時に破棄）。いずれの場合も外部への送信は一切ありません。
 
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 出力: `dist/web-reader-for-voicevox-<version>.zip`
 
-**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `ocr-ruby.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `ocr-words.txt` / `ocr-dictionary-NOTICE.md` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
+**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `ocr-words.txt` / `ocr-dictionary-NOTICE.md` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
 
 **除外するもの**: `README.md`、`docs/`、`tools/`、`dist/`、ストア掲載用の素材（`images/Web-Reader-for-VOICEVOX_*.png`、`images/Web_Reader_for_VOICEVOX.mp4`）、`.claude/`、`AGENTS.md`、`CLAUDE.md`、`audio/`
 

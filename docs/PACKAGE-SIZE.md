@@ -1,8 +1,8 @@
 # Package size report
 
-- ZIP: `web-reader-for-voicevox-1.4.2.zip`
-- Compressed payload: **28.11 MiB**
-- Uncompressed payload: **36.19 MiB**
+- ZIP: `web-reader-for-voicevox-1.4.3.zip`
+- Compressed payload: **28.07 MiB**
+- Uncompressed payload: **36.17 MiB**
 
 ## Largest packaged files
 
@@ -25,7 +25,6 @@
 | `offscreen.js` | 0.01 MiB | 0.02 MiB |
 | `images/icon48.png` | 0.01 MiB | 0.01 MiB |
 | `options.js` | 0.01 MiB | 0.02 MiB |
-| `ocr-ruby.js` | 0.01 MiB | 0.01 MiB |
 | `capture.js` | 0.00 MiB | 0.01 MiB |
 | `constants.js` | 0.00 MiB | 0.01 MiB |
 | `LICENSE-APACHE-2.0` | 0.00 MiB | 0.01 MiB |
