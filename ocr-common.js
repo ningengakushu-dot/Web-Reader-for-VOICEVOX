@@ -166,24 +166,24 @@ const OCR_UPSCALE_TRIGGER_GLYPH_PX = 24;
 // 75 を境にすると壊滅ケースの救済（CER 24.31%→2.55%）は保ったまま上書き事故を防げる。
 const OCR_UPSCALE_SWAP_MAX_BASE_CONFIDENCE = 75;
 
-// ルビ除去が有効なときの、全文乗り換えを許す元寸側の確信度の上限（通常より厳しくする）。
+// ルビ優先読みを有効にしたときの、全文乗り換えを許す元寸側の確信度の上限（通常より厳しくする）。
 // ルビ判定は「行の bbox が本文より細いか」という幾何に依存するが、拡大版や二値化版へ
 // 乗り換えるとこの幾何が崩れる（実測: 元寸なら ルビ8px / 本文17px と明確に分かれるのに、
 // 2倍拡大版では ルビ31px / 本文34px とほぼ同幅になり判定不能。結果ルビが読み上げに混入）。
-// そのためルビ除去時は元寸の結果を保ち、精度改善は幾何を変えない文字単位融合に任せる。
+// そのためルビ優先時は元寸の結果を保ち、精度改善は幾何を変えない文字単位融合に任せる。
 // 実測: この値を60にすると、狭い選択でもルビ除去に成功しつつ、極小文字の救済も
 // 融合が肩代わりして維持される（para1@0.55倍 CER 3.9%。乗り換えを完全に禁止すると
 // 二値化版が採用されて 21.6% まで悪化するため、下限としての乗り換えは残す）。
 const OCR_RUBY_SWAP_MAX_BASE_CONFIDENCE = 60;
 
-// ルビ除去を有効にしたときだけ、認識前に付ける背景色の余白。
+// ルビ優先読みを有効にしたときだけ、認識前に付ける背景色の余白。
 // 選択範囲の端がルビ列を切っていると Tesseract の行bboxが画像の端まで広がり
 // （実測: 実際8pxのルビ列が23pxと報告され、本文17pxより太くなってサイズ判定が
 // 完全に外れる）、ルビを除去できない。余白を足すと bbox が正しくなり除去できる
 // （実測: 端で切れる狭い選択2種がいずれも除去成功）。
 // 一方この余白は通常の認識結果をわずかに変え、悪化する場合がある
-// （実測: CER 0.98%→1.18%、2.29%→2.37%）。そのためルビ除去がOFFのときは
-// 付けない。OFF時の挙動・精度は完全に従来どおりになる。
+// （実測: CER 0.98%→1.18%、2.29%→2.37%）。そのため既定のルビ除外では
+// 余白を付けず、OCR本体の挙動・精度を維持する。
 const OCR_RUBY_MARGIN_PX = 8;
 
 // 認識全体をこの時間に収めることを目標に、精錬（拡大再認識・二値化・融合・辞書リランク）の
@@ -226,22 +226,22 @@ async function resolveOcrOrientation(grayCanvas, workerProvider) {
  *
  * @param {HTMLCanvasElement} sourceCanvas 認識対象（切り出し済み・原寸）
  * @param {(lang: string) => Promise<object>} workerProvider ワーカーを返す関数（キャッシュは呼び出し側）
- * @param {{removeRuby?: boolean}} [options] removeRuby=true でルビ（ふりがな）優先読みを行う
+ * @param {{removeRuby?: boolean}} [options] removeRuby=true でルビ（ふりがな）優先読みを行う。false時もルビ行自体は除外する
  * @returns {Promise<{text: string, confidence: number}>} text は処理後の生テキスト（整形は呼び出し側）
  */
 async function recognizeWithOrientation(sourceCanvas, workerProvider, options = {}) {
-    const removeRuby = !!options.removeRuby;
+    const preferRubyReadings = !!options.removeRuby;
     // blocks はルビ除去（行ごとの座標）と文字サイズの実測（行bbox）に使う
     const outputFields = { text: true, blocks: true };
 
     // 語彙辞書を一度だけ読み込む（任意。失敗しても従来動作）
     await ensureOcrDictionaries();
 
-    // ルビ除去時のみ余白を付ける（理由は OCR_RUBY_MARGIN_PX のコメント参照）。
-    // OFF のときは元の canvas をそのまま使うため、従来と完全に同じ結果になる。
-    const canvas = removeRuby ? padOcrCanvas(sourceCanvas, OCR_RUBY_MARGIN_PX) : sourceCanvas;
-    // 全文乗り換えを許す元寸側の確信度の上限。ルビ除去時は行の幾何を保つため厳しくする。
-    const swapMaxBaseConfidence = removeRuby
+    // ルビ優先時のみ、再認識用の切り出しが画像端で欠けないよう余白を付ける。
+    // 既定の除去処理は再認識しないため、元の canvas を保つ。
+    const canvas = preferRubyReadings ? padOcrCanvas(sourceCanvas, OCR_RUBY_MARGIN_PX) : sourceCanvas;
+    // 全文乗り換えを許す元寸側の確信度の上限。ルビ優先時は行の幾何を保つため厳しくする。
+    const swapMaxBaseConfidence = preferRubyReadings
         ? OCR_RUBY_SWAP_MAX_BASE_CONFIDENCE
         : OCR_UPSCALE_SWAP_MAX_BASE_CONFIDENCE;
 
@@ -311,10 +311,10 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
         const prepared = prepareOcrCanvas(canvas);
         if (prepared !== canvas) {
             const preprocessed = await primaryWorker.recognize(prepared, {}, outputFields);
-            // ルビ除去時のみ、元寸の確信度による制限を課す（OFF時は従来どおり無条件）。
+            // ルビ優先時のみ、元寸の確信度による制限を課す（OFF時は従来どおり無条件）。
             // 二値化版へ乗り換えても行の幾何が崩れてルビ判定が外れるため。
             if (preprocessed.data.confidence >= best.confidence + OCR_PREPROCESS_ADOPT_MARGIN
-                && (!removeRuby || best.confidence < OCR_RUBY_SWAP_MAX_BASE_CONFIDENCE)) {
+                && (!preferRubyReadings || best.confidence < OCR_RUBY_SWAP_MAX_BASE_CONFIDENCE)) {
                 best = preprocessed.data;
                 bestCanvas = prepared;
             }
@@ -403,13 +403,19 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider, options = 
         }
     }
 
-    if (removeRuby && best.blocks) {
+    if (best.blocks) {
         const rubyOrientation = bestLang === "jpn_vert" ? "vertical" : "horizontal";
-        // best.blocks と同じ座標系の画像（bestCanvas）からルビ列を切り出して
-        // 再認識する。再認識には best と同じ言語のワーカーを使う。
-        const rubyWorker = await workerProvider(bestLang);
-        const filtered = await applyRubyReadings(
-            best.blocks, rubyOrientation, bestCanvas, rubyWorker, outputFields);
+        let filtered;
+        if (preferRubyReadings) {
+            // best.blocks と同じ座標系の画像（bestCanvas）からルビ列を切り出して
+            // 再認識する。再認識には best と同じ言語のワーカーを使う。
+            const rubyWorker = await workerProvider(bestLang);
+            filtered = await applyRubyReadings(
+                best.blocks, rubyOrientation, bestCanvas, rubyWorker, outputFields);
+        } else {
+            // 既定ではルビを再認識せず、小さいルビ行だけを除外して本文の漢字を読む。
+            filtered = removeOcrRubyLines(best.blocks, rubyOrientation);
+        }
         if (filtered != null) text = filtered;
     }
     return { text, confidence: best.confidence };

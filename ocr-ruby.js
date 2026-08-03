@@ -1,4 +1,5 @@
-// ルビ（ふりがな）優先読み。
+// ルビ（ふりがな）の除外と、任意のルビ優先読み。
+// 既定では小さいルビ行を読み上げ対象から除外し、親の漢字を残す。
 // ルビは「その漢字を作者の意図どおりに読ませる」ために振られるので、読み上げでは
 // 漢字の一般的な読みではなくルビの読みが正解になる。そこで、ルビが振られた漢字は
 // ルビの文字列に差し替え、漢字自体は読み上げない（例:「鯨幕」→「くじらまく」）。
@@ -209,6 +210,45 @@ function applyOcrRubySubstitutions(line) {
     return chars.join("");
 }
 
+// 検出したルビ行を落とし、本文行だけで読み上げ用テキストを組み立てる。
+// line.subs がある場合は、ルビ優先読みで予約した差し替えも同時に反映する。
+function buildOcrTextWithoutRubyLines(lines, orientation, bodySize) {
+    let totalChars = 0;
+    let keptChars = 0;
+    let rubyCount = 0;
+    const kept = [];
+    for (const line of lines) {
+        totalChars += line.chars.length;
+        if (isOcrRubyLine(line, bodySize)) {
+            rubyCount++;
+            continue;
+        }
+        keptChars += line.chars.length;
+        const text = applyOcrRubySubstitutions(line);
+        if (text) kept.push({ text, bbox: line.bbox });
+    }
+    // ルビが無いページでは元のOCR結果を変えない。
+    if (rubyCount === 0 || kept.length === 0) return null;
+    // 小さい本文や注釈をルビと誤判定して大半を失う場合は、生テキストへ戻す。
+    if (totalChars === 0 || keptChars < totalChars * OCR_RUBY_MIN_KEEP_RATIO) return null;
+    return markOcrParagraphBreaks(kept, orientation, bodySize).join("\n");
+}
+
+/**
+ * OCRで検出したルビ行を読み上げ対象から除外し、親の本文（漢字）を残す。
+ * ルビが見つからない場合や安全弁に触れた場合は null を返す。
+ *
+ * @param {object[]} blocks 認識結果の blocks
+ * @param {"vertical"|"horizontal"} orientation
+ * @returns {string|null}
+ */
+function removeOcrRubyLines(blocks, orientation) {
+    const lines = collectOcrLines(blocks, orientation);
+    const bodySize = estimateOcrBodySize(lines);
+    if (bodySize == null) return null;
+    return buildOcrTextWithoutRubyLines(lines, orientation, bodySize);
+}
+
 // ルビ列を切り出して拡大し、認識し直してルビ群を得る
 async function rescanOcrRubyLine(ruby, orientation, canvas, worker, output, bodySize) {
     if (!(ruby.size > 0)) return [];
@@ -275,18 +315,5 @@ async function applyRubyReadings(blocks, orientation, canvas, worker, output) {
         for (const group of groups) planOcrRubySubstitution(parent, group, orientation);
     }
 
-    let totalChars = 0;
-    let keptChars = 0;
-    const kept = [];
-    for (const line of lines) {
-        totalChars += line.chars.length;
-        // ルビ行は落とす（差し替えできたルビは親行に入っている）
-        if (isOcrRubyLine(line, bodySize)) continue;
-        keptChars += line.chars.length;
-        const text = applyOcrRubySubstitutions(line);
-        if (text) kept.push({ text, bbox: line.bbox });
-    }
-    if (totalChars === 0 || keptChars < totalChars * OCR_RUBY_MIN_KEEP_RATIO) return null;
-    // ルビ経路でも同じ規則で段落境界を入れる（本文行だけで判定する）
-    return markOcrParagraphBreaks(kept, orientation, bodySize).join("\n");
+    return buildOcrTextWithoutRubyLines(lines, orientation, bodySize);
 }

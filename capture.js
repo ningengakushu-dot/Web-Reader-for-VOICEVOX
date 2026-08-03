@@ -230,7 +230,7 @@
         ocrProgress.hidden = false;
 
         try {
-            // ルビ除去設定を取得（既定OFF）
+            // ルビ優先設定を取得（既定OFF。OFFでもルビ行は読み上げから除外する）
             const { ocrRemoveRuby } = await chrome.storage.local.get(OCR_SETTING_DEFAULTS);
             // 組版方向（横書き/縦書き）を自動判定して認識する。
             // 認識がハングしても「実行中」表示が残らないようタイムアウトで打ち切る。

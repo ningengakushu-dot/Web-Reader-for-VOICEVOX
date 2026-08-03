@@ -146,7 +146,7 @@ async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby
         }
 
         // 組版方向（横書き/縦書き）を自動判定して認識する。
-        // ルビ除去設定は offscreen では chrome.storage を参照できないため、
+        // ルビ優先設定は offscreen では chrome.storage を参照できないため、
         // background がメッセージに載せて渡す（既定OFF）。
         // 認識がハングしても進捗トーストが残り続けないよう、タイムアウトで打ち切る。
         const data = await withOcrTimeout(

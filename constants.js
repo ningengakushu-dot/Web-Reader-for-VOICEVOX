@@ -191,6 +191,6 @@ const OCR_WORKER_IDLE_RELEASE_MS = 5 * 60 * 1000;
 
 // OCR関連の設定デフォルト値（音声合成設定とは別に管理）
 const OCR_SETTING_DEFAULTS = {
-    // OCR読み上げでルビ（ふりがな）を除去するか。既定はOFF（利用者が任意で有効化）。
+    // true のときルビを再認識して読みを優先する。false（既定）はルビ行を除外して漢字を読む。
     ocrRemoveRuby: false
 };
