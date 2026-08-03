@@ -21,4 +21,9 @@ assert.ok(source.includes('率直なご感想や評価をお寄せください�
 assert.ok(source.includes('評価する'), '中立的なボタン文言を表示する');
 assert.doesNotMatch(source, /(?:星\s*5|5\s*つ星|★\s*5)/,
   '特定の高評価を促す文言を含めない');
+
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf8'));
+const optionsHtml = fs.readFileSync(path.join(__dirname, '..', 'options.html'), 'utf8');
+assert.ok(optionsHtml.includes(`Web Reader for VOICEVOX v${manifest.version}`),
+  'オプション画面の表示バージョンをmanifestと一致させる');
 console.log('expected user actions and store feedback link: PASSED');
