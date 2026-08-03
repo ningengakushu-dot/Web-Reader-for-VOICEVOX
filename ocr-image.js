@@ -78,35 +78,13 @@ function upscaleOcrCanvas(source, scale) {
     return canvas;
 }
 
-// canvas の一部を切り出しつつ拡大する（ルビ列の再認識用）。
+// canvas の一部を切り出しつつ拡大する（組版方向の追加判定用）。
 function cropOcrCanvas(source, x, y, width, height, scale) {
     if (!(width > 0) || !(height > 0)) return null;
     const { canvas, ctx } = createSmoothOcrCanvas(
         Math.max(1, Math.round(width * scale)),
         Math.max(1, Math.round(height * scale)));
     ctx.drawImage(source, x, y, width, height, 0, 0, canvas.width, canvas.height);
-    return canvas;
-}
-
-// canvas の周囲に背景色の余白を足す。余白色は元画像の外周1pxの平均輝度とし、
-// 暗い背景のページ（白抜き文字）でも不自然な境界を作らないようにする。
-function padOcrCanvas(source, margin) {
-    const { width, height } = source;
-    const data = readOcrCanvasPixels(source);
-    const lum = (x, y) => {
-        const i = (y * width + x) * 4;
-        return (data[i] + data[i + 1] + data[i + 2]) / 3;
-    };
-    let sum = 0, count = 0;
-    for (let x = 0; x < width; x++) { sum += lum(x, 0) + lum(x, height - 1); count += 2; }
-    for (let y = 0; y < height; y++) { sum += lum(0, y) + lum(width - 1, y); count += 2; }
-    const bg = Math.round(sum / count);
-
-    const canvas = createOcrCanvas(width + margin * 2, height + margin * 2);
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = `rgb(${bg}, ${bg}, ${bg})`;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(source, margin, margin);
     return canvas;
 }
 

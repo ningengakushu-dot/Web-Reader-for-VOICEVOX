@@ -72,7 +72,8 @@ function load(file, chrome) {
         rect: { x: 0, y: 0, width: 10, height: 10 }, viewportWidth: 100, tabId: 1, removeRuby: 1
     });
     assert.strictEqual(result.ok, true);
-    assert.strictEqual(result.message.removeRuby, false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(result.message, 'removeRuby'), false,
+        '廃止したルビ設定をOCRメッセージへ引き継がない');
 
     console.log('security message boundaries: PASSED');
 })();

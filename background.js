@@ -72,6 +72,8 @@ function isVersionBefore(version, target) {
 // 同一 id の create は "Cannot create item with duplicate id" で失敗するため、
 // 必ず removeAll してから作り直す（更新後にメニューが消える不具合の原因）。
 chrome.runtime.onInstalled.addListener((details) => {
+    // 廃止したルビ優先読み設定を既存ユーザーのローカルストレージから削除する。
+    chrome.storage.local.remove("ocrRemoveRuby", () => { void chrome.runtime.lastError; });
     // 既存ユーザーのアップデート時のみ初回お知らせフラグを立てる（install では立てない）
     const isUpdate = details?.reason === "update";
     const shouldSetNotice = isUpdate
@@ -229,16 +231,12 @@ async function captureAndRecognizeRegion(request, tab) {
         throw new Error("キャプチャ画像が大きすぎます。表示倍率を下げて再度お試しください。");
     }
     await setupOffscreen();
-    // offscreen ドキュメントは chrome.storage を参照できないため、
-    // ルビ優先設定はここで読み取ってメッセージに載せて渡す。
-    const { ocrRemoveRuby } = await chrome.storage.local.get(OCR_SETTING_DEFAULTS);
     await sendToOffscreen({
         type: "OCR_RECOGNIZE",
         dataUrl,
         rect: request.rect,
         viewportWidth: request.viewportWidth,
-        tabId: tab.id,
-        removeRuby: ocrRemoveRuby === true
+        tabId: tab.id
     });
 }
 

@@ -44,6 +44,12 @@ class MockStorage {
             }
         });
     }
+    remove(key, cb) {
+        setImmediate(() => {
+            delete this.data[key];
+            cb && cb();
+        });
+    }
 }
 
 // ==========================================
@@ -100,10 +106,13 @@ assert.strictEqual(typeof bgContext.__onMessageListener, 'function', 'onMessage 
 
 // --- 2-1. install / update の条件判定テスト ---
 bgChromeMock.storage.local.data = {};
+bgChromeMock.storage.local.data.ocrRemoveRuby = true;
 bgContext.__onInstalledListener({ reason: "install" });
 
 setImmediate(() => {
     assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, undefined, 'install では update_notice_pending が設定されないこと');
+    assert.strictEqual(bgChromeMock.storage.local.data.ocrRemoveRuby, undefined,
+        '廃止したルビ設定をローカルストレージから削除すること');
     console.log(' -> PASSED: install では表示対象にならない');
 
     bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.2.1" });

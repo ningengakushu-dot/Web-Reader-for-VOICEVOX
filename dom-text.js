@@ -291,10 +291,8 @@ function isBoxVisiblyOnTop(el, box, sel, offset, context) {
     return false;
 }
 
-// ルビの扱い。設定 ocrRemoveRuby=true は「ルビ優先読み」を意味する
-// （OCR経路の実装と同じ意味。true なら本文の代わりに読み rt を読む）。
-// 既定の false では本文（親文字）を読み、rt は読まない。
-// OCR経路では文字サイズと行位置から推定していた区別が、DOMでは構造そのもの。
+// DOMのルビは本文（親文字）だけを読み、読み仮名 rt と表示補助の括弧 rp は読まない。
+// 同じ内容を二重に読み上げないためのHTML構造上の処理であり、OCR補正は行わない。
 function rubyRoleOf(node) {
     let el = node.parentElement;
     while (el) {
@@ -451,13 +449,12 @@ function imageAltOf(el) {
  * @param {Element} el
  * @param {{left:number,top:number,right:number,bottom:number}} sel 選択矩形（最上位ビューポート基準）
  * @param {{x:number,y:number}|null} offset フレームのオフセット
- * @param {{removeRuby?: boolean}} options
  * @param {{units: object[], foreignArea: number, opaqueArea: number, textArea: number}} out
  * @param {Window} win
  * @param {object} context 抽出ごとのキャッシュと協調スケジューラ
  * @returns {Promise<boolean>} true ならこの要素の部分木をまとめて飛ばす
  */
-async function collectFromMediaElement(el, sel, offset, options, out, win, context) {
+async function collectFromMediaElement(el, sel, offset, out, win, context) {
     const box = offsetRect(el.getBoundingClientRect(), offset);
     const overlap = rectIntersectionArea(box, sel);
     // 手前が別の要素で塞がれている画像・フレームは、面積も代替テキストも
@@ -481,7 +478,7 @@ async function collectFromMediaElement(el, sel, offset, options, out, win, conte
                     x: box.left + parseFloat(cs.borderLeftWidth || 0) + parseFloat(cs.paddingLeft || 0),
                     y: box.top + parseFloat(cs.borderTopWidth || 0) + parseFloat(cs.paddingTop || 0)
                 };
-                await collectFromDocument(inner.body, inner, sel, childOffset, options, out, context);
+                await collectFromDocument(inner.body, inner, sel, childOffset, out, context);
             } else if (isElementReadable(el, context) !== false) {
                 out.foreignArea += overlap;
             }
@@ -528,7 +525,7 @@ async function collectFromMediaElement(el, sel, offset, options, out, win, conte
  * 選択矩形に入っているテキスト断片を収集する。
  * 座標は全て最上位ビューポート基準に揃える（offset で補正）。
  */
-async function collectFromDocument(root, doc, sel, offset, options, out, context) {
+async function collectFromDocument(root, doc, sel, offset, out, context) {
     const win = doc.defaultView;
     if (!win) return;
 
@@ -563,7 +560,7 @@ async function collectFromDocument(root, doc, sel, offset, options, out, context
 
             // open な Shadow Root は中へ潜る。closed なものは読めない（OCR行き）。
             if (el.shadowRoot) {
-                await collectFromDocument(el.shadowRoot, doc, sel, offset, options, out, context);
+                await collectFromDocument(el.shadowRoot, doc, sel, offset, out, context);
             }
 
             // 矩形の取得はレイアウト計算を伴うため、必要な要素だけで行う。
@@ -574,7 +571,7 @@ async function collectFromDocument(root, doc, sel, offset, options, out, context
                 node = walker.nextNode();
                 continue;
             }
-            node = await collectFromMediaElement(el, sel, offset, options, out, win, context)
+            node = await collectFromMediaElement(el, sel, offset, out, win, context)
                 ? skipSubtree(walker)
                 : walker.nextNode();
             continue;
@@ -588,9 +585,7 @@ async function collectFromDocument(root, doc, sel, offset, options, out, context
         }
 
         const role = rubyRoleOf(node);
-        const skipRuby = role === "paren"
-            || (options.removeRuby ? role === "base" : role === "reading");
-        if (skipRuby) {
+        if (role === "paren" || role === "reading") {
             node = walker.nextNode();
             continue;
         }
@@ -705,7 +700,7 @@ function joinTextUnits(units) {
  * @returns {{ok: boolean, text: string, chars: number, reason: string, stats: object}}
  *   ok=false のときは OCR 経路へ回すべきことを示し、reason にその理由が入る。
  */
-async function collectRegionText(rect, options = {}) {
+async function collectRegionText(rect) {
     const started = Date.now();
     const sel = {
         left: rect.x,
@@ -725,7 +720,6 @@ async function collectRegionText(rect, options = {}) {
             document,
             sel,
             null,
-            options,
             out,
             context
         );

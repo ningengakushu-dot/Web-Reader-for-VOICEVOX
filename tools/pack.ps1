@@ -24,7 +24,7 @@ $files = @(
     'background-entry.js', 'background-security.js', 'background.js',
     'content-guard.js', 'content.js', 'dom-text.js', 'offscreen-security.js', 'offscreen.js',
     'options.js', 'capture.js', 'constants.js',
-    'ocr-common.js', 'ocr-image.js', 'ocr-refine.js', 'ocr-ruby.js',
+    'ocr-common.js', 'ocr-image.js', 'ocr-refine.js',
     'offscreen.html', 'options.html', 'capture.html',
     'options.css', 'capture.css',
     'ocr-words.txt', 'ocr-dictionary-NOTICE.md',

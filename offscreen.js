@@ -126,7 +126,7 @@ const resetOcrWorkers = ocrWorkers.terminate;
  * rect はビューポートのCSSピクセル座標、キャプチャ画像は物理ピクセルのため、
  * 画像幅とビューポート幅の比率で座標変換する（devicePixelRatio・ズーム両対応）。
  */
-async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby }) {
+async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId }) {
     ocrProgressTabId = tabId ?? null;
     resetOcrProgress();
     cancelOcrWorkerIdleRelease();
@@ -146,11 +146,9 @@ async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby
         }
 
         // 組版方向（横書き/縦書き）を自動判定して認識する。
-        // ルビ優先設定は offscreen では chrome.storage を参照できないため、
-        // background がメッセージに載せて渡す（既定OFF）。
         // 認識がハングしても進捗トーストが残り続けないよう、タイムアウトで打ち切る。
         const data = await withOcrTimeout(
-            recognizeWithOrientation(canvas, getOcrWorker, { removeRuby: removeRuby === true }),
+            recognizeWithOrientation(canvas, getOcrWorker),
             OCR_RECOGNIZE_TIMEOUT_MS,
             "文字認識に時間がかかりすぎました。範囲を狭めてお試しください。"
         );

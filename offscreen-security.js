@@ -67,8 +67,7 @@
                 dataUrl: message.dataUrl,
                 rect: { x: r.x, y: r.y, width: r.width, height: r.height },
                 viewportWidth: message.viewportWidth,
-                tabId: message.tabId,
-                removeRuby: message.removeRuby === true
+                tabId: message.tabId
             } };
         }
         if (message.type === "STOP_AUDIO" || message.type === "PREWARM_OCR") {

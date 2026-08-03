@@ -32,8 +32,6 @@ class VVRadioReader {
         this.indicator = null;
         // OCRの進捗途絶を検知する見張りタイマー（armOcrStallWatchdog で設定）
         this.ocrStallWatchdog = null;
-        // ルビ優先読みの設定。ページ内テキスト経路（Tier 0）でも同じ設定に従う。
-        this.ocrRemoveRuby = false;
         // 登録したリスナー（deactivate でまとめて解除する）
         this.storageListeners = [];
         this.keyboardShortcutListener = null;
@@ -60,23 +58,6 @@ class VVRadioReader {
         }
         this.setupMessageListener();
         this.setupKeyboardShortcutFallback();
-        this.watchOcrSettings();
-    }
-
-    // ルビ優先読みの設定を読み込み、変更に追従する。
-    // OCR経路では background が設定を読んでメッセージに載せるが、
-    // ページ内テキスト経路は content script 側で完結するためここで持つ。
-    watchOcrSettings() {
-        chrome.storage.local.get(["ocrRemoveRuby"], (res) => {
-            if (!this.active) return;
-            this.ocrRemoveRuby = res.ocrRemoveRuby === true;
-        });
-        this.addStorageListener((changes, namespace) => {
-            if (!this.active || namespace !== "local") return;
-            if (changes.ocrRemoveRuby) {
-                this.ocrRemoveRuby = changes.ocrRemoveRuby.newValue === true;
-            }
-        });
     }
 
     // storage の変更リスナーを登録し、deactivate で確実に解除できるよう控えておく。
@@ -915,9 +896,7 @@ class VVRadioReader {
                 this.regionExtractionCount++;
             }
             try {
-                result = await dom.collectRegionText(rect, {
-                    removeRuby: this.ocrRemoveRuby === true
-                });
+                result = await dom.collectRegionText(rect);
             } catch (err) {
                 console.warn("VVRadio: ページ内テキストの取得に失敗:", err.message);
             } finally {

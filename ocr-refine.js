@@ -25,7 +25,7 @@ function forEachOcrLine(blocks, visit) {
 
 /**
  * 記号を書き換えた単語の text を組み直す。
- * ルビ除去が word.text を見るため、symbol.text を変えたら必ず呼ぶ。
+ * 後段のテキスト再構成が word.text を見るため、symbol.text を変えたら必ず呼ぶ。
  * @param {Iterable<object>} words
  */
 function rebuildOcrWordTexts(words) {

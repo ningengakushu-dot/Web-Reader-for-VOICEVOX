@@ -45,7 +45,7 @@ const context = vm.createContext({
     console, chrome, importScripts() {}, setTimeout, clearTimeout, Promise, Date,
     VOICEVOX_BASE_URL: 'http://127.0.0.1:50021', VOICEVOX_FETCH_TIMEOUT_MS: 15000,
     SETTING_DEFAULTS: { speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 1, volumeScale: 1, pauseLengthScale: 1 },
-    OCR_SETTING_DEFAULTS: { ocrRemoveRuby: false }, CAPTURE_STORAGE_KEY: 'capture',
+    CAPTURE_STORAGE_KEY: 'capture',
     PLAYBACK_TAB_STORAGE_KEY: 'playback', fetch: async () => { throw new Error('not used'); },
     OffscreenCanvas: function() {}, createImageBitmap: async () => ({}), btoa: () => ''
 });

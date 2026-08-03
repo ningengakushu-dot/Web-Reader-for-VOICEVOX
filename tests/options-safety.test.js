@@ -45,7 +45,7 @@ class MockElement {
 }
 
 const ids = [
-    'speaker-select', 'save-btn', 'reset-btn', 'status-msg', 'loader', 'ocrRemoveRuby-check',
+    'speaker-select', 'save-btn', 'reset-btn', 'status-msg', 'loader',
     'iconRightClick-select', 'iconStyle-select', 'iconStyle-preview', 'iconStyle-hint-character',
     'customIcon-row', 'customIcon-file', 'customIcon-clear',
     'speed-slider', 'speed-value', 'pitch-slider', 'pitch-value', 'intonation-slider',

@@ -4,7 +4,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetBtn = document.getElementById('reset-btn');
     const statusMsg = document.getElementById('status-msg');
     const loader = document.getElementById('loader');
-    const ocrRemoveRubyCheck = document.getElementById('ocrRemoveRuby-check');
     const iconRightClickSelect = document.getElementById('iconRightClick-select');
     const iconStyleSelect = document.getElementById('iconStyle-select');
     const iconStylePreview = document.getElementById('iconStyle-preview');
@@ -66,7 +65,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // 保存済み設定の復元はエンジンの起動状態に依存しない。
         // キャラクター一覧の取得失敗でスライダーやアイコン設定まで初期化されないよう、
         // storage の読み出しを先に済ませてから一覧の取得を試みる。
-        const storageKeys = ['speakerId', 'ocrRemoveRuby', 'iconRightClickAction', 'iconStyle',
+        const storageKeys = ['speakerId', 'iconRightClickAction', 'iconStyle',
             CHARACTER_ICON_STORAGE_KEY, CUSTOM_ICON_STORAGE_KEY, ...sliders.map(s => s.key)];
         let result = {};
         try {
@@ -83,7 +82,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 s.slider.value = value;
                 s.valueEl.textContent = Number(value).toFixed(s.decimals);
             }
-            ocrRemoveRubyCheck.checked = result.ocrRemoveRuby === true;
             // 既定は「画面OCR読み上げを開始」（content.js 側の既定値と揃える）
             iconRightClickSelect.value = result.iconRightClickAction === 'options' ? 'options' : 'capture';
 
@@ -336,7 +334,6 @@ document.addEventListener('DOMContentLoaded', () => {
             s.slider.value = val;
             s.valueEl.textContent = Number(val).toFixed(s.decimals);
         }
-        settings.ocrRemoveRuby = ocrRemoveRubyCheck.checked;
         settings.iconRightClickAction = iconRightClickSelect.value === 'options' ? 'options' : 'capture';
         settings.iconStyle = ICON_STYLE_VALUES.includes(iconStyleSelect.value)
             ? iconStyleSelect.value : SETTING_DEFAULTS.iconStyle;
