@@ -18,7 +18,7 @@ assert.ok(!source.includes('detail/web-reader-for-voicevox/${chrome.runtime.id}'
   '開発者モードの一時的な拡張機能IDをストアURLに使用しない');
 assert.ok(source.includes('率直なご感想や評価をお寄せください。今後の改善に活用します。'),
   '中立的なレビュー案内を表示する');
-assert.ok(source.includes('率直な評価を送る'), '中立的なボタン文言を表示する');
+assert.ok(source.includes('評価する'), '中立的なボタン文言を表示する');
 assert.doesNotMatch(source, /(?:星\s*5|5\s*つ星|★\s*5)/,
   '特定の高評価を促す文言を含めない');
 console.log('expected user actions and store feedback link: PASSED');

@@ -747,7 +747,7 @@ class VVRadioReader {
                 率直なご感想や評価をお寄せください。今後の改善に活用します。
             </div>
             <div class="notice-actions">
-                <button class="btn-primary" id="btn-rate">率直な評価を送る</button>
+                <button class="btn-primary" id="btn-rate">評価する</button>
                 <button class="btn-secondary" id="btn-close">閉じる</button>
             </div>
         `;
