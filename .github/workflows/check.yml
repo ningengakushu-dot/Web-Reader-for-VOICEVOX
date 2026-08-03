@@ -41,6 +41,9 @@ jobs:
       - name: OCR画像証拠の多数一致融合検査
         run: node tests/ocr-consensus-fusion.test.js
 
+      - name: OCRモデルとLSTM専用コアの互換性検査
+        run: node tests/tessdata-compatibility.test.js
+
       - name: アップデートお知らせ機能の単体・結合検査
         run: node tests/update-notice.test.js
 
