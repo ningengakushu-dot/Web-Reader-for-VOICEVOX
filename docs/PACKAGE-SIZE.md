@@ -1,18 +1,17 @@
 # Package size report
 
 - ZIP: `web-reader-for-voicevox-1.4.3.zip`
-- Compressed payload: **28.07 MiB**
-- Uncompressed payload: **36.17 MiB**
+- Compressed payload: **27.76 MiB**
+- Uncompressed payload: **35.38 MiB**
 
 ## Largest packaged files
 
 | File | Compressed | Uncompressed |
 |---|---:|---:|
-| `vendor/tesseract/lang/jpn_vert.traineddata` | 12.37 MiB | 13.67 MiB |
-| `vendor/tesseract/lang/jpn.traineddata` | 12.37 MiB | 13.67 MiB |
-| `vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js` | 1.42 MiB | 3.77 MiB |
-| `vendor/tesseract/core/tesseract-core-lstm.wasm.js` | 1.42 MiB | 3.77 MiB |
-| `ocr-words.txt` | 0.35 MiB | 0.78 MiB |
+| `vendor/tesseract/lang/jpn_vert.traineddata` | 12.39 MiB | 13.67 MiB |
+| `vendor/tesseract/lang/jpn.traineddata` | 12.38 MiB | 13.67 MiB |
+| `vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js` | 1.41 MiB | 3.77 MiB |
+| `vendor/tesseract/core/tesseract-core-lstm.wasm.js` | 1.41 MiB | 3.77 MiB |
 | `vendor/tesseract/worker.min.js` | 0.03 MiB | 0.11 MiB |
 | `images/icon128.png` | 0.03 MiB | 0.03 MiB |
 | `content.js` | 0.01 MiB | 0.05 MiB |
@@ -35,11 +34,11 @@
 | `background-security.js` | 0.00 MiB | 0.01 MiB |
 | `images/icon16.png` | 0.00 MiB | 0.00 MiB |
 | `capture.css` | 0.00 MiB | 0.00 MiB |
-| `ocr-dictionary-NOTICE.md` | 0.00 MiB | 0.00 MiB |
 | `offscreen-security.js` | 0.00 MiB | 0.00 MiB |
 
 ## Notes
 
 - `vendor/tesseract/lang/*.traineddata` are OCR recognition models and directly affect recognition accuracy.
 - Tesseract.js selects the WASM core according to runtime capabilities; core files are not removed without compatibility testing.
+- The former word-dictionary payload and its notice were removed; OCR correction now uses only evidence from multiple image scales.
 - Application JavaScript, CSS and icons are measured separately from the OCR assets above.

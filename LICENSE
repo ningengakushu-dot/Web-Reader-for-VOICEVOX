@@ -27,8 +27,6 @@ SOFTWARE.
 
 - `vendor/tesseract/` — Tesseract.js および tessdata_best の日本語学習データ。
   Apache License 2.0。詳細は `vendor/tesseract/LICENSE-NOTICE.md` を参照。
-- `ocr-words.txt` — SudachiDict から作成した派生物。Apache License 2.0。
-  詳細は `ocr-dictionary-NOTICE.md` を参照。
 
 同梱物が要求する Apache License 2.0 の全文は、リポジトリ直下の
 `LICENSE-APACHE-2.0` に置いています（このリポジトリ自身のライセンスではありません）。

@@ -27,7 +27,6 @@ $files = @(
     'ocr-common.js', 'ocr-image.js', 'ocr-refine.js',
     'offscreen.html', 'options.html', 'capture.html',
     'options.css', 'capture.css',
-    'ocr-words.txt', 'ocr-dictionary-NOTICE.md',
     'LICENSE', 'LICENSE-APACHE-2.0'
 )
 $dirs = @('vendor')

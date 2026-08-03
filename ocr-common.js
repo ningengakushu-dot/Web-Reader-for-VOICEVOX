@@ -166,7 +166,7 @@ const OCR_UPSCALE_TRIGGER_GLYPH_PX = 24;
 // 75 を境にすると壊滅ケースの救済（CER 24.31%→2.55%）は保ったまま上書き事故を防げる。
 const OCR_UPSCALE_SWAP_MAX_BASE_CONFIDENCE = 75;
 
-// 認識全体をこの時間に収めることを目標に、精錬（拡大再認識・二値化・融合・辞書リランク）の
+// 認識全体をこの時間に収めることを目標に、精錬（拡大再認識・二値化・文字融合）の
 // 実行回数を決める。精錬1段は元寸の認識1回分とほぼ同じ時間がかかる。
 // 体感速度を優先した値。実測では 1920x1080 の全画面キャプチャは元寸の認識だけで
 // 7〜10秒かかり、精錬を無制限に許すと合計20秒を超えて「読み上げ開始が遅い」と感じられる。
@@ -209,11 +209,8 @@ async function resolveOcrOrientation(grayCanvas, workerProvider) {
  * @returns {Promise<{text: string, confidence: number}>} text は処理後の生テキスト（整形は呼び出し側）
  */
 async function recognizeWithOrientation(sourceCanvas, workerProvider) {
-    // blocks は文字サイズの実測、文字融合、辞書リランク、段落境界の推定に使う。
+    // blocks は文字サイズの実測、文字融合、段落境界の推定に使う。
     const outputFields = { text: true, blocks: true };
-
-    // 語彙辞書を一度だけ読み込む（任意。失敗しても従来動作）
-    await ensureOcrDictionaries();
 
     // まずグレースケール化した元寸画像を作る（拡大・二値化はしない。
     // 明朝体等、強い前処理が裏目に出るフォントがあるため）
@@ -295,7 +292,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     }
 
     // best.blocks から tesseract と同じ規則（単語=スペース・行=改行）でテキストを組み立てる。
-    // best.text と内容は同一だが、後段の融合・辞書リランクが symbol.text を書き換えるため
+    // best.text と内容は同一だが、後段の文字融合が symbol.text を書き換えるため
     // blocks から組み直す（置換前は best.text をそのまま使うのと等価）。段落境界の「間」は
     // buildTextFromBlocks では付けず、後段の normalizeOcrText が行の内容から推定して補う。
     // 段落境界の推定には best を生んだ画像の座標系・組版方向を使う
@@ -329,48 +326,35 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     if (best === primary.data && glyphSize != null && glyphSize < OCR_FUSION_TRIGGER_GLYPH_PX) {
         const others = await collectUpscaledVariants(OCR_FUSION_SCALES);
         if (others.length) {
-            // 融合（低確信度の漢字を精錬）→ 辞書リランキング（残った非語を辞書語へ）の順に適用。
-            // どちらかが置換したときだけ blocks からテキストを組み直す
+            // 複数倍率の画像証拠だけで文字を融合する。置換したときだけblocksから組み直す
             // （置換ゼロなら tesseract の出力をそのまま使い、挙動を変えない）。
             const fused = fuseOcrSymbols(best.blocks, others);
-            const reranked = rerankOcrByDictionary(best.blocks, others);
-            if (fused > 0 || reranked > 0) {
+            if (fused > 0) {
                 text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
             }
         }
     } else if (best === primary.data && glyphSize != null
         && glyphSize >= OCR_FUSION_TRIGGER_GLYPH_PX
         && best.confidence < OCR_PREPROCESS_SKIP_CONFIDENCE) {
-        // 文字が最適域以上のときは拡大しても精度が上がらないため融合は行わないが、
-        // 最適域を狙った倍率で認識し直して辞書リランクの材料にする。
+        // 文字が最適域以上のときは確信度合計による融合は行わないが、最適域を狙う
+        // 複数倍率を認識し、全会一致または強い多数一致だけを画像証拠として採用する。
         // 実測では「覚悟→党悟」「鎌倉→鉄倉」のような一般語の誤りがこの領域で多発しており、
         // 従来はゲート（18px）に阻まれて一切補正されていなかった。
         const scales = [];
         const seen = new Set();
-        for (const target of OCR_RERANK_TARGET_GLYPH_PX) {
+        for (const target of OCR_CONSENSUS_TARGET_GLYPH_PX) {
             const scale = Math.round((target / glyphSize) * 100) / 100;
             if (scale === 1 || scale < 0.4 || scale > 3 || seen.has(scale)) continue;
             seen.add(scale);
             scales.push(scale);
         }
         const others = await collectUpscaledVariants(scales);
-        // 確信度による漢字の融合はこの領域では悪化する（実測）ため行わないが、
-        // 全会一致による置換は文字サイズによらず有効なので、そちらだけ適用する。
+        // 確信度合計による漢字の融合はこの領域では悪化する（実測）ため行わない。
+        // 全会一致と、前後位置が安定した強い多数一致だけを適用する。
         const fused = others.length ? fuseOcrSymbols(best.blocks, others, { kanji: false }) : 0;
-        // 2つ以上の倍率が同じ辞書語で一致したときだけ置換する（多数決の最低条件）
-        const reranked = others.length >= 2 ? rerankOcrByDictionary(best.blocks, others) : 0;
-        if (fused > 0 || reranked > 0) {
+        if (fused > 0) {
             text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
         }
-    }
-
-    // 複数倍率が同じ字形誤認を返すケースは多数決では救えないため、最後に辞書で一意に
-    // 確定できる視覚的混同だけを補正する。追加のOCRは行わないので、高確信度で精錬を
-    // 省略した入力にも適用でき、処理時間への影響は辞書検索だけに限られる。
-    const visuallyCorrected = best.blocks
-        ? correctOcrVisualConfusionsByDictionary(best.blocks) : 0;
-    if (visuallyCorrected > 0) {
-        text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
     }
 
     return { text, confidence: best.confidence };

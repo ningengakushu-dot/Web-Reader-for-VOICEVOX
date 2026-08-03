@@ -1,6 +1,6 @@
 // 認識結果（Tesseract の blocks）の走査と精錬。
-// 複数倍率の認識結果を文字単位で突き合わせる融合と、語彙辞書によるリランキング、
-// および blocks からの読み上げテキスト組み立てを担当する。
+// 複数倍率の認識結果を文字単位で突き合わせる融合と、blocks からの
+// 読み上げテキスト組み立てを担当する。
 //
 // ocr-image.js と同じく offscreen.html / capture.html の両方から使う。
 
@@ -34,45 +34,6 @@ function rebuildOcrWordTexts(words) {
     }
 }
 
-// ===== 語彙辞書（リランキング用） =====
-// SudachiDict(Apache-2.0) から抽出した高頻度の語（2-4字・漢字含む内容語）。
-// 融合候補が「非語」か「辞書語」かの判定に使い、OCRの誤字で意味の通らない
-// 熟語になった箇所を、複数倍率の認識結果の中の辞書語へ補正する（rerankOcrByDictionary）。
-// 「任意」。取得に失敗しても従来動作を完全に保つ（機能を素通りさせる）。
-let ocrWordSet = null;
-let ocrDictionaryPromise = null;
-
-// 拡張機能の同梱ファイルを一度だけ読み込む。offscreen/capture の拡張ページからは
-// chrome.runtime.getURL で自分の同梱リソースを fetch できる（web_accessible_resources 不要）。
-async function ensureOcrDictionaries() {
-    if (ocrWordSet) return;
-    if (ocrDictionaryPromise) return ocrDictionaryPromise;
-    ocrDictionaryPromise = (async () => {
-        try {
-            if (typeof fetch === "undefined" || typeof chrome === "undefined"
-                || !chrome.runtime || !chrome.runtime.getURL) return;
-            const response = await fetch(chrome.runtime.getURL("ocr-words.txt"));
-            if (!response.ok) throw new Error(`辞書の読み込みに失敗しました (${response.status})`);
-            const declared = Number(response.headers?.get?.("content-length"));
-            if (Number.isFinite(declared) && declared > 2 * 1024 * 1024) {
-                throw new Error("辞書ファイルが大きすぎます");
-            }
-            const wordsText = await response.text();
-            if (wordsText.length > 2 * 1024 * 1024) throw new Error("辞書ファイルが大きすぎます");
-            ocrWordSet = new Set(wordsText.split("\n").filter(Boolean));
-        } catch (error) {
-            // 辞書は任意機能。失敗しても以降は素通りする
-            ocrWordSet = ocrWordSet || new Set();
-        }
-    })();
-    return ocrDictionaryPromise;
-}
-
-// テスト用に辞書を直接注入する（Node ハーネスから利用）。
-function setOcrDictionaries(wordSet) {
-    if (wordSet) ocrWordSet = wordSet;
-}
-
 // ===== blocks からの読み上げテキスト組み立て =====
 
 /**
@@ -85,7 +46,7 @@ function collectOcrSymbols(blocks) {
     const out = [];
     forEachOcrLine(blocks, (line) => {
         for (const word of (line.words || [])) {
-            for (const symbol of (word.symbols || [])) out.push({ symbol, word });
+            for (const symbol of (word.symbols || [])) out.push({ symbol, word, line });
         }
     });
     return out;
@@ -169,13 +130,16 @@ const OCR_FUSION_MIN_CONFIDENCE = 88;
 // 融合に使う拡大倍率（2倍は上の再認識で得た結果を再利用する）
 const OCR_FUSION_SCALES = [1.5, 2, 3];
 
-// 融合ゲート（18px）より大きい文字でも、辞書リランクだけは走らせる。そのときの
+// 融合ゲート（18px）より大きい文字でも画像証拠による一致判定を行う。そのときの
 // 変換先の文字サイズ（Tesseract LSTM の最適域 20-30px を狙う）。
-// 実測では一般的なWebページの文字は 22〜39px で、従来はどの補正も発火していなかった
-// （24枚中5枚のみ発火）。融合と違い辞書リランクは「非辞書語」かつ「2つ以上の倍率が
-// 同じ辞書語で一致」のときしか置換しないため、この領域でも安全側に働く
-// （実測: 26枚で改善6・悪化0）。
-const OCR_RERANK_TARGET_GLYPH_PX = [20, 24, 30];
+const OCR_CONSENSUS_TARGET_GLYPH_PX = [20, 24, 30];
+
+// 3つ以上の倍率候補のうち複数が同じ文字を支持したとき、全文のconfidenceではなく
+// 文字単位の支持数とconfidence差で採否を決める。表示80%の実画像では元寸が誤った
+// 「巳」(91)、倍率候補が「巳」(90)×1 / 正しい「己」(98)×2となり、全文confidenceは
+// 全候補89-90で判別不能だった。語彙を参照せず、この画素由来の差だけを利用する。
+const OCR_CONSENSUS_MIN_CONFIDENCE = 90;
+const OCR_CONSENSUS_CONFIDENCE_MARGIN = 3;
 
 // 拡大後の画素数の上限（巨大な選択範囲で時間とメモリを浪費しないための保護）
 const OCR_FUSION_MAX_AREA = 8400000;
@@ -209,7 +173,7 @@ function alignOcrSymbols(baseEntries, otherEntries) {
 
 /**
  * 各倍率の認識結果を base のシンボル列へ整列し、倍率ごとの対応を返す。
- * 融合と辞書リランクで同じ整列を行っていたため共通化する。
+ * 全会一致・多数一致・低確信度融合で同じ整列結果を使うため共通化する。
  * @param {{symbol: object, word: object}[]} baseEntries
  * @param {object[][]} otherBlocksList
  * @returns {[number, object][][]} 倍率ごとの [baseIndex, symbol] の並び
@@ -224,6 +188,15 @@ function alignOcrVariants(baseEntries, otherBlocksList) {
     return aligned;
 }
 
+function classifyOcrSymbol(text) {
+    if (OCR_KANJI_ONE_RE.test(text)) return "kanji";
+    if (/^[ぁ-ゖ]$/.test(text)) return "hiragana";
+    if (/^[ァ-ヺー]$/.test(text)) return "katakana";
+    if (/^[A-Za-zＡ-Ｚａ-ｚ]$/.test(text)) return "latin";
+    if (/^[0-9０-９]$/.test(text)) return "digit";
+    return null;
+}
+
 // 複数倍率の認識結果で元寸の文字を精錬する。判断の根拠は2つ。
 // (1) 全会一致: すべての倍率が揃って「元寸とは違う同じ文字」を出した場合、そちらを採る。
 //     元寸は高い確信度のまま誤ることがあり、確信度ではゲートできない
@@ -231,29 +204,44 @@ function alignOcrVariants(baseEntries, otherBlocksList) {
 //      濁点・半濁点の取り違えは読み上げで別語になるため影響が大きい）。
 //     独立した複数倍率が全会一致した事実そのものを根拠にする。
 //     実ページ24枚の実測で 改善13・悪化0。
-// (2) 低確信度の漢字: 確信度の合計が上回る漢字へ置き換える（従来からの機能）。
-// options.kanji / options.unanimous で対象を切り替える（既定は両方）。
+// (2) 強い多数一致: 3候補以上のうち複数が同じ文字を支持し、その平均confidenceが
+//     元文字と次点候補をマージン以上上回る場合に置き換える。前後どちらかの文字が
+//     baseと一致する候補だけを数え、編集距離整列の位置ずれを誤って票にしない。
+// (3) 低確信度の漢字: 確信度の合計が上回る漢字へ置き換える（従来からの機能）。
+// options.kanji / options.unanimous / options.consensus で対象を切り替える（既定は全て）。
 // 置換した文字数を返す（0 なら呼び出し側は元のテキストをそのまま使う）。
 function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
     const useKanji = options.kanji !== false;
     const useUnanimous = options.unanimous !== false;
+    const useConsensus = options.consensus !== false;
     const isKanji = (t) => OCR_KANJI_ONE_RE.test(t);
     const baseEntries = collectOcrSymbols(baseBlocks);
     if (!baseEntries.length) return 0;
 
-    const candidates = new Map();
+    const variantMaps = [];
     for (const pairs of alignOcrVariants(baseEntries, otherBlocksList)) {
+        const map = new Map();
         for (const [index, symbol] of pairs) {
-            if (!candidates.has(index)) candidates.set(index, []);
-            candidates.get(index).push(symbol);
+            if (!map.has(index)) map.set(index, symbol);
         }
+        variantMaps.push(map);
     }
+
+    const hasStableNeighbor = (map, index) => {
+        const entry = baseEntries[index];
+        for (const offset of [-1, 1]) {
+            const neighbor = baseEntries[index + offset];
+            if (neighbor && neighbor.line === entry.line
+                && map.get(index + offset)?.text === neighbor.symbol.text) return true;
+        }
+        return false;
+    };
 
     const touchedWords = new Set();
     let replaced = 0;
     baseEntries.forEach((entry, index) => {
         const symbol = entry.symbol;
-        const alts = candidates.get(index) || [];
+        const alts = variantMaps.map((map) => map.get(index)).filter(Boolean);
 
         // (1) 全会一致による置換。確信度ではゲートしない（上のコメント参照）。
         if (useUnanimous && alts.length >= 2) {
@@ -266,7 +254,44 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
             }
         }
 
-        // (2) 低確信度の漢字。同じ文字を出したバリアントの確信度を合計し、最大の文字を選ぶ。
+        // (2) 同じ種類の文字について、位置が前後の文字で裏付けられた倍率候補だけを投票する。
+        if (useConsensus && alts.length >= 3) {
+            const baseClass = classifyOcrSymbol(symbol.text);
+            const votes = new Map();
+            if (baseClass) {
+                variantMaps.forEach((map) => {
+                    const candidate = map.get(index);
+                    if (!candidate || classifyOcrSymbol(candidate.text) !== baseClass
+                        || !hasStableNeighbor(map, index)) return;
+                    const confidence = Number(candidate.confidence);
+                    if (!Number.isFinite(confidence)) return;
+                    const vote = votes.get(candidate.text) || { text: candidate.text, count: 0, total: 0 };
+                    vote.count++;
+                    vote.total += confidence;
+                    votes.set(candidate.text, vote);
+                });
+            }
+            const ranked = [...votes.values()].map((vote) => ({
+                ...vote,
+                average: vote.total / vote.count
+            })).sort((a, b) => (b.count - a.count) || (b.average - a.average));
+            const top = ranked[0];
+            const runnerUp = ranked[1];
+            const baseConfidence = Number.isFinite(Number(symbol.confidence))
+                ? Number(symbol.confidence) : 0;
+            const comparison = Math.max(baseConfidence, runnerUp?.average || 0);
+            if (top && top.text !== symbol.text && top.count >= 2
+                && (!runnerUp || top.count > runnerUp.count)
+                && top.average >= OCR_CONSENSUS_MIN_CONFIDENCE
+                && top.average >= comparison + OCR_CONSENSUS_CONFIDENCE_MARGIN) {
+                symbol.text = top.text;
+                touchedWords.add(entry.word);
+                replaced++;
+                return;
+            }
+        }
+
+        // (3) 低確信度の漢字。同じ文字を出したバリアントの確信度を合計し、最大の文字を選ぶ。
         if (!useKanji || symbol.confidence >= OCR_FUSION_MIN_CONFIDENCE || !isKanji(symbol.text)) return;
         const scores = new Map();
         const add = (text, confidence) => scores.set(text, (scores.get(text) || 0) + confidence);
@@ -285,166 +310,6 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
         }
     });
 
-    rebuildOcrWordTexts(touchedWords);
-    return replaced;
-}
-
-// 語彙辞書によるリランキング。
-// 融合の残存誤りは「非語」になることが多い（実測: 條恨は非語／悔恨は語）。しかも誤字が
-// 高確信度（實測: 誤り「條」94）だと融合の確信度ゲートに掛からず救えない。そこで、
-// 「元寸で非辞書語の漢字連続」を「複数の拡大版が揃って出す辞書語」へ置き換える。
-// Tesseract の語分割は縦書きで1字ずつに割れることがある（実測）ため語境界には依存せず、
-// 漢字連続の2-4字窓を辞書と照合する。安全のため:
-// - base が既に辞書語なら触れない（正解の保護）
-// - 各字が漢字で、2つ以上の拡大版が同一の辞書語で一致したときだけ置換（偶発誤りの排除）
-// - 長い窓・支持の多い順に貪欲適用し、文字の重複置換を避ける
-// 読みを捏造せず OCR 自身が出した候補から選ぶだけなので回帰リスクが低い
-// （実測: 條恨→悔恨を修正し、ルビなしコーパスで悪化ゼロ・複数ケースでCER改善）。
-function rerankOcrByDictionary(baseBlocks, otherBlocksList) {
-    if (!ocrWordSet || !ocrWordSet.size) return 0;
-    const isKanji = (t) => OCR_KANJI_ONE_RE.test(t);
-    const baseEntries = collectOcrSymbols(baseBlocks);
-    if (!baseEntries.length) return 0;
-
-    // 各拡大版について base シンボルへの対応表（baseIndex→文字）を作る
-    const variantMaps = [];
-    for (const pairs of alignOcrVariants(baseEntries, otherBlocksList)) {
-        const map = new Map();
-        for (const [index, symbol] of pairs) {
-            if (!map.has(index)) map.set(index, symbol.text);
-        }
-        variantMaps.push(map);
-    }
-    if (!variantMaps.length) return 0;
-
-    const kanji = baseEntries.map((e) => isKanji(e.symbol.text));
-    const candidates = [];
-    let i = 0;
-    while (i < baseEntries.length) {
-        if (!kanji[i]) { i++; continue; }
-        let j = i;
-        while (j < baseEntries.length && kanji[j]) j++;
-        // 漢字連続 [i, j) の中で 4→2字の窓を評価
-        for (let len = Math.min(4, j - i); len >= 2; len--) {
-            for (let start = i; start + len <= j; start++) {
-                const baseStr = baseEntries.slice(start, start + len).map((e) => e.symbol.text).join("");
-                if (ocrWordSet.has(baseStr)) continue; // 既に辞書語なら保護
-                const votes = new Map();
-                for (const map of variantMaps) {
-                    let str = "";
-                    let ok = true;
-                    for (let k = 0; k < len; k++) {
-                        const t = map.get(start + k);
-                        if (!t || t.length !== 1 || !isKanji(t)) { ok = false; break; }
-                        str += t;
-                    }
-                    if (ok) votes.set(str, (votes.get(str) || 0) + 1);
-                }
-                for (const [str, support] of votes) {
-                    if (str !== baseStr && support >= 2 && ocrWordSet.has(str)) {
-                        candidates.push({ start, len, str, support });
-                    }
-                }
-            }
-        }
-        i = j;
-    }
-    // 長い窓・支持の多い順に貪欲適用（文字の重複を避ける）
-    candidates.sort((a, b) => (b.len - a.len) || (b.support - a.support));
-    const used = new Uint8Array(baseEntries.length);
-    const touchedWords = new Set();
-    let replaced = 0;
-    for (const cand of candidates) {
-        let free = true;
-        for (let k = 0; k < cand.len; k++) if (used[cand.start + k]) { free = false; break; }
-        if (!free) continue;
-        for (let k = 0; k < cand.len; k++) {
-            baseEntries[cand.start + k].symbol.text = cand.str[k];
-            used[cand.start + k] = 1;
-            touchedWords.add(baseEntries[cand.start + k].word);
-        }
-        replaced++;
-    }
-    rebuildOcrWordTexts(touchedWords);
-    return replaced;
-}
-
-// OCRモデルが構造の近い漢字を全倍率で同じように誤る場合や、時間・面積の予算により
-// 拡大再認識を行えない場合、上の多数決リランキングでは候補を得られず補正できない。
-// 提示された実画像でも低解像度の元寸認識は「自巳主張」になり、そのままVOICEVOXへ
-// 渡すと「ジミシュチョウ」と読まれることを確認した。
-// そこで、字形がほぼ同じ文字だけを対象に、非辞書語から辞書語への置換が一意に決まる場合に
-// 限って補正する。正しい珍しい語を一般語へ寄せないため、元が辞書語・候補が複数・一度に
-// 2文字以上変わるケースはすべて触らない。
-const OCR_VISUAL_CONFUSION_GROUPS = [
-    ["己", "已", "巳"]
-];
-const OCR_VISUAL_CONFUSIONS = new Map();
-for (const group of OCR_VISUAL_CONFUSION_GROUPS) {
-    for (const char of group) OCR_VISUAL_CONFUSIONS.set(char, group.filter((other) => other !== char));
-}
-
-function correctOcrVisualConfusionsByDictionary(blocks) {
-    if (!ocrWordSet || !ocrWordSet.size) return 0;
-    const entries = collectOcrSymbols(blocks);
-    if (!entries.length) return 0;
-    const isKanji = (text) => OCR_KANJI_ONE_RE.test(text);
-    const kanji = entries.map((entry) => isKanji(entry.symbol.text));
-    const candidates = [];
-
-    let i = 0;
-    while (i < entries.length) {
-        if (!kanji[i]) { i++; continue; }
-        let j = i;
-        while (j < entries.length && kanji[j]) j++;
-        for (let len = Math.min(4, j - i); len >= 2; len--) {
-            for (let start = i; start + len <= j; start++) {
-                const chars = entries.slice(start, start + len).map((entry) => entry.symbol.text);
-                const baseStr = chars.join("");
-                if (ocrWordSet.has(baseStr)) continue;
-
-                const replacements = new Set();
-                for (let offset = 0; offset < chars.length; offset++) {
-                    for (const replacement of (OCR_VISUAL_CONFUSIONS.get(chars[offset]) || [])) {
-                        const changed = chars.slice();
-                        changed[offset] = replacement;
-                        const word = changed.join("");
-                        if (ocrWordSet.has(word)) replacements.add(`${offset}\u0000${word}`);
-                    }
-                }
-                // 一意性は「置換後の語」だけでなく位置も含めて判定する。同じ語を別位置の
-                // 変更で作れる場合も、根拠が一つに定まらないため補正しない。
-                if (replacements.size !== 1) continue;
-                const [encoded] = replacements;
-                const separator = encoded.indexOf("\u0000");
-                candidates.push({
-                    start,
-                    len,
-                    offset: Number(encoded.slice(0, separator)),
-                    word: encoded.slice(separator + 1)
-                });
-            }
-        }
-        i = j;
-    }
-
-    // 長い語の根拠を優先し、重なる短い窓による二重補正を避ける。
-    candidates.sort((a, b) => b.len - a.len);
-    const used = new Uint8Array(entries.length);
-    const touchedWords = new Set();
-    let replaced = 0;
-    for (const candidate of candidates) {
-        let overlaps = false;
-        for (let k = 0; k < candidate.len; k++) {
-            if (used[candidate.start + k]) { overlaps = true; break; }
-        }
-        if (overlaps) continue;
-        const index = candidate.start + candidate.offset;
-        entries[index].symbol.text = candidate.word[candidate.offset];
-        for (let k = 0; k < candidate.len; k++) used[candidate.start + k] = 1;
-        touchedWords.add(entries[index].word);
-        replaced++;
-    }
     rebuildOcrWordTexts(touchedWords);
     return replaced;
 }

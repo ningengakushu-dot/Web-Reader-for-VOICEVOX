@@ -171,7 +171,7 @@ async function startCaptureOcr(tab) {
         // 応答チャネルの都合であることが多く、フォールバックの根拠にはしない。
         console.warn("Background: OCR範囲選択の開始通知に失敗:", err.message);
     }
-    // 範囲をドラッグしている数秒の間に、文字認識エンジン（同梱の辞書とWASM）を
+    // 範囲をドラッグしている数秒の間に、文字認識エンジン（同梱の学習データとWASM）を
     // 先に読み込ませておく。初回だけ発生する待ち時間を利用者に見せないため。
     // 失敗しても本来の経路で改めて生成されるので無視してよい。
     prewarmOcr();
@@ -473,7 +473,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 let offscreenCreating = null;
 
 // 文字認識エンジンの先読み。範囲選択中に offscreen を用意してワーカーを起こしておく。
-// エンジンの初期化（同梱の辞書14MBとWASMの読み込み）は初回だけ数秒かかるため、
+// エンジンの初期化（同梱の日本語学習データとWASMの読み込み）は初回だけ数秒かかるため、
 // 利用者がドラッグしている間に済ませてしまう。失敗しても本来の経路で作り直される。
 async function prewarmOcr() {
     try {
