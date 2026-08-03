@@ -34,6 +34,87 @@ function blocksFor(text, confidences = []) {
 }
 
 {
+    const base = blocksFor('自巳主張', [98, 91, 99, 99]);
+    const targetVariants = [
+        blocksFor('自己主張', [98, 98, 99, 99]),
+        blocksFor('自巳主張', [98, 90, 99, 99])
+    ];
+    const cachedVariants = [
+        blocksFor('自己主張', [98, 98, 99, 99]),
+        blocksFor('自己主張', [98, 97, 99, 99])
+    ];
+    assert.equal(api.fuseOcrSymbols(base, [...targetVariants, ...cachedVariants], {
+        kanji: false,
+        unanimousVariantCount: targetVariants.length,
+        consensusClasses: ['kanji'],
+        consensusIncludesBase: true
+    }), 1);
+    assert.equal(api.buildTextFromBlocks(base), '自己主張',
+        '候補不足時は認識済み画像と元寸を一度に融合し、追加OCRなしで多数一致を成立させる');
+}
+
+{
+    const base = blocksFor('自巳主張', [98, 91, 99, 99]);
+    const cachedOnly = [
+        blocksFor('自己主張', [98, 98, 99, 99]),
+        blocksFor('自己主張', [98, 97, 99, 99])
+    ];
+    assert.equal(api.fuseOcrSymbols(base, cachedOnly, {
+        kanji: false,
+        unanimousVariantCount: 0,
+        consensusClasses: ['kanji'],
+        consensusIncludesBase: true
+    }), 1, '新規倍率0件でも元寸・2倍・二値化の3画像で判定する');
+    assert.equal(api.buildTextFromBlocks(base), '自己主張');
+}
+
+{
+    const base = blocksFor('なだちかな', [98, 98, 91, 98, 98]);
+    const targets = [
+        blocksFor('なだらかな', [98, 98, 99, 98, 98]),
+        blocksFor('なだらかな', [98, 98, 99, 98, 98])
+    ];
+    const supplemental = blocksFor('なだちかな', [98, 98, 99, 98, 98]);
+    assert.equal(api.fuseOcrSymbols(base, [...targets, supplemental], {
+        kanji: false,
+        unanimousVariantCount: targets.length,
+        consensusClasses: ['kanji'],
+        consensusIncludesBase: true
+    }), 1, '補充票が新規倍率2件の全会一致を妨げない');
+    assert.equal(api.buildTextFromBlocks(base), 'なだらかな');
+}
+
+{
+    const base = blocksFor('ハバ', [98, 94]);
+    const emptyTarget = [];
+    const target = blocksFor('ハパ');
+    const supplemental = blocksFor('ハパ');
+    assert.equal(api.fuseOcrSymbols(base, [emptyTarget, target, supplemental], {
+        kanji: false,
+        unanimousVariantCount: 2,
+        consensusClasses: ['kanji'],
+        consensusIncludesBase: true
+    }), 0, '空の新規候補があっても補充候補を全会一致へ繰り上げない');
+    assert.equal(api.buildTextFromBlocks(base), 'ハバ');
+}
+
+{
+    const base = blocksFor('甲乙', [91, 91]);
+    const variants = [
+        blocksFor('丙丁', [99, 99]),
+        blocksFor('丙戊', [99, 90]),
+        blocksFor('丙丁', [99, 99])
+    ];
+    assert.equal(api.fuseOcrSymbols(base, variants, {
+        kanji: false,
+        unanimousVariantCount: 2,
+        consensusClasses: ['kanji'],
+        consensusIncludesBase: true
+    }), 1, '先に全会一致で変えた文字を隣接文字の新しいアンカーにしない');
+    assert.equal(api.buildTextFromBlocks(base), '丙乙');
+}
+
+{
     const base = blocksFor('巳年生', [98, 98, 98]);
     const variants = [
         blocksFor('己年生', [91, 98, 98]),

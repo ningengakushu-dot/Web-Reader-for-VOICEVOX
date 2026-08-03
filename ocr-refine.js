@@ -182,8 +182,9 @@ function alignOcrVariants(baseEntries, otherBlocksList) {
     const aligned = [];
     for (const otherBlocks of otherBlocksList) {
         const otherEntries = collectOcrSymbols(otherBlocks);
-        if (!otherEntries.length) continue;
-        aligned.push(alignOcrSymbols(baseEntries, otherEntries));
+        // 空認識も空の対応表として残す。候補を落とすと、後段の
+        // unanimousVariantCount（新規倍率と補充候補の境界）がずれてしまう。
+        aligned.push(otherEntries.length ? alignOcrSymbols(baseEntries, otherEntries) : []);
     }
     return aligned;
 }
@@ -208,15 +209,30 @@ function classifyOcrSymbol(text) {
 //     元文字と次点候補をマージン以上上回る場合に置き換える。前後どちらかの文字が
 //     baseと一致する候補だけを数え、編集距離整列の位置ずれを誤って票にしない。
 // (3) 低確信度の漢字: 確信度の合計が上回る漢字へ置き換える（従来からの機能）。
-// options.kanji / options.unanimous / options.consensus で対象を切り替える（既定は全て）。
+// options.kanji / options.unanimous / options.consensus で対象を切り替える。
+// options.unanimousVariantCount は補充前の候補だけで全会一致を評価し、
+// options.consensusClasses / options.consensusIncludesBase は候補不足時の強い多数一致を
+// 文字種限定・元寸を含む票決へ切り替える（いずれも指定なしなら従来動作）。
 // 置換した文字数を返す（0 なら呼び出し側は元のテキストをそのまま使う）。
 function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
     const useKanji = options.kanji !== false;
     const useUnanimous = options.unanimous !== false;
     const useConsensus = options.consensus !== false;
+    const consensusClasses = options.consensusClasses
+        ? new Set(options.consensusClasses) : null;
+    const unanimousVariantCount = Number.isInteger(options.unanimousVariantCount)
+        ? Math.max(0, options.unanimousVariantCount) : null;
+    const consensusIncludesBase = options.consensusIncludesBase === true;
     const isKanji = (t) => OCR_KANJI_ONE_RE.test(t);
     const baseEntries = collectOcrSymbols(baseBlocks);
     if (!baseEntries.length) return 0;
+    // 同じforEach内の先行置換を、隣の文字の位置アンカーや元寸票に使わない。
+    // 判定開始時の文字とconfidenceを固定し、各文字を独立に評価する。
+    const baseSnapshot = baseEntries.map((entry) => ({
+        text: entry.symbol.text,
+        confidence: Number(entry.symbol.confidence),
+        line: entry.line
+    }));
 
     const variantMaps = [];
     for (const pairs of alignOcrVariants(baseEntries, otherBlocksList)) {
@@ -228,11 +244,11 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
     }
 
     const hasStableNeighbor = (map, index) => {
-        const entry = baseEntries[index];
+        const entry = baseSnapshot[index];
         for (const offset of [-1, 1]) {
-            const neighbor = baseEntries[index + offset];
+            const neighbor = baseSnapshot[index + offset];
             if (neighbor && neighbor.line === entry.line
-                && map.get(index + offset)?.text === neighbor.symbol.text) return true;
+                && map.get(index + offset)?.text === neighbor.text) return true;
         }
         return false;
     };
@@ -244,9 +260,12 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
         const alts = variantMaps.map((map) => map.get(index)).filter(Boolean);
 
         // (1) 全会一致による置換。確信度ではゲートしない（上のコメント参照）。
-        if (useUnanimous && alts.length >= 2) {
-            const first = alts[0].text;
-            if (first !== symbol.text && alts.every((a) => a.text === first)) {
+        const unanimousAlts = (unanimousVariantCount == null
+            ? variantMaps : variantMaps.slice(0, unanimousVariantCount))
+            .map((map) => map.get(index)).filter(Boolean);
+        if (useUnanimous && unanimousAlts.length >= 2) {
+            const first = unanimousAlts[0].text;
+            if (first !== symbol.text && unanimousAlts.every((a) => a.text === first)) {
                 symbol.text = first;
                 touchedWords.add(entry.word);
                 replaced++;
@@ -255,10 +274,22 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
         }
 
         // (2) 同じ種類の文字について、位置が前後の文字で裏付けられた倍率候補だけを投票する。
-        if (useConsensus && alts.length >= 3) {
-            const baseClass = classifyOcrSymbol(symbol.text);
+        const consensusEvidenceCount = alts.length + (consensusIncludesBase ? 1 : 0);
+        if (useConsensus && consensusEvidenceCount >= 3) {
+            const original = baseSnapshot[index];
+            const baseClass = classifyOcrSymbol(original.text);
             const votes = new Map();
-            if (baseClass) {
+            if (baseClass && (!consensusClasses || consensusClasses.has(baseClass))) {
+                if (consensusIncludesBase) {
+                    const confidence = original.confidence;
+                    if (Number.isFinite(confidence)) {
+                        votes.set(original.text, {
+                            text: original.text,
+                            count: 1,
+                            total: confidence
+                        });
+                    }
+                }
                 variantMaps.forEach((map) => {
                     const candidate = map.get(index);
                     if (!candidate || classifyOcrSymbol(candidate.text) !== baseClass
@@ -277,10 +308,10 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
             })).sort((a, b) => (b.count - a.count) || (b.average - a.average));
             const top = ranked[0];
             const runnerUp = ranked[1];
-            const baseConfidence = Number.isFinite(Number(symbol.confidence))
-                ? Number(symbol.confidence) : 0;
+            const baseConfidence = Number.isFinite(original.confidence)
+                ? original.confidence : 0;
             const comparison = Math.max(baseConfidence, runnerUp?.average || 0);
-            if (top && top.text !== symbol.text && top.count >= 2
+            if (top && top.text !== original.text && top.count >= 2
                 && (!runnerUp || top.count > runnerUp.count)
                 && top.average >= OCR_CONSENSUS_MIN_CONFIDENCE
                 && top.average >= comparison + OCR_CONSENSUS_CONFIDENCE_MARGIN) {

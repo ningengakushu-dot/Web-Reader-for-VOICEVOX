@@ -249,6 +249,8 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     const glyphSize = estimateGlyphSizeFromBlocks(primary.data.blocks, orientation);
     // 2倍拡大版は「全文の乗り換え候補」と「文字単位融合の素材」の両方に使うため保持する
     let upscaled2x = null;
+    // 二値化版も、時間予算で新規倍率が不足したときの画像証拠として保持する。
+    let preprocessedData = null;
 
     // 文字が小さい場合のみ、2倍拡大版でも認識して良い方を採用する
     // （縮小表示されたページ等の解像度不足による漢字誤認識への対策。
@@ -274,6 +276,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         const prepared = prepareOcrCanvas(sourceCanvas);
         if (prepared !== sourceCanvas) {
             const preprocessed = await primaryWorker.recognize(prepared, {}, outputFields);
+            preprocessedData = preprocessed.data;
             if (preprocessed.data.confidence >= best.confidence + OCR_PREPROCESS_ADOPT_MARGIN) {
                 best = preprocessed.data;
             }
@@ -349,9 +352,27 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
             scales.push(scale);
         }
         const others = await collectUpscaledVariants(scales);
+        // 新規倍率が3件未満なら、既に認識した2倍・二値化画像を候補へ補う。元寸も1票に
+        // 含めるため、低速端末で新規倍率が0件でも2つの先行結果があれば3画像で判定できる。
+        // 全会一致は新規倍率だけで評価し、補充候補は漢字の強い多数一致にしか使わない。
+        const variants = others.slice();
+        if (others.length < 3) {
+            const seen = new Set(variants);
+            for (const data of [upscaled2x, preprocessedData]) {
+                if (data?.blocks && data !== best && !seen.has(data.blocks)) {
+                    seen.add(data.blocks);
+                    variants.push(data.blocks);
+                }
+            }
+        }
         // 確信度合計による漢字の融合はこの領域では悪化する（実測）ため行わない。
-        // 全会一致と、前後位置が安定した強い多数一致だけを適用する。
-        const fused = others.length ? fuseOcrSymbols(best.blocks, others, { kanji: false }) : 0;
+        // 整列と融合は候補全体に対して一度だけ行う。
+        const fused = variants.length ? fuseOcrSymbols(best.blocks, variants, {
+            kanji: false,
+            unanimousVariantCount: others.length,
+            consensusClasses: others.length < 3 ? ["kanji"] : null,
+            consensusIncludesBase: others.length < 3
+        }) : 0;
         if (fused > 0) {
             text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
         }
