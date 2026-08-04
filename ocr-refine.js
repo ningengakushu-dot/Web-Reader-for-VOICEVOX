@@ -344,3 +344,70 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
     rebuildOcrWordTexts(touchedWords);
     return replaced;
 }
+
+// 二値化版を全文採用した後、同じ位置の漢字についてだけ元寸grayと2倍grayを照合する。
+// 二つのgrayが同じ文字を二値化版以上のconfidenceで支持する場合、または元寸grayが
+// 二つの加工結果をマージン以上上回る場合だけ元寸文字を復元する。単語辞書は使わず、
+// 仮名・句読点・行分割・挿入欠落を含む二値化版のそれ以外の改善は変更しない。
+function protectOcrSymbolsFromWholeSwap(baseBlocks, referenceBlocks, corroboratingBlocks) {
+    const baseEntries = collectOcrSymbols(baseBlocks);
+    if (!baseEntries.length) return 0;
+
+    const aligned = alignOcrVariants(baseEntries, [referenceBlocks, corroboratingBlocks]);
+    if (aligned.length !== 2 || !aligned[0].length || !aligned[1].length) return 0;
+
+    const maps = aligned.map((pairs) => {
+        const map = new Map();
+        for (const [index, symbol] of pairs) {
+            if (!map.has(index)) map.set(index, symbol);
+        }
+        return map;
+    });
+    const [referenceMap, corroboratingMap] = maps;
+    const snapshot = baseEntries.map((entry) => ({ text: entry.symbol.text, line: entry.line }));
+    const hasStableNeighbor = (map, index) => {
+        const entry = snapshot[index];
+        for (const offset of [-1, 1]) {
+            const neighbor = snapshot[index + offset];
+            if (neighbor && neighbor.line === entry.line
+                && map.get(index + offset)?.text === neighbor.text) return true;
+        }
+        return false;
+    };
+
+    const touchedWords = new Set();
+    let replaced = 0;
+    baseEntries.forEach((entry, index) => {
+        const proposed = entry.symbol;
+        const reference = referenceMap.get(index);
+        const corroborating = corroboratingMap.get(index);
+        if (!reference || !corroborating || reference.text === proposed.text
+            || classifyOcrSymbol(proposed.text) !== "kanji"
+            || classifyOcrSymbol(reference.text) !== "kanji"
+            || !hasStableNeighbor(referenceMap, index)
+            || !hasStableNeighbor(corroboratingMap, index)) return;
+
+        const proposedConfidence = Number(proposed.confidence);
+        const referenceConfidence = Number(reference.confidence);
+        const corroboratingConfidence = Number(corroborating.confidence);
+        if (![proposedConfidence, referenceConfidence, corroboratingConfidence].every(Number.isFinite)) return;
+
+        let shouldRestore = false;
+        if (corroborating.text === reference.text) {
+            shouldRestore = (referenceConfidence + corroboratingConfidence) / 2
+                >= proposedConfidence;
+        } else if (corroborating.text === proposed.text) {
+            const processedAverage = (proposedConfidence + corroboratingConfidence) / 2;
+            shouldRestore = referenceConfidence
+                >= processedAverage + OCR_CONSENSUS_CONFIDENCE_MARGIN;
+        }
+        if (!shouldRestore) return;
+
+        proposed.text = reference.text;
+        touchedWords.add(entry.word);
+        replaced++;
+    });
+
+    rebuildOcrWordTexts(touchedWords);
+    return replaced;
+}

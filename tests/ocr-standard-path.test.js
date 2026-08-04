@@ -26,6 +26,10 @@ assert.match(common, /async function recognizeWithOrientation\(sourceCanvas, wor
     'OCRは精度基準となる通常経路だけを公開する');
 assert.match(common, /best\.confidence < OCR_UPSCALE_SWAP_MAX_BASE_CONFIDENCE/,
     '通常OCRの拡大版採用条件を維持する');
+assert.match(common, /best === preprocessedData[\s\S]*protectOcrSymbolsFromWholeSwap/,
+    '二値化版を全文採用した後に危険な漢字衝突だけを局所比較する');
+assert.match(common, /protectOcrSymbolsFromWholeSwap\([\s\S]*best\.blocks, primary\.data\.blocks, upscaled2x\.blocks/,
+    '元寸・2倍gray・二値化の取得済み3画像だけを比較する');
 assert.match(common, /for \(const data of \[upscaled2x, preprocessedData\]\)/,
     '候補不足時に認識済み2倍版と二値化版を画像証拠として再利用する');
 assert.match(common, /unanimousVariantCount: others\.length/,

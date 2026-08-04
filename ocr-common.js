@@ -305,6 +305,20 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         ? buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize)
         : best.text;
 
+    // 信頼できる元寸から二値化版へ全文乗り換えした場合も、二値化版のレイアウト・
+    // 仮名・句読点・挿入欠落の改善はそのまま維持する。その上で、同じ位置の漢字だけを
+    // 元寸gray・2倍gray・二値化の局所confidenceで比較し、全文平均に隠れた上書き事故を戻す。
+    // 空認識を含め有効な比較ができない場合は0件となり、従来の二値化結果を変更しない。
+    if (best === preprocessedData
+        && primary.data.confidence >= OCR_UPSCALE_SWAP_MAX_BASE_CONFIDENCE
+        && upscaled2x?.blocks) {
+        const protectedCount = protectOcrSymbolsFromWholeSwap(
+            best.blocks, primary.data.blocks, upscaled2x.blocks);
+        if (protectedCount > 0) {
+            text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
+        }
+    }
+
     // 認識し直した拡大版を集める共通処理。予算（refinesLeft）と面積上限を守り、
     // 既に持っている2倍拡大版は予算を使わずに再利用する。
     const collectUpscaledVariants = async (scales) => {
