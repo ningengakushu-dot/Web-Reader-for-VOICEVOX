@@ -64,12 +64,15 @@ function createOcrWorker(lang, logger) {
         logger: logger || (() => {})
     }).then(async (worker) => {
         // 縦書きモデルには「縦書きテキストの単一ブロック」のセグメンテーションを指定する
-        // （既定のままだと縦の行（列）分割が正しく行われない）
-        if (lang === "jpn_vert") {
-            await worker.setParameters({
-                tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
-            });
-        }
+        // （既定のままだと縦の行（列）分割が正しく行われない）。
+        // 横書きモデルはTesseract既定のSINGLE_BLOCK(6)と同値を明示設定する。値は
+        // 変えないが、局所漢字再確認がPSMを一時変更した後の復元先（同じ定数）と
+        // 生成時の値が一致することをコード上で保証するため。
+        await worker.setParameters({
+            tessedit_pageseg_mode: lang === "jpn_vert"
+                ? Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
+                : Tesseract.PSM.SINGLE_BLOCK
+        });
         return worker;
     });
 
@@ -429,6 +432,11 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     // だけ到達不能になることも防ぐ。未ロードでも関数側で必ずロードする（プールの
     // 温まり具合で同じ画像の出力が変わらないようにする）。生成はtry直前に置き、
     // 合流(finally)まで例外を挟まず必ずawaitされるようにする。
+    // 【不変条件】発火条件「confidence >= OCR_CONFIDENCE_ACCEPT || resolvedFullData?.jpn」は
+    // 副方向認識（best.confidence < OCR_CONFIDENCE_ACCEPT のときだけ、かつ
+    // resolvedFullDataがあれば再利用して認識しない）と排他であることを保証している。
+    // これを崩すと同一jpn workerへの同時recognize（PSM=SINGLE_CHAR混線）が起こる。
+    // 片側だけ条件や閾値を変更してはいけない。
     const localRescanPromise = orientation === "vertical" && primary.data.blocks
         && (primary.data.confidence >= OCR_CONFIDENCE_ACCEPT || resolvedFullData?.jpn)
         && refinable && canRefine()

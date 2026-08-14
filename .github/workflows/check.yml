@@ -41,6 +41,15 @@ jobs:
       - name: OCR画像証拠の多数一致融合検査
         run: node tests/ocr-consensus-fusion.test.js
 
+      - name: OCR標準経路の構造検査
+        run: node tests/ocr-standard-path.test.js
+
+      - name: OCR局所漢字再確認の配線検査
+        run: node tests/ocr-local-glyph-rescan.test.js
+
+      - name: OCR方向判定フォールバックの検査
+        run: node tests/ocr-orientation-fallback.test.js
+
       - name: OCRモデルとLSTM専用コアの互換性検査
         run: node tests/tessdata-compatibility.test.js
 

@@ -118,8 +118,14 @@ function createContext({ fail = false, failRestore = false } = {}) {
         const finishCreates = [];
         let oldTerminated = 0;
         let newTerminated = 0;
-        const oldWorker = { terminate: async () => { oldTerminated++; } };
-        const newWorker = { terminate: async () => { newTerminated++; } };
+        const oldWorker = {
+            setParameters: async () => {},
+            terminate: async () => { oldTerminated++; }
+        };
+        const newWorker = {
+            setParameters: async () => {},
+            terminate: async () => { newTerminated++; }
+        };
         const context = vm.createContext({
             console,
             Promise,
@@ -133,7 +139,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
             clearTimeout,
             chrome: { runtime: { getURL: (value) => value } },
             Tesseract: {
-                PSM: { SINGLE_BLOCK_VERT_TEXT: '5' },
+                PSM: { SINGLE_BLOCK_VERT_TEXT: '5', SINGLE_BLOCK: '6' },
                 createWorker: () => new Promise((resolve) => { finishCreates.push(resolve); })
             }
         });
