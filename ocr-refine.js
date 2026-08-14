@@ -206,6 +206,22 @@ function forEachDeletedOcrSequence(entries, deleteCount, callback) {
 
 const OCR_INSERTION_PRUNE_MAX_LINE_LENGTH = 64;
 
+// 1列の削除候補は最大 C(64,3)=41,664 通りで、列挙は同期処理として約340msかかる（実測）。
+// 列数には上限がないため、水増し列を多数含む画像（細工された入力を含む）では
+// 列数×候補数がそのままメインスレッド（音声再生も担うoffscreen）のブロック時間になる。
+// 1回の呼び出しで列挙する候補の総数を制限し、超過する列は安全側（無変更）で飛ばす。
+// 実文書の列（20〜30字・削除1〜3）は列あたり数千候補で、この上限には掛からない。
+const OCR_INSERTION_PRUNE_MAX_TOTAL_CANDIDATES = 50000;
+
+// C(length, deleteCount)。deleteCount は1〜3に限られる。
+function countDeletedOcrSequenceCandidates(length, deleteCount) {
+    let result = 1;
+    for (let index = 0; index < deleteCount; index++) {
+        result = (result * (length - index)) / (index + 1);
+    }
+    return result;
+}
+
 function hasLikelyOcrLineInsertions(blocks, orientation, glyphSize) {
     if (orientation !== "vertical" || !(glyphSize > 0)) return false;
     const lines = collectComparableOcrLines(blocks, orientation);
@@ -262,6 +278,7 @@ function pruneOcrLineInsertions(baseBlocks, otherBlocksList, orientation, glyphS
     if (!(nominalPitch >= glyphSize * 0.8 && nominalPitch <= glyphSize * 1.5)) return 0;
 
     const removals = new Set();
+    let candidateBudget = OCR_INSERTION_PRUNE_MAX_TOTAL_CANDIDATES;
     baseLines.forEach((baseLine, lineIndex) => {
         const baseLength = baseLine.entries.length;
         if (baseLength < 20 || baseLength > OCR_INSERTION_PRUNE_MAX_LINE_LENGTH) return;
@@ -274,6 +291,10 @@ function pruneOcrLineInsertions(baseBlocks, otherBlocksList, orientation, glyphS
         const usable = variantTexts.filter((chars) =>
             chars.length >= physicalCount && chars.length <= physicalCount + 3);
         if (usable.length < 2) return;
+        // 呼び出し全体の候補総数を予算内に収める（入力順に消費するため決定的）。
+        const candidateCount = countDeletedOcrSequenceCandidates(baseLength, deleteCount);
+        if (candidateCount > candidateBudget) return;
+        candidateBudget -= candidateCount;
 
         let best = null;
         let bestSupport = -1;

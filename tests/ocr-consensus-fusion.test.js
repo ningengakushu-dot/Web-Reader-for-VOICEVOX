@@ -64,6 +64,35 @@ function blocksFor(text, confidences = []) {
     assert.equal(api.buildTextFromBlocks(base), [expected, baseText, expected].join('\n'));
 }
 
+{
+    // 候補総数の予算: C(63,3)=39,711通りの列が2本あると2本目が予算(50,000)を超える。
+    // 通常文書では到達しない上限のため、超過列は安全側（無変更）で飛ばされることを固定する。
+    const correct = '漢'.repeat(60);
+    const insertAt = (text, indices, char) => {
+        let result = text;
+        for (const index of [...indices].sort((a, b) => b - a)) {
+            result = result.slice(0, index) + char + result.slice(index);
+        }
+        return result;
+    };
+    const bloatA = insertAt(correct, [10, 30, 50], 'ち');
+    const bloatB = insertAt(correct, [12, 32, 52], 'ち');
+    const shiftedA = insertAt(correct, [0, 20, 40], 'ち');
+    const shiftedB = insertAt(correct, [2, 22, 42], 'ち');
+    const spans = [1200, 1200, 1200, 1200];
+    const base = blocksForLines([correct, bloatA, bloatB, correct], spans);
+    const removed = api.pruneOcrLineInsertions(base, [
+        blocksForLines([correct, correct, correct, correct], spans),
+        blocksForLines([correct, shiftedA, shiftedB, correct], spans)
+    ], 'vertical', 20);
+    assert.equal(removed, 3,
+        '候補総数が予算内に収まる列だけを補正する');
+    // 列は幾何順（cross座標順）に処理され、先に列挙した列が予算を消費する。
+    assert.equal(api.buildTextFromBlocks(base),
+        [correct, bloatA, correct, correct].join('\n'),
+        '予算を超過した列は列挙せず無変更のまま残す');
+}
+
 function blocksForLines(texts, spans) {
     return [{ paragraphs: [{ lines: texts.map((text, index) => {
         const word = {
