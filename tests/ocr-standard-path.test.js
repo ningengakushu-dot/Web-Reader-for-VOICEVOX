@@ -34,6 +34,8 @@ assert.match(common, /for \(const data of \[upscaled2x, preprocessedData\]\)/,
     '候補不足時に認識済み2倍版と二値化版を画像証拠として再利用する');
 assert.match(common, /unanimousVariantCount: others\.length/,
     '補充候補が既存の全会一致判定へ混ざらない');
+assert.match(common, /fuseOcrSymbols\(best\.blocks, others, \{ consensus: false \}\)/,
+    '実測固定済みの小文字融合経路へ強い多数一致を適用しない');
 assert.match(common, /resolvedFullData\?\.\[primaryLang\][\s\S]*primaryWorker\.recognize/,
     '向き判定の全体認識を本文認識として再利用する');
 assert.match(common, /resolvedFullData\?\.\[secondaryLang\]/,

@@ -566,7 +566,10 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
                 best.blocks, others, bestOrientation, bestGlyphSize);
             // 複数倍率の画像証拠だけで文字を融合する。置換したときだけblocksから組み直す
             // （置換ゼロなら tesseract の出力をそのまま使い、挙動を変えない）。
-            const fused = fuseOcrSymbols(best.blocks, others);
+            // この<18px経路は「全会一致＋低確信度漢字の融合」で実測固定された到達点のため、
+            // ≥18px域向けに導入した強い多数一致は適用しない（適用すると2/3一致だけで
+            // 仮名・数字も置換され、実測済みベースラインの出力が変わる）。
+            const fused = fuseOcrSymbols(best.blocks, others, { consensus: false });
             if (pruned + fused > 0) {
                 text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
             }
