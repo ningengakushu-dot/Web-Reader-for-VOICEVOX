@@ -34,6 +34,28 @@ assert.match(common, /for \(const data of \[upscaled2x, preprocessedData\]\)/,
     '候補不足時に認識済み2倍版と二値化版を画像証拠として再利用する');
 assert.match(common, /unanimousVariantCount: others\.length/,
     '補充候補が既存の全会一致判定へ混ざらない');
+assert.match(common, /resolvedFullData\?\.\[primaryLang\][\s\S]*primaryWorker\.recognize/,
+    '向き判定の全体認識を本文認識として再利用する');
+assert.match(common, /resolvedFullData\?\.\[secondaryLang\]/,
+    '向き判定で取得済みの副方向結果も再認識せず再利用する');
+assert.match(common, /pruneOcrLineInsertions/,
+    '倍率間で位置が揺れる重複文字を列構造から除去する');
+assert.match(common, /refineVerticalGlyphsWithLoadedHorizontalWorker/,
+    '短い縦列は準備済みの独立モデルだけで局所確認する');
+assert.match(common, /localRescanPromise = orientation === "vertical"[\s\S]*canRefine\(\)[\s\S]*refineVerticalGlyphsWithLoadedHorizontalWorker/,
+    '短列の局所確認は準備済み別workerで全文精錬と並行開始する');
+assert.match(common, /await localRescanPromise/,
+    '並行局所確認の完了を最終テキストへ反映する');
+assert.match(common, /upscaled2x = [\s\S]*await recognizePreprocessed\(\)[\s\S]*recognizePreprocessed\(true\)/,
+    '重複挿入時も既存2x救済を先に維持し、必要なら二値化証拠を追加する');
+assert.match(common, /if \(ensureStructuralEvidence\)[\s\S]*structuralUpscaledData\.size >= 2[\s\S]*structuralUpscaledData\.set/,
+    '重複削除には予算枯渇時も独立した倍率証拠を最低2件集める');
+assert.match(common, /finally[\s\S]*localReplacements = await localRescanPromise[\s\S]*applyVerticalGlyphRescanReplacements/,
+    '局所OCRは例外時もworker復元まで合流し、全文融合後に置換案だけを適用する');
+assert.match(common + read('ocr-image.js'), /OCR_ORIENTATION_FULL_COMPARE_MAX_AREA[\s\S]*pickOcrTextPatch/,
+    '全画面級の曖昧画像は全体二重認識せず小領域比較へ戻す');
+assert.doesNotMatch(common + read('ocr-refine.js'), /自己主張|ジミシュチョウ|彼らちは|普段かちら/,
+    '特定語句の辞書・置換規則をOCR実行コードへ入れない');
 
 const dom = read('dom-text.js');
 assert.match(dom, /role === "paren" \|\| role === "reading"/,

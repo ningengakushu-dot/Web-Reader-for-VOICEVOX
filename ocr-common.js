@@ -96,27 +96,127 @@ function createOcrWorker(lang, logger) {
  */
 function createOcrWorkerPool(logger) {
     const workerPromises = {};
-    return {
-        get(lang) {
-            if (!workerPromises[lang]) {
-                workerPromises[lang] = createOcrWorker(lang, logger).catch((err) => {
-                    // 失敗したPromiseをキャッシュしない（次回のOCRで再試行できるようにする）
+    const readyWorkers = {};
+    const get = (lang) => {
+        if (!workerPromises[lang]) {
+            const created = createOcrWorker(lang, logger);
+            let tracked;
+            tracked = created.then((worker) => {
+                if (workerPromises[lang] === tracked) readyWorkers[lang] = worker;
+                return worker;
+            }).catch((err) => {
+                // 失敗したPromiseをキャッシュしない（次回のOCRで再試行できるようにする）
+                if (workerPromises[lang] === tracked) {
                     workerPromises[lang] = null;
-                    throw err;
-                });
-            }
-            return workerPromises[lang];
-        },
+                    readyWorkers[lang] = null;
+                }
+                throw err;
+            });
+            workerPromises[lang] = tracked;
+        }
+        return workerPromises[lang];
+    };
+    // 精度補助のためだけに14MBの別言語モデルを新規ロードしたり初期化完了を待ったり
+    // しないよう、準備済みworkerだけを参照する。関数単体を渡しても利用できる。
+    get.peek = (lang) => readyWorkers[lang] || null;
+    get.invalidate = (lang, expectedWorker = null) => {
+        const worker = readyWorkers[lang];
+        if (expectedWorker && worker !== expectedWorker) return false;
+        const promise = workerPromises[lang];
+        workerPromises[lang] = null;
+        readyWorkers[lang] = null;
+        if (promise) promise.then((item) => item.terminate()).catch(() => {});
+        return true;
+    };
+    return {
+        get,
         // ハングした可能性のあるワーカーを破棄し、次回のOCRで作り直させる
         // （ページ離脱時・認識タイムアウト時・一定時間の未使用時に呼ぶ）。
         terminate() {
             for (const lang of Object.keys(workerPromises)) {
                 const promise = workerPromises[lang];
                 workerPromises[lang] = null;
+                readyWorkers[lang] = null;
                 if (promise) promise.then((worker) => worker.terminate()).catch(() => {});
             }
         }
     };
+}
+
+/**
+ * 全文用の縦書きモデルとは独立した横書きモデルで、短い縦列の漢字だけを再確認する。
+ * 横書きworkerが準備済みの場合に限り、gray 2.5倍・Otsu二値化2倍・gray 3倍が
+ * 強く一致したセルだけを置換する。辞書・語彙・文脈には依存しない。
+ */
+async function refineVerticalGlyphsWithLoadedHorizontalWorker(
+    grayCanvas, blocks, blockScale, workerProvider) {
+    const loadedWorker = workerProvider.peek?.("jpn");
+    if (!loadedWorker) return [];
+    const targets = collectVerticalGlyphRescanTargets(
+        blocks, blockScale, grayCanvas.width, grayCanvas.height);
+    if (!targets.length) return [];
+
+    const replacements = [];
+    let worker;
+    try {
+        worker = loadedWorker;
+        await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_CHAR });
+        for (const target of targets) {
+            const raw = cropOcrCanvas(
+                grayCanvas, target.x, target.y, target.width, target.height, 1);
+            const binaryCanvas = prepareOcrCanvas(raw);
+            if (binaryCanvas === raw) continue;
+            const grayGlyphCanvas = upscaleOcrCanvas(raw, 2.5);
+            const grayResult = await worker.recognize(
+                grayGlyphCanvas, {}, { text: true, blocks: true });
+            const binaryResult = await worker.recognize(
+                binaryCanvas, {}, { text: true, blocks: true });
+            const gray = extractSingleHanEvidence(
+                grayResult.data.blocks, grayGlyphCanvas.width, grayGlyphCanvas.height);
+            const binary = extractSingleHanEvidence(
+                binaryResult.data.blocks, binaryCanvas.width, binaryCanvas.height);
+            let replacement = null;
+            if (gray && binary && gray.text === binary.text
+                && gray.text !== target.symbol.text
+                && gray.confidence >= 85 && binary.confidence >= 85) {
+                const thirdCanvas = upscaleOcrCanvas(raw, 3);
+                const thirdResult = await worker.recognize(
+                    thirdCanvas, {}, { text: true, blocks: true });
+                const third = extractSingleHanEvidence(
+                    thirdResult.data.blocks, thirdCanvas.width, thirdCanvas.height);
+                replacement = selectVerticalGlyphRescanReplacement(
+                    target.symbol, gray, binary, third);
+            }
+            if (replacement) replacements.push({ ...target, replacement });
+        }
+    } catch (error) {
+        return [];
+    } finally {
+        if (worker) {
+            try {
+                await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.AUTO });
+            } catch (error) {
+                // SINGLE_CHARのまま残った共有workerを次回全文OCRへ使わせない。
+                if (!workerProvider.invalidate?.("jpn", worker)) {
+                    try { await worker.terminate?.(); } catch (terminateError) { /* 破棄を優先 */ }
+                }
+            }
+        }
+    }
+    // 共有blocksは全文融合も変更するため、ここでは書き換えず置換案だけを返す。
+    // 呼び出し側が全処理を合流した後、採用された原寸blocksへ一度だけ適用する。
+    return replacements;
+}
+
+function applyVerticalGlyphRescanReplacements(replacements) {
+    if (!replacements?.length) return 0;
+    const touchedWords = new Set();
+    for (const target of replacements) {
+        target.symbol.text = target.replacement;
+        touchedWords.add(target.word);
+    }
+    rebuildOcrWordTexts(touchedWords);
+    return replacements.length;
 }
 
 // ===== 認識の制御（どの前処理・どの方向の結果を採用するか） =====
@@ -180,20 +280,47 @@ const OCR_REFINE_TIME_BUDGET_MS = 15000;
 // 一方、範囲をドラッグした選択は 0.5Mpx 程度なので通常どおり精錬される。
 const OCR_REFINE_MAX_AREA = 1200000;
 
+// 画素統計では向きを決めきれない小～中規模画像は、局所パッチの偏りや選択位置に
+// 左右されないよう範囲全体を縦横モデルで認識する。方向間confidenceは常に比較可能とは
+// 限らないため、明確な差が付いた場合だけ切り替える。大画像は従来の小領域比較を使う。
+// 実測（縦書き本文の選択左端を6pxずつ移動）では、従来はCER 2.38%→99.21%と
+// 破綻したが、全体比較では横70〜72 / 縦88〜89と安定して正しい向きを選べた。
+const OCR_ORIENTATION_FULL_CONFIDENCE_MARGIN = 8;
+
 /**
- * 本文パッチを横書き・縦書きの両モデルで認識し、確信度の高い方の向きを返す。
- * 画素の統計では分けられない中間帯でだけ呼ぶ（1回の認識が2つ増えるため）。
- * @returns {Promise<"horizontal"|"vertical"|null>} 判定できないときは null
+ * 比較用画像を横書き・縦書きの両モデルで並行認識し、確信度差が明確な側を返す。
+ * 比較用画像が選択範囲全体の場合だけ、両結果を後段の本文・副方向候補として再利用する。
+ * @returns {Promise<{orientation: "horizontal"|"vertical", fullData: object|null,
+ * elapsedMs: number}|null>} 判定できないときは null
  */
-async function resolveOcrOrientation(grayCanvas, workerProvider) {
+async function resolveOcrOrientation(
+    comparisonCanvas, workerProvider, outputFields, fallbackOrientation,
+    confidenceMargin = OCR_ORIENTATION_FULL_CONFIDENCE_MARGIN, reuseAsFull = true) {
     try {
-        const patch = pickOcrTextPatch(grayCanvas, OCR_ORIENTATION_PATCH_PX);
-        if (!patch) return null;
-        const horizontalWorker = await workerProvider("jpn");
-        const verticalWorker = await workerProvider("jpn_vert");
-        const h = await horizontalWorker.recognize(patch, {}, { text: true });
-        const v = await verticalWorker.recognize(patch, {}, { text: true });
-        return h.data.confidence >= v.data.confidence ? "horizontal" : "vertical";
+        const [horizontalWorker, verticalWorker] = await Promise.all([
+            workerProvider("jpn"),
+            workerProvider("jpn_vert")
+        ]);
+        // 曖昧入力で局所パッチや暫定方向を確定扱いすると、選択位置の数px差で
+        // 縦書き全体を横書きに誤転換する。2認識は別ワーカーなので並行実行し、
+        // 採用側のdataを後段のprimaryとして再利用して認識回数を増やさない。
+        const startedAt = Date.now();
+        const [horizontal, vertical] = await Promise.all([
+            horizontalWorker.recognize(comparisonCanvas, {}, outputFields),
+            verticalWorker.recognize(comparisonCanvas, {}, outputFields)
+        ]);
+        const difference = Math.abs(horizontal.data.confidence - vertical.data.confidence);
+        const orientation = difference >= confidenceMargin
+            ? (horizontal.data.confidence >= vertical.data.confidence ? "horizontal" : "vertical")
+            : fallbackOrientation;
+        return {
+            orientation,
+            fullData: reuseAsFull ? {
+                jpn: horizontal.data,
+                jpn_vert: vertical.data
+            } : null,
+            elapsedMs: Math.max(1, Date.now() - startedAt)
+        };
     } catch (error) {
         // 判定に失敗しても本来の認識は続ける
         return null;
@@ -218,24 +345,42 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
 
     const detected = detectTextOrientation(sourceCanvas);
     let orientation = detected.orientation;
+    let resolvedFullData = null;
+    let resolvedFullMs = 0;
     if (!detected.confident) {
-        // 画素の統計だけでは決められない範囲。本文の密な小領域を両方のモデルで
-        // 認識し、確信度の高い方を採る（理由は OCR_ORIENTATION_SURE_* のコメント参照）。
-        const resolved = await resolveOcrOrientation(grayCanvas, workerProvider);
-        if (resolved) orientation = resolved;
+        // 小～中規模の選択は局所パッチの偏りを避けるため全体を比較する。全画面級は
+        // CPU・メモリ回帰を避け、従来の小領域比較を維持する。
+        const compareFull = grayCanvas.width * grayCanvas.height
+            <= OCR_ORIENTATION_FULL_COMPARE_MAX_AREA;
+        const comparisonCanvas = compareFull
+            ? grayCanvas : pickOcrTextPatch(grayCanvas, OCR_ORIENTATION_PATCH_PX);
+        const resolved = comparisonCanvas ? await resolveOcrOrientation(
+            comparisonCanvas, workerProvider,
+            compareFull ? outputFields : { text: true }, orientation,
+            compareFull ? OCR_ORIENTATION_FULL_CONFIDENCE_MARGIN : 0,
+            compareFull) : null;
+        if (resolved) {
+            orientation = resolved.orientation;
+            resolvedFullData = resolved.fullData;
+            resolvedFullMs = resolved.elapsedMs;
+        }
     }
     const primaryLang = orientation === "vertical" ? "jpn_vert" : "jpn";
 
     const primaryWorker = await workerProvider(primaryLang);
     const startedAt = Date.now();
-    const primary = await primaryWorker.recognize(grayCanvas, {}, outputFields);
+    const primary = resolvedFullData?.[primaryLang]
+        ? { data: resolvedFullData[primaryLang] }
+        : await primaryWorker.recognize(grayCanvas, {}, outputFields);
     // 精錬1段のコストは元寸の認識1回分とほぼ同じ。予算に何回入るかを
     // 「元寸の所要時間から一度だけ」決め、以降は残り回数だけで判定する。
     // 段ごとに経過時間を見ると、そのときのマシン負荷で打ち切り位置が変わり、
     // 同じ選択なのに結果が変わってしまうため（過去に報告された不安定さの再発を防ぐ）。
     // ただし画面全体のような大きな入力では1段が7〜12秒かかり、1段でも走ると
     // 待ち時間が倍増して体感を大きく損なうため、面積で先に足切りする。
-    const primaryMs = Math.max(1, Date.now() - startedAt);
+    const primaryMs = resolvedFullData
+        ? resolvedFullMs
+        : Math.max(1, Date.now() - startedAt);
     const sourceArea = grayCanvas.width * grayCanvas.height;
     const refinable = sourceArea <= OCR_REFINE_MAX_AREA;
     let refinesLeft = refinable
@@ -249,8 +394,45 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     const glyphSize = estimateGlyphSizeFromBlocks(primary.data.blocks, orientation);
     // 2倍拡大版は「全文の乗り換え候補」と「文字単位融合の素材」の両方に使うため保持する
     let upscaled2x = null;
+    const structuralUpscaledData = new Map();
     // 二値化版も、時間予算で新規倍率が不足したときの画像証拠として保持する。
     let preprocessedData = null;
+    let preprocessedAttempted = false;
+
+    // 曖昧方向の比較で準備済みになった横書きworkerは、この後の縦書き全文workerとは
+    // 独立している。局所セル確認を全文精錬と並行開始し、追加の待ち時間をほぼ生じさせず、
+    // 後段の予算枯渇によって短列補正だけ到達不能になることも防ぐ。
+    const localRescanPromise = orientation === "vertical" && primary.data.blocks
+        && (primary.data.confidence >= OCR_CONFIDENCE_ACCEPT || resolvedFullData?.jpn)
+        && refinable && canRefine()
+        ? refineVerticalGlyphsWithLoadedHorizontalWorker(
+            grayCanvas, primary.data.blocks, 1, workerProvider)
+        : Promise.resolve([]);
+
+    const recognizePreprocessed = async (forceForStructure = false) => {
+        if (preprocessedAttempted || best.confidence >= OCR_PREPROCESS_SKIP_CONFIDENCE
+            || (!canRefine() && !forceForStructure)) return;
+        preprocessedAttempted = true;
+        if (canRefine()) useRefine();
+        const prepared = prepareOcrCanvas(sourceCanvas);
+        if (prepared === sourceCanvas) return;
+        const preprocessed = await primaryWorker.recognize(prepared, {}, outputFields);
+        preprocessedData = preprocessed.data;
+        if (preprocessed.data.confidence >= best.confidence + OCR_PREPROCESS_ADOPT_MARGIN) {
+            best = preprocessed.data;
+        }
+    };
+
+    const likelyVerticalInsertions = hasLikelyOcrLineInsertions(
+        primary.data.blocks, orientation, glyphSize);
+    const ensureStructuralEvidence = likelyVerticalInsertions
+        && sourceArea <= OCR_ORIENTATION_FULL_COMPARE_MAX_AREA;
+
+    let text;
+    let bestOrientation;
+    let bestGlyphSize;
+    let localReplacements = [];
+    try {
 
     // 文字が小さい場合のみ、2倍拡大版でも認識して良い方を採用する
     // （縮小表示されたページ等の解像度不足による漢字誤認識への対策。
@@ -271,26 +453,43 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
 
     // 確信度が十分でなければ、前処理版（拡大＋二値化）でも認識して良い方を採用する
     // （ゴシック体の小さい文字はこちらが大きく改善する）
-    if (best.confidence < OCR_PREPROCESS_SKIP_CONFIDENCE && canRefine()) {
-        useRefine();
-        const prepared = prepareOcrCanvas(sourceCanvas);
-        if (prepared !== sourceCanvas) {
-            const preprocessed = await primaryWorker.recognize(prepared, {}, outputFields);
-            preprocessedData = preprocessed.data;
-            if (preprocessed.data.confidence >= best.confidence + OCR_PREPROCESS_ADOPT_MARGIN) {
-                best = preprocessed.data;
-            }
-        }
+    await recognizePreprocessed();
+    // 物理長が1～3字の重複を示す小画像だけは、通常予算が2xで尽きても二値化候補を
+    // 追加する。2xを置き換えず併用するため、既存の小文字救済精度は維持される。
+    if (ensureStructuralEvidence && !preprocessedAttempted) {
+        await recognizePreprocessed(true);
     }
 
     // それでも明らかに低品質なときだけ、もう一方の組版方向も試す
     if (best.confidence < OCR_CONFIDENCE_ACCEPT) {
         const secondaryLang = primaryLang === "jpn" ? "jpn_vert" : "jpn";
-        const secondaryWorker = await workerProvider(secondaryLang);
-        const secondary = await secondaryWorker.recognize(grayCanvas, {}, outputFields);
-        if (secondary.data.confidence > best.confidence) {
-            best = secondary.data;
+        const resolvedSecondary = resolvedFullData?.[secondaryLang];
+        const secondaryData = resolvedSecondary || (await (async () => {
+            const secondaryWorker = await workerProvider(secondaryLang);
+            return (await secondaryWorker.recognize(grayCanvas, {}, outputFields)).data;
+        })());
+        if (secondaryData.confidence > best.confidence) {
+            best = secondaryData;
             bestLang = secondaryLang;
+        }
+    }
+
+    // 重複挿入が疑われる小画像は、破壊的削除を1候補へ緩和せず、独立した倍率証拠を
+    // 2件だけ追加確保する。採用全文が二値化へ切り替わっても、このMapを共通利用する。
+    if (ensureStructuralEvidence) {
+        const scales = glyphSize < OCR_FUSION_TRIGGER_GLYPH_PX
+            ? OCR_FUSION_SCALES
+            : OCR_CONSENSUS_TARGET_GLYPH_PX.map((target) =>
+                Math.round((target / glyphSize) * 100) / 100);
+        for (const scale of scales) {
+            if (structuralUpscaledData.size >= 2) break;
+            if (scale === 1 || scale === 2 || scale < 0.4 || scale > 3
+                || structuralUpscaledData.has(scale)) continue;
+            const area = grayCanvas.width * scale * grayCanvas.height * scale;
+            if (area > OCR_FUSION_MAX_AREA) continue;
+            const variant = await primaryWorker.recognize(
+                upscaleOcrCanvas(grayCanvas, scale), {}, outputFields);
+            structuralUpscaledData.set(scale, variant.data);
         }
     }
 
@@ -299,11 +498,27 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     // blocks から組み直す（置換前は best.text をそのまま使うのと等価）。段落境界の「間」は
     // buildTextFromBlocks では付けず、後段の normalizeOcrText が行の内容から推定して補う。
     // 段落境界の推定には best を生んだ画像の座標系・組版方向を使う
-    const bestOrientation = bestLang === "jpn_vert" ? "vertical" : "horizontal";
-    const bestGlyphSize = estimateGlyphSizeFromBlocks(best.blocks, bestOrientation);
-    let text = best.blocks
+    bestOrientation = bestLang === "jpn_vert" ? "vertical" : "horizontal";
+    bestGlyphSize = estimateGlyphSizeFromBlocks(best.blocks, bestOrientation);
+    text = best.blocks
         ? buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize)
         : best.text;
+
+    // 全文採用候補が元寸以外でも、取得済みの別画像2種以上があれば、列の物理文字数と
+    // 候補ごとの挿入位置の違いからLSTMの重複出力だけを先に除く。置換融合より先に
+    // 構造を直し、後段の文字整列が余分なsymbolでずれないようにする。
+    if (best !== primary.data && best.blocks && bestLang === primaryLang) {
+        const structuralVariants = [
+            primary.data, upscaled2x, preprocessedData, ...structuralUpscaledData.values()
+        ]
+            .filter((data) => data?.blocks && data !== best)
+            .map((data) => data.blocks);
+        const pruned = structuralVariants.length
+            ? pruneOcrLineInsertions(
+                best.blocks, structuralVariants, bestOrientation, bestGlyphSize)
+            : 0;
+        if (pruned > 0) text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
+    }
 
     // 信頼できる元寸から二値化版へ全文乗り換えした場合も、二値化版のレイアウト・
     // 仮名・句読点・挿入欠落の改善はそのまま維持する。その上で、同じ位置の漢字だけを
@@ -330,6 +545,8 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
             // （面積の判定を先に置いても結果は変わらない: 2倍拡大版が存在するのは
             //   元画像が OCR_REFINE_MAX_AREA 以下のときだけで、その4倍でも上限に届かない）
             if (scale === 2 && upscaled2x) { others.push(upscaled2x.blocks); continue; }
+            const structuralData = structuralUpscaledData.get(scale);
+            if (structuralData) { others.push(structuralData.blocks); continue; }
             if (!canRefine()) break;
             useRefine();
             const variant = await primaryWorker.recognize(upscaleOcrCanvas(grayCanvas, scale), {}, outputFields);
@@ -343,10 +560,12 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     if (best === primary.data && glyphSize != null && glyphSize < OCR_FUSION_TRIGGER_GLYPH_PX) {
         const others = await collectUpscaledVariants(OCR_FUSION_SCALES);
         if (others.length) {
+            const pruned = pruneOcrLineInsertions(
+                best.blocks, others, bestOrientation, bestGlyphSize);
             // 複数倍率の画像証拠だけで文字を融合する。置換したときだけblocksから組み直す
             // （置換ゼロなら tesseract の出力をそのまま使い、挙動を変えない）。
             const fused = fuseOcrSymbols(best.blocks, others);
-            if (fused > 0) {
+            if (pruned + fused > 0) {
                 text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
             }
         }
@@ -381,15 +600,29 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         }
         // 確信度合計による漢字の融合はこの領域では悪化する（実測）ため行わない。
         // 整列と融合は候補全体に対して一度だけ行う。
+        const pruned = variants.length ? pruneOcrLineInsertions(
+            best.blocks, variants, bestOrientation, bestGlyphSize) : 0;
         const fused = variants.length ? fuseOcrSymbols(best.blocks, variants, {
             kanji: false,
             unanimousVariantCount: others.length,
             consensusClasses: others.length < 3 ? ["kanji"] : null,
             consensusIncludesBase: others.length < 3
         }) : 0;
-        if (fused > 0) {
+        if (pruned + fused > 0) {
             text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
         }
+    }
+
+    } finally {
+        // 途中の全文認識が失敗しても、共有workerのPSM復元が終わるまで次要求へ進ませない。
+        localReplacements = await localRescanPromise;
+    }
+
+    // 全文融合と局所OCRの完了後、採用結果が原寸縦書きの場合だけ置換案を一度適用する。
+    // 別の全文候補へ乗り換えた場合は座標の異なる結果へ推測適用しない。
+    if (localReplacements.length && best === primary.data && bestOrientation === "vertical") {
+        applyVerticalGlyphRescanReplacements(localReplacements);
+        text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
     }
 
     return { text, confidence: best.confidence };

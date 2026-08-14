@@ -68,7 +68,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // 進行状況の通知先タブ（OCR実行中のみ設定）
 let ocrProgressTabId = null;
-// 1回のOCR要求で recognize は最大6回走る（拡大版・二値化版・融合用の各倍率）。
+// 1回のOCR要求では、拡大版・二値化版・融合用倍率に加え、条件が揃った場合だけ
+// 短い縦列の局所確認も走る。
 // 各回が独立に 0→1 を報告するため、そのまま流すと表示が 100%→0% を何度も繰り返す。
 // 各回に「残りの一定割合」を割り当てて、全体として単調増加になるよう変換する。
 const OCR_PROGRESS_PASS_SHARE = 0.6;

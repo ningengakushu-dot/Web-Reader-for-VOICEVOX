@@ -110,6 +110,380 @@ function estimateGlyphSizeFromBlocks(blocks, orientation) {
     return sizes[Math.floor(sizes.length / 2)];
 }
 
+// ===== 行構造の融合（挿入誤りの除去） =====
+
+function collectComparableOcrLines(blocks, orientation) {
+    const lines = [];
+    forEachOcrLine(blocks, (line) => {
+        const entries = [];
+        for (const word of (line.words || [])) {
+            for (const symbol of (word.symbols || [])) entries.push({ symbol, word });
+        }
+        const crossSize = orientation === "vertical"
+            ? line.bbox?.x1 - line.bbox?.x0
+            : line.bbox?.y1 - line.bbox?.y0;
+        const span = orientation === "vertical"
+            ? line.bbox?.y1 - line.bbox?.y0
+            : line.bbox?.x1 - line.bbox?.x0;
+        if (entries.length && crossSize > 0 && span > 0) {
+            lines.push({ line, entries, crossSize, span });
+        }
+    });
+    if (!lines.length) return [];
+    const sizes = lines.map((item) => item.crossSize).sort((a, b) => a - b);
+    const median = sizes[Math.floor(sizes.length / 2)];
+    // 罫線・ルビ・倍率変換端の1pxノイズを本文列の対応付けへ混ぜない。
+    const filtered = lines.filter((item) => item.crossSize >= median * 0.6)
+        .sort((a, b) => {
+            const centerA = orientation === "vertical"
+                ? (a.line.bbox.x0 + a.line.bbox.x1) / 2
+                : (a.line.bbox.y0 + a.line.bbox.y1) / 2;
+            const centerB = orientation === "vertical"
+                ? (b.line.bbox.x0 + b.line.bbox.x1) / 2
+                : (b.line.bbox.y0 + b.line.bbox.y1) / 2;
+            return centerA - centerB;
+        });
+    if (!filtered.length) return [];
+    const centers = filtered.map((item) => orientation === "vertical"
+        ? (item.line.bbox.x0 + item.line.bbox.x1) / 2
+        : (item.line.bbox.y0 + item.line.bbox.y1) / 2);
+    const minCenter = Math.min(...centers);
+    const maxCenter = Math.max(...centers);
+    const spans = filtered.map((item) => item.span).sort((a, b) => a - b);
+    const medianSpan = spans[Math.floor(spans.length / 2)];
+    return filtered.map((item, index) => ({
+        ...item,
+        normalizedCross: maxCenter > minCenter
+            ? (centers[index] - minCenter) / (maxCenter - minCenter)
+            : 0.5,
+        normalizedSpan: item.span / medianSpan
+    }));
+}
+
+function findSubsequenceSkips(source, target) {
+    const skipped = [];
+    let targetIndex = 0;
+    for (let sourceIndex = 0; sourceIndex < source.length; sourceIndex++) {
+        if (targetIndex < target.length && source[sourceIndex] === target[targetIndex]) {
+            targetIndex++;
+        } else {
+            skipped.push(sourceIndex);
+        }
+    }
+    return targetIndex === target.length ? skipped : null;
+}
+
+function describeOcrSkips(source, skipped) {
+    if (!skipped.length) return "=";
+    // 誤認文字の内容ではなく物理的な位置だけを署名にする。同じセルで候補ごとに
+    // 「ち」「ら」と別字を余分出力しても、異位置の証拠として数えない。
+    return skipped.map((index) => Math.round((index / Math.max(1, source.length - 1)) * 20))
+        .join("|");
+}
+
+function forEachDeletedOcrSequence(entries, deleteCount, callback) {
+    const source = entries.map((entry) => entry.symbol.text);
+    const seenTexts = new Set();
+    const chosen = [];
+    const visit = (start) => {
+        if (chosen.length === deleteCount) {
+            const removed = new Set(chosen);
+            const text = source.filter((_, index) => !removed.has(index)).join("");
+            if (!seenTexts.has(text)) {
+                seenTexts.add(text);
+                callback({ text, deletedIndices: chosen.slice() });
+            }
+            return;
+        }
+        for (let index = start; index <= source.length - (deleteCount - chosen.length); index++) {
+            chosen.push(index);
+            visit(index + 1);
+            chosen.pop();
+        }
+    };
+    visit(0);
+}
+
+const OCR_INSERTION_PRUNE_MAX_LINE_LENGTH = 64;
+
+function hasLikelyOcrLineInsertions(blocks, orientation, glyphSize) {
+    if (orientation !== "vertical" || !(glyphSize > 0)) return false;
+    const lines = collectComparableOcrLines(blocks, orientation);
+    const ratios = lines.filter((item) => item.entries.length >= 20
+        && item.entries.length <= OCR_INSERTION_PRUNE_MAX_LINE_LENGTH)
+        .map((item) => item.span / item.entries.length)
+        .sort((a, b) => a - b);
+    if (ratios.length < 2) return false;
+    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.75)];
+    if (!(nominalPitch >= glyphSize * 0.8 && nominalPitch <= glyphSize * 1.5)) return false;
+    return lines.some((item) => {
+        if (item.entries.length < 20
+            || item.entries.length > OCR_INSERTION_PRUNE_MAX_LINE_LENGTH) return false;
+        const excess = item.entries.length - Math.round(item.span / nominalPitch);
+        return excess >= 1 && excess <= 3;
+    });
+}
+
+/**
+ * 縦書きの長い本文列で、同じ物理文字から「らち」のように2文字を出すLSTM重複を除く。
+ * 語彙は使わず、(1) 列の幾何から求めた物理セル数、(2) 取得済み倍率候補の共通部分、
+ * (3) 候補ごとに余分な文字の位置が異なること、の3条件が揃う場合だけ削除する。
+ * 全候補が同じ文字列、置換で競合、短い列、追加文字の位置が同じ場合は変更しない。
+ * @returns {number} 除去したsymbol数
+ */
+function pruneOcrLineInsertions(baseBlocks, otherBlocksList, orientation, glyphSize) {
+    if (orientation !== "vertical" || !(glyphSize > 0)) return 0;
+    const baseLines = collectComparableOcrLines(baseBlocks, orientation);
+    if (baseLines.length < 2) return 0;
+
+    const variants = [];
+    for (const blocks of otherBlocksList) {
+        const lines = collectComparableOcrLines(blocks, orientation);
+        if (lines.length !== baseLines.length) continue;
+        const geometryMatches = lines.every((item, index) => {
+            const base = baseLines[index];
+            const spanRatio = item.normalizedSpan / base.normalizedSpan;
+            return Math.abs(item.normalizedCross - base.normalizedCross) <= 0.08
+                && spanRatio >= 0.8 && spanRatio <= 1.25;
+        });
+        if (geometryMatches) variants.push(lines);
+    }
+    if (variants.length < 2) return 0;
+
+    // 正しい列では span / 文字数 がほぼ一定。重複挿入がある列だけ比が小さくなるため、
+    // 長い列の上位四分位を基準ピッチにして物理セル数を復元する。
+    const ratios = baseLines
+        .filter((item) => item.entries.length >= 20
+            && item.entries.length <= OCR_INSERTION_PRUNE_MAX_LINE_LENGTH)
+        .map((item) => item.span / item.entries.length)
+        .sort((a, b) => a - b);
+    if (ratios.length < 2) return 0;
+    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.75)];
+    if (!(nominalPitch >= glyphSize * 0.8 && nominalPitch <= glyphSize * 1.5)) return 0;
+
+    const removals = new Set();
+    baseLines.forEach((baseLine, lineIndex) => {
+        const baseLength = baseLine.entries.length;
+        if (baseLength < 20 || baseLength > OCR_INSERTION_PRUNE_MAX_LINE_LENGTH) return;
+        const physicalCount = Math.round(baseLine.span / nominalPitch);
+        const deleteCount = baseLength - physicalCount;
+        if (deleteCount < 1 || deleteCount > 3) return;
+
+        const variantTexts = variants.map((lines) =>
+            lines[lineIndex].entries.map((entry) => entry.symbol.text));
+        const usable = variantTexts.filter((chars) =>
+            chars.length >= physicalCount && chars.length <= physicalCount + 3);
+        if (usable.length < 2) return;
+
+        let best = null;
+        let bestSupport = -1;
+        let bestSupportCount = 0;
+        forEachDeletedOcrSequence(baseLine.entries, deleteCount, (candidate) => {
+            const target = [...candidate.text];
+            const variantSignatures = new Set();
+            let exactSupport = 0;
+            let support = 0;
+            for (const chars of usable) {
+                const skipped = findSubsequenceSkips(chars, target);
+                if (!skipped || skipped.length !== chars.length - physicalCount) continue;
+                support++;
+                if (skipped.length) variantSignatures.add(describeOcrSkips(chars, skipped));
+                else exactSupport++;
+            }
+            const minimumSupport = Math.max(2, Math.ceil(usable.length * 0.6));
+            const baseSignature = describeOcrSkips(
+                baseLine.entries, candidate.deletedIndices);
+            // 物理文字数に加え、(a) 加工候補が正しい長さで完全一致する、または
+            // (b) 加工によって余分文字の位置が原寸から移動する、のどちらかを必須にする。
+            // 同じ誤挿入を繰り返す1候補だけではbaseの実在文字を削除しない。
+            const hasMovedInsertion = [...variantSignatures]
+                .some((signature) => signature !== baseSignature);
+            const independentPositionEvidence = variantSignatures.size >= 2
+                || (exactSupport > 0 && hasMovedInsertion);
+            if (support < minimumSupport || !independentPositionEvidence) return;
+            const deletedConfidence = candidate.deletedIndices.reduce((sum, index) => {
+                const confidence = Number(baseLine.entries[index].symbol.confidence);
+                return sum + (Number.isFinite(confidence) ? confidence : 100);
+            }, 0) / candidate.deletedIndices.length;
+            if (support > bestSupport) {
+                best = { ...candidate, support, deletedConfidence };
+                bestSupport = support;
+                bestSupportCount = 1;
+            } else if (support === bestSupport) {
+                bestSupportCount++;
+                if (deletedConfidence < best.deletedConfidence) {
+                    best = { ...candidate, support, deletedConfidence };
+                }
+            }
+        });
+        if (!best) return;
+        // 支持数が同じ別文字列をconfidenceだけで決めない。曖昧なら無変更。
+        if (bestSupportCount > 1) return;
+        for (const index of best.deletedIndices) removals.add(baseLine.entries[index]);
+    });
+
+    if (!removals.size) return 0;
+    const touchedWords = new Set();
+    for (const entry of removals) touchedWords.add(entry.word);
+    for (const word of touchedWords) {
+        word.symbols = (word.symbols || []).filter((symbol) => {
+            for (const entry of removals) {
+                if (entry.word === word && entry.symbol === symbol) return false;
+            }
+            return true;
+        });
+    }
+    rebuildOcrWordTexts(touchedWords);
+    return removals.size;
+}
+
+// ===== 短い縦書き列の独立モデル再確認 =====
+
+const OCR_RESCAN_HAN_RE = /^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]$/u;
+
+/**
+ * 短い縦書き列から、横書きモデルで再確認する漢字セルを集める。
+ * 語彙は使わず、低確信度の列・本文相当の太さ・画像端で欠けていないことだけを見る。
+ */
+function collectVerticalGlyphRescanTargets(blocks, blockScale, sourceWidth, sourceHeight) {
+    if (!(blockScale > 0) || !(sourceWidth > 0) || !(sourceHeight > 0)) return [];
+    const lines = [];
+    forEachOcrLine(blocks, (line) => {
+        const entries = [];
+        for (const word of (line.words || [])) {
+            for (const symbol of (word.symbols || [])) entries.push({ word, symbol });
+        }
+        const width = line.bbox?.x1 - line.bbox?.x0;
+        const span = line.bbox?.y1 - line.bbox?.y0;
+        if (entries.length && width > 0 && span > 0) lines.push({ line, entries, width, span });
+    });
+    if (!lines.length) return [];
+    const widths = lines.map((item) => item.width).sort((a, b) => a - b);
+    const medianWidth = widths[Math.floor(widths.length / 2)];
+    const longPitches = lines.filter((item) => item.entries.length >= 20)
+        .map((item) => item.span / item.entries.length)
+        .sort((a, b) => a - b);
+    const nominalPitch = longPitches.length >= 2
+        ? longPitches[Math.floor((longPitches.length - 1) * 0.75)]
+        : null;
+    const targets = [];
+    for (const item of lines) {
+        const length = item.entries.length;
+        const lineConfidence = Number(item.line.confidence);
+        if (length < 4 || length > 16 || !Number.isFinite(lineConfidence)
+            || lineConfidence >= 90) continue;
+        if (item.width < medianWidth * 0.6
+            || item.line.bbox.x0 <= 0 || item.line.bbox.x1 >= sourceWidth * blockScale) continue;
+        const pitch = item.span / length;
+        if (!(pitch > 0) || item.width > pitch * 2.2) continue;
+        const firstText = item.entries[0]?.symbol.text || "";
+        const lastText = item.entries[length - 1]?.symbol.text || "";
+        const startsWithPunctuation = /^[\p{P}]$/u.test(firstText);
+        const endsWithPunctuation = /^[\p{P}]$/u.test(lastText);
+        for (let index = 0; index < length; index++) {
+            const entry = item.entries[index];
+            const symbolConfidence = Number(entry.symbol.confidence);
+            const bbox = entry.symbol.bbox;
+            let symbolWidth = bbox?.x1 - bbox?.x0;
+            let symbolHeight = bbox?.y1 - bbox?.y0;
+            if (!OCR_RESCAN_HAN_RE.test(entry.symbol.text)
+                || !Number.isFinite(symbolConfidence)) continue;
+            let cellPitch = pitch;
+            let expectedCenterY = item.line.bbox.y0 + pitch * (index + 0.5);
+            let symbolCenterX;
+            let symbolCenterY;
+            if (symbolWidth > 0 && symbolHeight > 0
+                && symbolWidth <= pitch * 1.6 && symbolHeight <= pitch * 1.6) {
+                symbolCenterX = (bbox.x0 + bbox.x1) / 2;
+                symbolCenterY = (bbox.y0 + bbox.y1) / 2;
+                if (Math.abs(symbolCenterY - expectedCenterY) > pitch * 0.2) continue;
+            } else {
+                // jpn_vertは実画像でsymbol bboxを全て0幅にすることがある。その場合も
+                // 長い本文列から得た独立ピッチと短列の物理文字数が一致するときだけ、
+                // line bboxの本文側を基準に固定セルへフォールバックする。縦書きの末尾
+                // 句読点はセル下端までインクがなくline bboxが最大1セル弱短くなるため、
+                // その場合だけ不足幅を許容する。1文字挿入なら不足が1セル以上となり除外される。
+                const physicalSpan = nominalPitch > 0 ? item.span / nominalPitch : 0;
+                const minimumSpan = endsWithPunctuation && !startsWithPunctuation
+                    ? length - 0.95 : length - 0.35;
+                if (!(nominalPitch > 0)
+                    || physicalSpan <= minimumSpan || physicalSpan > length + 0.35
+                    || pitch / nominalPitch < 0.85 || pitch / nominalPitch > 1.15) continue;
+                cellPitch = nominalPitch;
+                expectedCenterY = item.line.bbox.y0 + cellPitch * (index + 0.5);
+                symbolWidth = cellPitch;
+                symbolHeight = cellPitch;
+                symbolCenterX = item.line.bbox.x0 + cellPitch * 0.55;
+                symbolCenterY = expectedCenterY;
+            }
+            // 隣セルの画素を証拠へ混ぜない。symbol中心を基準に物理1セルだけ切り出し、
+            // 横幅は句読点で広がるline bboxではなく標準ピッチから決める。
+            const scaledWidth = Math.max(cellPitch * 1.6, symbolWidth * 1.25);
+            const scaledHeight = cellPitch;
+            const scaledX = symbolCenterX - scaledWidth / 2;
+            const scaledY = symbolCenterY - scaledHeight / 2;
+            const x = scaledX / blockScale;
+            const y = scaledY / blockScale;
+            const width = scaledWidth / blockScale;
+            const height = scaledHeight / blockScale;
+            // 画像端に達したセルは文字の一部が選択範囲外の可能性が高い。見えていない
+            // 画を推測で補わず、局所補正の対象から外す。
+            if (x < 0 || y < 0 || x + width > sourceWidth || y + height > sourceHeight) continue;
+            targets.push({ ...entry, x, y, width, height, lineConfidence });
+        }
+    }
+    return targets.sort((a, b) => (a.lineConfidence - b.lineConfidence)
+        || (Number(a.symbol.confidence) - Number(b.symbol.confidence))).slice(0, 2);
+}
+
+/** 単一文字画像から得た意味文字が漢字1字だけの場合に限り返す。 */
+function extractSingleHanEvidence(blocks, canvasWidth = null, canvasHeight = null) {
+    const evidence = [];
+    let invalidContent = false;
+    forEachOcrLine(blocks, (line) => {
+        for (const word of (line.words || [])) {
+            for (const symbol of (word.symbols || [])) {
+                if (OCR_RESCAN_HAN_RE.test(symbol.text)) {
+                    evidence.push({
+                        text: symbol.text,
+                        confidence: Number(symbol.confidence),
+                        bbox: symbol.bbox
+                    });
+                } else if (!/^[\p{P}\s]+$/u.test(symbol.text || "")) {
+                    invalidContent = true;
+                }
+            }
+        }
+    });
+    if (invalidContent || evidence.length !== 1 || !Number.isFinite(evidence[0].confidence)) {
+        return null;
+    }
+    if (canvasWidth > 0 && canvasHeight > 0) {
+        const bbox = evidence[0].bbox;
+        const centerX = (bbox?.x0 + bbox?.x1) / 2;
+        const centerY = (bbox?.y0 + bbox?.y1) / 2;
+        if (!Number.isFinite(centerX) || !Number.isFinite(centerY)
+            || centerX < canvasWidth * 0.1 || centerX > canvasWidth * 0.9
+            || centerY < canvasHeight * 0.1 || centerY > canvasHeight * 0.9) return null;
+    }
+    return { text: evidence[0].text, confidence: evidence[0].confidence };
+}
+
+/**
+ * 縦横モデルのconfidenceは直接比較せず、局所画像3種の強一致だけで置換を決める。
+ */
+function selectVerticalGlyphRescanReplacement(baseSymbol, gray, binary, third = null) {
+    if (!baseSymbol || !gray || !binary || gray.text !== binary.text) return null;
+    if (!OCR_RESCAN_HAN_RE.test(gray.text) || gray.text === baseSymbol.text) return null;
+    const confidences = [gray.confidence, binary.confidence];
+    if (confidences.some((value) => !(value >= 85))) return null;
+    if ((confidences[0] + confidences[1]) / 2 < 88 || Math.max(...confidences) < 89) return null;
+    // 同じ横書きモデルの加工違いは相関するため、元文字confidenceにかかわらず
+    // 第三のgray倍率まで同じ字形を支持することを必須とする。
+    if (!third || third.text !== gray.text || third.confidence < 80) return null;
+    return gray.text;
+}
+
 // ===== 文字単位アンサンブル融合 =====
 // 同じ選択範囲でも、ドラッグの数pxの違いで縮小時のサブピクセル位相が変わり、
 // 同じ漢字が「核/校/枝/槻」のように揺れる（実測: 同一箇所で正答率31%）。
