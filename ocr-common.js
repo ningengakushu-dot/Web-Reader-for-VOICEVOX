@@ -194,7 +194,9 @@ async function refineVerticalGlyphsWithLoadedHorizontalWorker(
     } finally {
         if (worker) {
             try {
-                await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.AUTO });
+                // 横書きworkerは生成時にPSMを設定しておらず、実効値はTesseract既定の
+                // SINGLE_BLOCK(6)。AUTOへ「復元」すると以後の全文OCRの分割挙動が変わる。
+                await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK });
             } catch (error) {
                 // SINGLE_CHARのまま残った共有workerを次回全文OCRへ使わせない。
                 if (!workerProvider.invalidate?.("jpn", worker)) {

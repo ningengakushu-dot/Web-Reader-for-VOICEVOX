@@ -18,7 +18,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
     const worker = {
         setParameters: async (parameters) => {
             settings.push(parameters.tessedit_pageseg_mode);
-            if (failRestore && parameters.tessedit_pageseg_mode === '3') {
+            if (failRestore && parameters.tessedit_pageseg_mode === '6') {
                 throw new Error('restore failed');
             }
         },
@@ -40,7 +40,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
         Int32Array,
         setTimeout,
         clearTimeout,
-        Tesseract: { PSM: { SINGLE_CHAR: '10', AUTO: '3' } },
+        Tesseract: { PSM: { SINGLE_CHAR: '10', SINGLE_BLOCK: '6' } },
         collectVerticalGlyphRescanTargets: () => [{
             word, symbol, x: 1, y: 2, width: 20, height: 24
         }],
@@ -81,7 +81,8 @@ function createContext({ fail = false, failRestore = false } = {}) {
         assert.equal(test.symbol.text, '桁');
         assert.equal(test.word.text, '桁');
         assert.deepEqual(test.calls, ['gray-2.5', 'binary', 'gray-3']);
-        assert.deepEqual(test.settings, ['10', '3'], '処理後に横書きworkerのPSMを復元する');
+        assert.deepEqual(test.settings, ['10', '6'],
+            '処理後に横書きworkerのPSMをTesseract既定のSINGLE_BLOCKへ復元する');
     }
 
     {
@@ -102,7 +103,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
                 { width: 100, height: 100 }, {}, 1, test.provider);
         assert.equal(replacements.length, 0);
         assert.equal(test.symbol.text, '杵');
-        assert.deepEqual(test.settings, ['10', '3'], '例外時にもPSMを復元する');
+        assert.deepEqual(test.settings, ['10', '6'], '例外時にもPSMを復元する');
     }
 
     {
