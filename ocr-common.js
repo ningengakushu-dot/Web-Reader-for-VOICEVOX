@@ -401,11 +401,11 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     let preprocessedData = null;
     let preprocessedAttempted = false;
 
-    const recognizePreprocessed = async (forceForStructure = false) => {
+    const recognizePreprocessed = async () => {
         if (preprocessedAttempted || best.confidence >= OCR_PREPROCESS_SKIP_CONFIDENCE
-            || (!canRefine() && !forceForStructure)) return;
+            || !canRefine()) return;
         preprocessedAttempted = true;
-        if (canRefine()) useRefine();
+        useRefine();
         const prepared = prepareOcrCanvas(sourceCanvas);
         if (prepared === sourceCanvas) return;
         const preprocessed = await primaryWorker.recognize(prepared, {}, outputFields);
@@ -457,11 +457,6 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     // 確信度が十分でなければ、前処理版（拡大＋二値化）でも認識して良い方を採用する
     // （ゴシック体の小さい文字はこちらが大きく改善する）
     await recognizePreprocessed();
-    // 物理長が1～3字の重複を示す小画像だけは、通常予算が2xで尽きても二値化候補を
-    // 追加する。2xを置き換えず併用するため、既存の小文字救済精度は維持される。
-    if (ensureStructuralEvidence && !preprocessedAttempted) {
-        await recognizePreprocessed(true);
-    }
 
     // それでも明らかに低品質なときだけ、もう一方の組版方向も試す
     if (best.confidence < OCR_CONFIDENCE_ACCEPT) {
@@ -478,7 +473,10 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     }
 
     // 重複挿入が疑われる小画像は、破壊的削除を1候補へ緩和せず、独立した倍率証拠を
-    // 2件だけ追加確保する。採用全文が二値化へ切り替わっても、このMapを共通利用する。
+    // 最大2件追加確保する。採用全文が二値化へ切り替わっても、このMapを共通利用する。
+    // 認識は必ず時間予算(refinesLeft)の範囲内で行う。予算外の認識を許すと、予算が
+    // 枯渇する低速端末でだけ待ち時間が延び、60秒の全体タイムアウトで認識全体が
+    // 失敗し得る（証拠が不足した場合、重複削除は安全側=無変更に倒れる）。
     if (ensureStructuralEvidence) {
         const scales = glyphSize < OCR_FUSION_TRIGGER_GLYPH_PX
             ? OCR_FUSION_SCALES
@@ -490,6 +488,8 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
                 || structuralUpscaledData.has(scale)) continue;
             const area = grayCanvas.width * scale * grayCanvas.height * scale;
             if (area > OCR_FUSION_MAX_AREA) continue;
+            if (!canRefine()) break;
+            useRefine();
             const variant = await primaryWorker.recognize(
                 upscaleOcrCanvas(grayCanvas, scale), {}, outputFields);
             structuralUpscaledData.set(scale, variant.data);

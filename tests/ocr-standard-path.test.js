@@ -48,10 +48,12 @@ assert.match(common, /localRescanPromise = orientation === "vertical"[\s\S]*canR
     '短列の局所確認はプール状態に依存せず全文精錬と並行開始する');
 assert.match(common, /await localRescanPromise/,
     '並行局所確認の完了を最終テキストへ反映する');
-assert.match(common, /upscaled2x = [\s\S]*await recognizePreprocessed\(\)[\s\S]*recognizePreprocessed\(true\)/,
-    '重複挿入時も既存2x救済を先に維持し、必要なら二値化証拠を追加する');
-assert.match(common, /if \(ensureStructuralEvidence\)[\s\S]*structuralUpscaledData\.size >= 2[\s\S]*structuralUpscaledData\.set/,
-    '重複削除には予算枯渇時も独立した倍率証拠を最低2件集める');
+assert.match(common, /upscaled2x = [\s\S]*await recognizePreprocessed\(\)/,
+    '重複挿入時も既存2x救済と二値化の順序を維持する');
+assert.doesNotMatch(common, /recognizePreprocessed\(true\)|forceForStructure/,
+    '構造証拠の収集で時間予算を迂回しない');
+assert.match(common, /if \(ensureStructuralEvidence\)[\s\S]*if \(!canRefine\(\)\) break;\s*\n\s*useRefine\(\);[\s\S]*structuralUpscaledData\.set/,
+    '重複削除の倍率証拠は時間予算の範囲内で最大2件だけ集める');
 assert.match(common, /finally[\s\S]*localReplacements = await localRescanPromise[\s\S]*applyVerticalGlyphRescanReplacements/,
     '局所OCRは例外時もworker復元まで合流し、全文融合後に置換案だけを適用する');
 assert.match(common + read('ocr-image.js'), /OCR_ORIENTATION_FULL_COMPARE_MAX_AREA[\s\S]*pickOcrTextPatch/,
