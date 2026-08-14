@@ -20,6 +20,7 @@ const context = vm.createContext({
     fetchWithTimeout: async () => ({ ok: true }), readJsonResponseWithLimit: async () => ({}),
     readBlobResponseWithLimit: async () => ({}),
     createOcrWorkerPool: () => ({ get: async () => ({}), terminate() {} }),
+    createPrimaryOcrProgressTracker: () => ({ reset() {}, update: () => null }),
     recognizeWithOrientation: () => new Promise(() => {}),
     withOcrTimeout: (p) => p, cleanForSpeech: (s) => s, normalizeOcrText: (s) => s,
     cropToOcrCanvas: () => ({}), createImageBitmap: async () => ({ close() {}, width: 10, height: 10 }),

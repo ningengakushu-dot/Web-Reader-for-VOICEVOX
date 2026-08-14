@@ -187,6 +187,9 @@ async function testAudioBackpressure() {
                 terminate() {}
             };
         },
+        createPrimaryOcrProgressTracker() {
+            return { reset() {}, update() { return null; } };
+        },
         cropToOcrCanvas() {},
         recognizeWithOrientation() {},
         withOcrTimeout() {},

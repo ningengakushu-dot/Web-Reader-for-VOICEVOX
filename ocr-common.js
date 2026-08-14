@@ -41,6 +41,57 @@ function withOcrTimeout(promise, ms, message) {
 
 // ===== ワーカーの生成と使い回し =====
 
+// ===== 表示用の進捗（OCR結果には影響しない） =====
+//
+// 1回のOCR要求では、主経路（元寸・全文）の認識に加えて、方向判定の並行認識・
+// 拡大版・二値化版・融合用の各倍率・短い縦列の局所確認が走り、認識回数は入力に
+// よって数回〜10回超まで変わる。各認識は独立に 0→1 の進捗を報告し、横書き(jpn)と
+// 縦書き(jpn_vert)のworkerは並行にも動くため、進捗メッセージの連結だけでは
+// 「全体のどこまで進んだか」を再構成できない。そこで認識を実行する側
+// （recognizeWithOrientation）が「いまどのworkerが主経路を認識中か」の目印を立て、
+// プールのloggerがメッセージへ由来（lang）と目印を添える。
+//
+// 目印がworker(lang)単位で正確なのは、同一workerのrecognizeが常に1件ずつ
+// 逐次実行されるため（同一workerへの並行recognizeは元々許されない）。
+// 目印の窓が開いている間、そのworkerが処理しているのは主経路の認識だけになる。
+let ocrPrimaryPassLangs = null;
+
+// 主経路の進捗を表示ゲージのどこまで割り当てるか。主経路完了後も精錬・局所確認が
+// 残るが、その回数は確信度など途中の結果に依存して予見できないため、残りを細かく
+// 刻まず、この値で止めて完了通知（トーストの消去・バーの非表示）に100%到達を任せる。
+const OCR_PRIMARY_PROGRESS_SHARE = 0.7;
+
+/**
+ * createOcrWorkerPool のloggerが受け取る (message, source) から、表示用の
+ * 通し進捗（単調増加・0〜OCR_PRIMARY_PROGRESS_SHARE）を作る。
+ * 主経路以外の認識（方向判定の小領域比較・精錬・局所確認）は表示に使わない。
+ * 方向判定で範囲全体を縦横並行認識して主経路として再利用する場合は、
+ * 両workerの進捗の遅い方（min）を全体値とする（両方の完了を待つ処理のため）。
+ * @returns {{reset: () => void, update: (m: object, source: object) => number|null}}
+ *   update は表示を進めるべきときだけ値を返し、それ以外は null を返す。
+ */
+function createPrimaryOcrProgressTracker() {
+    let perLang = null;
+    let shown = 0;
+    return {
+        reset() {
+            perLang = null;
+            shown = 0;
+        },
+        update(m, source) {
+            if (!source || !source.primaryPass || m.status !== "recognizing text") return null;
+            if (!perLang) perLang = {};
+            perLang[source.lang] = Math.min(1, Math.max(0, m.progress || 0));
+            const combined = Math.min(...Object.values(perLang));
+            const value = combined * OCR_PRIMARY_PROGRESS_SHARE;
+            // 並行認識の交互報告で表示が後退・振動しないよう、増加時だけ通知する
+            if (value <= shown) return null;
+            shown = value;
+            return value;
+        }
+    };
+}
+
 /**
  * 同梱アセットで日本語OCRワーカーを生成する（タイムアウト保護付き）。
  * すべてのアセット（worker/wasmコア/言語データ）は拡張機能に同梱したものを使う。
@@ -94,7 +145,9 @@ function createOcrWorker(lang, logger) {
  * offscreen（ページ内範囲選択）と capture（タブでの範囲選択）が同じ管理をしていたため共通化する。
  *
  * get はそのまま recognizeWithOrientation の workerProvider として渡せる。
- * @param {(message: object) => void} [logger] 認識の進捗ログ
+ * @param {(message: object, source: {lang: string, primaryPass: boolean}) => void} [logger]
+ *   認識の進捗ログ。source でどのworker由来か（lang）と、主経路の認識中かを識別できる
+ *   （createPrimaryOcrProgressTracker と組で表示用進捗に変換する）。
  * @returns {{get: (lang: string) => Promise<object>, terminate: () => void}}
  */
 function createOcrWorkerPool(logger) {
@@ -102,7 +155,12 @@ function createOcrWorkerPool(logger) {
     const readyWorkers = {};
     const get = (lang) => {
         if (!workerPromises[lang]) {
-            const created = createOcrWorker(lang, logger);
+            const created = createOcrWorker(lang, logger
+                ? (m) => logger(m, {
+                    lang,
+                    primaryPass: !!(ocrPrimaryPassLangs && ocrPrimaryPassLangs.includes(lang))
+                })
+                : logger);
             let tracked;
             tracked = created.then((worker) => {
                 if (workerPromises[lang] === tracked) readyWorkers[lang] = worker;
@@ -310,10 +368,19 @@ async function resolveOcrOrientation(
         // 縦書き全体を横書きに誤転換する。2認識は別ワーカーなので並行実行し、
         // 採用側のdataを後段のprimaryとして再利用して認識回数を増やさない。
         const startedAt = Date.now();
-        const [horizontal, vertical] = await Promise.all([
-            horizontalWorker.recognize(comparisonCanvas, {}, outputFields),
-            verticalWorker.recognize(comparisonCanvas, {}, outputFields)
-        ]);
+        // 範囲全体の並行認識を主経路として再利用する場合は、この2認識が
+        // 実質的な主経路（表示進捗の基準）になる。小領域比較は対象外。
+        if (reuseAsFull) ocrPrimaryPassLangs = ["jpn", "jpn_vert"];
+        let horizontal;
+        let vertical;
+        try {
+            [horizontal, vertical] = await Promise.all([
+                horizontalWorker.recognize(comparisonCanvas, {}, outputFields),
+                verticalWorker.recognize(comparisonCanvas, {}, outputFields)
+            ]);
+        } finally {
+            ocrPrimaryPassLangs = null;
+        }
         const difference = Math.abs(horizontal.data.confidence - vertical.data.confidence);
         const orientation = difference >= confidenceMargin
             ? (horizontal.data.confidence >= vertical.data.confidence ? "horizontal" : "vertical")
@@ -341,6 +408,10 @@ async function resolveOcrOrientation(
  * @returns {Promise<{text: string, confidence: number}>} text は処理後の生テキスト（整形は呼び出し側）
  */
 async function recognizeWithOrientation(sourceCanvas, workerProvider) {
+    // 前回の認識がタイムアウトでworkerごと破棄された場合、目印を閉じる finally が
+    // 実行されないまま残ることがある（recognizeが永遠に解決しない）。要求は
+    // 呼び出し側で直列化されているため、開始時に必ず初期化して誤標識を防ぐ。
+    ocrPrimaryPassLangs = null;
     // blocks は文字サイズの実測、文字融合、段落境界の推定に使う。
     const outputFields = { text: true, blocks: true };
 
@@ -374,9 +445,19 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
 
     const primaryWorker = await workerProvider(primaryLang);
     const startedAt = Date.now();
-    const primary = resolvedFullData?.[primaryLang]
-        ? { data: resolvedFullData[primaryLang] }
-        : await primaryWorker.recognize(grayCanvas, {}, outputFields);
+    let primary;
+    if (resolvedFullData?.[primaryLang]) {
+        primary = { data: resolvedFullData[primaryLang] };
+    } else {
+        // 表示進捗の基準になる主経路（元寸・全文）の認識。目印の窓を認識の
+        // 実行中だけ開き、例外時も必ず閉じる（詳細は ocrPrimaryPassLangs 参照）。
+        ocrPrimaryPassLangs = [primaryLang];
+        try {
+            primary = await primaryWorker.recognize(grayCanvas, {}, outputFields);
+        } finally {
+            ocrPrimaryPassLangs = null;
+        }
+    }
     // 精錬1段のコストは元寸の認識1回分とほぼ同じ。予算に何回入るかを
     // 「元寸の所要時間から一度だけ」決め、以降は残り回数だけで判定する。
     // 段ごとに経過時間を見ると、そのときのマシン負荷で打ち切り位置が変わり、

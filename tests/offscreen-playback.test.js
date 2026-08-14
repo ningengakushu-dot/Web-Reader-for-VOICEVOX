@@ -38,7 +38,8 @@ const context = vm.createContext({
     fetchWithTimeout: async (url) => ({ ok: true, status: 200, marker: url.includes('audio_query') ? 'json' : 'blob' }),
     readJsonResponseWithLimit: async () => ({}), readBlobResponseWithLimit: async () => ({}),
     createOcrWorkerPool: () => ({ get: async () => ({}), terminate() {} }),
-    resetOcrProgress() {}, recognizeWithOrientation: async () => ({ text: '', confidence: 0 }),
+    createPrimaryOcrProgressTracker: () => ({ reset() {}, update: () => null }),
+    recognizeWithOrientation: async () => ({ text: '', confidence: 0 }),
     withOcrTimeout: (p) => p, cleanForSpeech: (s) => s, normalizeOcrText: (s) => s,
     cropToOcrCanvas: () => ({}), createImageBitmap: async () => ({ close() {}, width: 1, height: 1 }),
     fetch: async () => ({ blob: async () => ({}) })

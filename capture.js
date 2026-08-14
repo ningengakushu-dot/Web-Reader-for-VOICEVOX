@@ -40,10 +40,13 @@
     // 組版方向（横書き jpn / 縦書き jpn_vert）ごとのワーカーを使い回す。
     // 生成処理（同梱アセットの指定・タイムアウト保護）と使い回しの管理は
     // ocr-common.js の createOcrWorkerPool に集約している。
-    const workers = createOcrWorkerPool((m) => {
-        if (m.status === "recognizing text") {
-            ocrProgress.value = m.progress;
-        }
+    // 進捗バーには主経路（元寸・全文）の認識だけを反映する。精錬・局所確認の
+    // 各認識も 0→1 を報告するため、生の値をそのまま表示するとバーが何度も
+    // 往復する（判別と変換は ocr-common.js の createPrimaryOcrProgressTracker）。
+    const ocrDisplayProgress = createPrimaryOcrProgressTracker();
+    const workers = createOcrWorkerPool((m, source) => {
+        const progress = ocrDisplayProgress.update(m, source);
+        if (progress != null) ocrProgress.value = progress;
     });
     const getWorker = workers.get;
     // ワーカーを破棄する（ページ離脱時・認識タイムアウト時）。
@@ -226,6 +229,7 @@
         if (ocrInProgress) terminateWorkers();
         ocrInProgress = true;
         setOcrStatus("文字認識を実行中...");
+        ocrDisplayProgress.reset();
         ocrProgress.value = 0;
         ocrProgress.hidden = false;
 

@@ -50,6 +50,9 @@ jobs:
       - name: OCR方向判定フォールバックの検査
         run: node tests/ocr-orientation-fallback.test.js
 
+      - name: OCR進捗表示の主経路限定検査
+        run: node tests/ocr-progress-display.test.js
+
       - name: OCRモデルとLSTM専用コアの互換性検査
         run: node tests/tessdata-compatibility.test.js
 

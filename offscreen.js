@@ -68,37 +68,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // 進行状況の通知先タブ（OCR実行中のみ設定）
 let ocrProgressTabId = null;
-// 1回のOCR要求では、拡大版・二値化版・融合用倍率に加え、条件が揃った場合だけ
-// 短い縦列の局所確認も走る。
-// 各回が独立に 0→1 を報告するため、そのまま流すと表示が 100%→0% を何度も繰り返す。
-// 各回に「残りの一定割合」を割り当てて、全体として単調増加になるよう変換する。
-const OCR_PROGRESS_PASS_SHARE = 0.6;
-let ocrProgressBase = 0;
-let ocrProgressPrev = 0;
-
-function resetOcrProgress() {
-    ocrProgressBase = 0;
-    ocrProgressPrev = 0;
-}
-
-// tesseract の1回分の進捗を、通し進捗（単調増加）へ変換する
-function toOverallOcrProgress(passProgress) {
-    const p = Math.min(1, Math.max(0, passProgress || 0));
-    // 前回より大きく戻ったら次の認識に移ったとみなし、その回の持ち分を確定させる
-    if (p < ocrProgressPrev - 0.05) {
-        ocrProgressBase += (1 - ocrProgressBase) * OCR_PROGRESS_PASS_SHARE;
-    }
-    ocrProgressPrev = p;
-    return ocrProgressBase + (1 - ocrProgressBase) * OCR_PROGRESS_PASS_SHARE * p;
-}
+// 表示には主経路（元寸・全文）の認識の進捗だけを使う。方向判定の並行認識や
+// 精錬・局所確認は回数が入力次第で変わるうえ、横書き・縦書きworkerが並行して
+// 交互に 0→1 を報告するため、全部をつなぎ合わせる方式は成り立たない
+// （かつては進捗の後退から回の切り替わりを推定していたが、並行化により
+// 開始直後に表示が100%近くへ張り付いていた）。どの認識が主経路かの判別と
+// ゲージへの変換は ocr-common.js（createPrimaryOcrProgressTracker）に集約している。
+const ocrDisplayProgress = createPrimaryOcrProgressTracker();
 
 // OCRワーカーは組版方向（横書き jpn / 縦書き jpn_vert）ごとに初回利用時に生成し、
 // 以降のOCRで使い回す。この offscreen document が破棄された場合は次回作成時に再生成される。
-const ocrWorkers = createOcrWorkerPool((m) => {
-    if (m.status === "recognizing text" && ocrProgressTabId != null) {
+const ocrWorkers = createOcrWorkerPool((m, source) => {
+    if (ocrProgressTabId == null) return;
+    const progress = ocrDisplayProgress.update(m, source);
+    if (progress != null) {
         notifyBackground("OCR_PROGRESS", {
             tabId: ocrProgressTabId,
-            progress: toOverallOcrProgress(m.progress)
+            progress
         });
     }
 });
@@ -129,7 +115,7 @@ const resetOcrWorkers = ocrWorkers.terminate;
  */
 async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId }) {
     ocrProgressTabId = tabId ?? null;
-    resetOcrProgress();
+    ocrDisplayProgress.reset();
     cancelOcrWorkerIdleRelease();
     try {
         const blob = await (await fetch(dataUrl)).blob();
