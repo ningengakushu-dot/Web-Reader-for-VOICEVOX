@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'ocr-common.js'), 'utf8')
     + '\n;globalThis.localRescanTestApi = {'
-    + 'refineVerticalGlyphsWithLoadedHorizontalWorker, '
+    + 'refineVerticalGlyphsWithHorizontalWorker, '
     + 'applyVerticalGlyphRescanReplacements, createOcrWorkerPool};';
 
 function createContext({ fail = false, failRestore = false } = {}) {
@@ -58,8 +58,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
         }
     });
     vm.runInContext(source, context);
-    const provider = async () => { throw new Error('新規workerをロードしてはならない'); };
-    provider.peek = () => worker;
+    const provider = async () => worker;
     provider.invalidate = (lang, expected) => {
         invalidated.push({ lang, expected });
         return true;
@@ -71,7 +70,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
     {
         const test = createContext();
         const replacements = await test.context.localRescanTestApi
-            .refineVerticalGlyphsWithLoadedHorizontalWorker(
+            .refineVerticalGlyphsWithHorizontalWorker(
                 { width: 100, height: 100 }, {}, 1, test.provider);
         assert.equal(replacements.length, 1,
             JSON.stringify({ calls: test.calls, settings: test.settings }));
@@ -88,7 +87,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
     {
         const test = createContext({ failRestore: true });
         const replacements = await test.context.localRescanTestApi
-            .refineVerticalGlyphsWithLoadedHorizontalWorker(
+            .refineVerticalGlyphsWithHorizontalWorker(
                 { width: 100, height: 100 }, {}, 1, test.provider);
         assert.equal(replacements.length, 1);
         assert.equal(test.invalidated.length, 1, 'PSM復元失敗時はworkerをプールから破棄する');
@@ -99,7 +98,7 @@ function createContext({ fail = false, failRestore = false } = {}) {
     {
         const test = createContext({ fail: true });
         const replacements = await test.context.localRescanTestApi
-            .refineVerticalGlyphsWithLoadedHorizontalWorker(
+            .refineVerticalGlyphsWithHorizontalWorker(
                 { width: 100, height: 100 }, {}, 1, test.provider);
         assert.equal(replacements.length, 0);
         assert.equal(test.symbol.text, '杵');
@@ -108,11 +107,11 @@ function createContext({ fail = false, failRestore = false } = {}) {
 
     {
         const test = createContext();
-        const unloaded = async () => { throw new Error('呼び出されない'); };
+        const failing = async () => { throw new Error('load failed'); };
         const replacements = await test.context.localRescanTestApi
-            .refineVerticalGlyphsWithLoadedHorizontalWorker(
-                { width: 100, height: 100 }, {}, 1, unloaded);
-        assert.equal(replacements.length, 0, '横書きworker未ロード時は精錬を省略する');
+            .refineVerticalGlyphsWithHorizontalWorker(
+                { width: 100, height: 100 }, {}, 1, failing);
+        assert.equal(replacements.length, 0, 'workerロード失敗時は局所補正なしで続行する');
     }
 
     {

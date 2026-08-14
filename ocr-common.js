@@ -116,8 +116,7 @@ function createOcrWorkerPool(logger) {
         }
         return workerPromises[lang];
     };
-    // 精度補助のためだけに14MBの別言語モデルを新規ロードしたり初期化完了を待ったり
-    // しないよう、準備済みworkerだけを参照する。関数単体を渡しても利用できる。
+    // ロード済みworkerだけを（新規作成せずに）参照するための補助API。
     get.peek = (lang) => readyWorkers[lang] || null;
     get.invalidate = (lang, expectedWorker = null) => {
         const worker = readyWorkers[lang];
@@ -145,13 +144,14 @@ function createOcrWorkerPool(logger) {
 
 /**
  * 全文用の縦書きモデルとは独立した横書きモデルで、短い縦列の漢字だけを再確認する。
- * 横書きworkerが準備済みの場合に限り、gray 2.5倍・Otsu二値化2倍・gray 3倍が
- * 強く一致したセルだけを置換する。辞書・語彙・文脈には依存しない。
+ * gray 2.5倍・Otsu二値化2倍・gray 3倍が強く一致したセルだけを置換する。
+ * 辞書・語彙・文脈には依存しない。横書きworkerはプールの準備状況に依存せず
+ * ここで必ず取得する（準備済みのときだけ実行すると、直前の操作履歴や
+ * 入口＝offscreen/captureの違いで同じ画像の出力が変わってしまうため）。
+ * ロードに失敗した場合は補正なしで続行する。
  */
-async function refineVerticalGlyphsWithLoadedHorizontalWorker(
+async function refineVerticalGlyphsWithHorizontalWorker(
     grayCanvas, blocks, blockScale, workerProvider) {
-    const loadedWorker = workerProvider.peek?.("jpn");
-    if (!loadedWorker) return [];
     const targets = collectVerticalGlyphRescanTargets(
         blocks, blockScale, grayCanvas.width, grayCanvas.height);
     if (!targets.length) return [];
@@ -159,7 +159,7 @@ async function refineVerticalGlyphsWithLoadedHorizontalWorker(
     const replacements = [];
     let worker;
     try {
-        worker = loadedWorker;
+        worker = await workerProvider("jpn");
         await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_CHAR });
         for (const target of targets) {
             const raw = cropOcrCanvas(
@@ -401,16 +401,6 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     let preprocessedData = null;
     let preprocessedAttempted = false;
 
-    // 曖昧方向の比較で準備済みになった横書きworkerは、この後の縦書き全文workerとは
-    // 独立している。局所セル確認を全文精錬と並行開始し、追加の待ち時間をほぼ生じさせず、
-    // 後段の予算枯渇によって短列補正だけ到達不能になることも防ぐ。
-    const localRescanPromise = orientation === "vertical" && primary.data.blocks
-        && (primary.data.confidence >= OCR_CONFIDENCE_ACCEPT || resolvedFullData?.jpn)
-        && refinable && canRefine()
-        ? refineVerticalGlyphsWithLoadedHorizontalWorker(
-            grayCanvas, primary.data.blocks, 1, workerProvider)
-        : Promise.resolve([]);
-
     const recognizePreprocessed = async (forceForStructure = false) => {
         if (preprocessedAttempted || best.confidence >= OCR_PREPROCESS_SKIP_CONFIDENCE
             || (!canRefine() && !forceForStructure)) return;
@@ -434,6 +424,17 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     let bestOrientation;
     let bestGlyphSize;
     let localReplacements = [];
+    // 横書きworkerは縦書き全文workerとは独立している。局所セル確認を全文精錬と
+    // 並行開始し、追加の待ち時間をほぼ生じさせず、後段の予算枯渇によって短列補正
+    // だけ到達不能になることも防ぐ。未ロードでも関数側で必ずロードする（プールの
+    // 温まり具合で同じ画像の出力が変わらないようにする）。生成はtry直前に置き、
+    // 合流(finally)まで例外を挟まず必ずawaitされるようにする。
+    const localRescanPromise = orientation === "vertical" && primary.data.blocks
+        && (primary.data.confidence >= OCR_CONFIDENCE_ACCEPT || resolvedFullData?.jpn)
+        && refinable && canRefine()
+        ? refineVerticalGlyphsWithHorizontalWorker(
+            grayCanvas, primary.data.blocks, 1, workerProvider)
+        : Promise.resolve([]);
     try {
 
     // 文字が小さい場合のみ、2倍拡大版でも認識して良い方を採用する

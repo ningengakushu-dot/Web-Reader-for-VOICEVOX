@@ -42,10 +42,10 @@ assert.match(common, /resolvedFullData\?\.\[secondaryLang\]/,
     '向き判定で取得済みの副方向結果も再認識せず再利用する');
 assert.match(common, /pruneOcrLineInsertions/,
     '倍率間で位置が揺れる重複文字を列構造から除去する');
-assert.match(common, /refineVerticalGlyphsWithLoadedHorizontalWorker/,
-    '短い縦列は準備済みの独立モデルだけで局所確認する');
-assert.match(common, /localRescanPromise = orientation === "vertical"[\s\S]*canRefine\(\)[\s\S]*refineVerticalGlyphsWithLoadedHorizontalWorker/,
-    '短列の局所確認は準備済み別workerで全文精錬と並行開始する');
+assert.match(common, /refineVerticalGlyphsWithHorizontalWorker/,
+    '短い縦列は独立した横書きモデルで局所確認する');
+assert.match(common, /localRescanPromise = orientation === "vertical"[\s\S]*canRefine\(\)[\s\S]*refineVerticalGlyphsWithHorizontalWorker/,
+    '短列の局所確認はプール状態に依存せず全文精錬と並行開始する');
 assert.match(common, /await localRescanPromise/,
     '並行局所確認の完了を最終テキストへ反映する');
 assert.match(common, /upscaled2x = [\s\S]*await recognizePreprocessed\(\)[\s\S]*recognizePreprocessed\(true\)/,
