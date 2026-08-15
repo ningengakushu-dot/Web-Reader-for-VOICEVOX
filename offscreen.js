@@ -113,10 +113,13 @@ const resetOcrWorkers = ocrWorkers.terminate;
  * rect はビューポートのCSSピクセル座標、キャプチャ画像は物理ピクセルのため、
  * 画像幅とビューポート幅の比率で座標変換する（devicePixelRatio・ズーム両対応）。
  */
-async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId }) {
+async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, requestId }) {
     ocrProgressTabId = tabId ?? null;
     ocrDisplayProgress.reset();
     cancelOcrWorkerIdleRelease();
+    // requestId は background が古い要求の結果を捨てるための通し番号。そのまま返す。
+    const complete = (payload) => notifyBackground("OCR_COMPLETE",
+        Number.isInteger(requestId) ? { tabId, requestId, ...payload } : { tabId, ...payload });
     try {
         const blob = await (await fetch(dataUrl)).blob();
         const bitmap = await createImageBitmap(blob);
@@ -142,15 +145,15 @@ async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId }) {
         const text = cleanForSpeech(normalizeOcrText(data.text));
 
         if (!text) {
-            notifyBackground("OCR_COMPLETE", { tabId, error: "文字を認識できませんでした。範囲を変えてお試しください。" });
+            complete({ error: "文字を認識できませんでした。範囲を変えてお試しください。" });
             return;
         }
-        notifyBackground("OCR_COMPLETE", { tabId, text });
+        complete({ text });
     } catch (err) {
         console.error("Offscreen: OCR失敗:", err);
         // タイムアウトはワーカーがハングした可能性が高いため破棄して作り直させる
         if (err && err.isOcrTimeout) resetOcrWorkers();
-        notifyBackground("OCR_COMPLETE", { tabId, error: `文字認識に失敗しました: ${err.message}` });
+        complete({ error: `文字認識に失敗しました: ${err.message}` });
     } finally {
         ocrProgressTabId = null;
         scheduleOcrWorkerIdleRelease();
@@ -215,6 +218,11 @@ async function processSynthesis() {
         // stale な世代のエラーは通知も状態変更もしない
         if (generation !== synthesisGeneration) return;
         console.error("Offscreen: 合成失敗:", err);
+        // エンジンに届かない・応答が無い失敗では残りの文を合成しない。続けても文の数だけ
+        // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
+        // エンジンが特定の文だけ拒否した場合（HTTP エラー）は従来どおり次の文へ進む。
+        // 既に合成済みの音声はそのまま再生を終える。
+        if (isVoicevoxUnreachableError(err)) textQueue = [];
         notifyBackground("PLAYBACK_ERROR", { error: `合成失敗: ${err.message}` });
     } finally {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
@@ -224,6 +232,14 @@ async function processSynthesis() {
             processSynthesis();
         }
     }
+}
+
+// エンジンに接続できない／応答が無い種類の失敗か（fetch の TypeError・タイムアウト）。
+// HTTP ステータス由来の失敗（Query失敗(500) 等）は含めない。
+function isVoicevoxUnreachableError(err) {
+    const message = String(err?.message || "");
+    return (err && err.name === "TypeError")
+        || /Failed to fetch|NetworkError|ERR_CONNECTION|応答しません/i.test(message);
 }
 
 /**
@@ -324,6 +340,11 @@ async function processPlayback() {
 }
 
 function stopAll() {
+    // 何も動いていないときの停止（読み上げ開始前の STOP_AUDIO・二度目の停止）では
+    // PLAYBACK_STOPPED を通知しない。開始直前に「停止」が届くと capture.html の
+    // 表示が「停止しました」→「再生中」と往復し、タブのアイコンも一瞬点滅する。
+    const wasActive = isPlaying || isSynthesizing || textQueue.length > 0 || audioQueue.length > 0
+        || currentAudio != null;
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
     // in-flight の再生開始処理を無効化（停止後の AbortError 等を通知しない）
@@ -349,7 +370,7 @@ function stopAll() {
     isSynthesizing = false;
     isPlaying = false;
 
-    notifyBackground("PLAYBACK_STOPPED");
+    if (wasActive) notifyBackground("PLAYBACK_STOPPED");
 }
 
 function notifyBackground(type, payload = {}) {

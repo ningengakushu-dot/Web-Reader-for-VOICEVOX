@@ -44,6 +44,11 @@ function load(file, chrome) {
     assert.strictEqual(bg.validateRequest({ type: 'OCR_PROGRESS', target: 'background', tabId: 1, progress: Infinity }, offscreenSender).ok, false);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_PROGRESS', target: 'background', tabId: 1, progress: 0.5 }, offscreenSender).ok, true);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_COMPLETE', target: 'background', tabId: 1, error: {} }, offscreenSender).ok, false);
+    assert.strictEqual(bg.validateRequest({ type: 'OCR_COMPLETE', target: 'background', tabId: 1, text: 'a', requestId: '7' }, offscreenSender).ok, false,
+        'requestId は非負整数以外を拒否する');
+    assert.strictEqual(bg.validateRequest({ type: 'OCR_COMPLETE', target: 'background', tabId: 1, text: 'a', requestId: 7 }, offscreenSender).ok, true);
+    assert.strictEqual(bg.validateRequest({ type: 'OCR_COMPLETE', target: 'background', tabId: 1, text: 'a' }, offscreenSender).ok, true,
+        'requestId 無しの完了通知も受け付ける');
     assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_ERROR', target: 'background', error: 'x'.repeat(2001) }, offscreenSender).ok, false);
 
     const off = load('offscreen-security.js', chrome).VVRadioOffscreenSecurity;

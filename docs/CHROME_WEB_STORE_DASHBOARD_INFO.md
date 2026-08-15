@@ -57,6 +57,14 @@ Tesseract.js本体・WASMコア・日本語学習データ（`jpn.traineddata` /
 ## 3. バージョン別 ストア更新テキスト (Version Update Text)
 ダッシュボードの「公開用メモ」やストア掲載の更新内容として使用できます。
 
+### v1.4.3
+
+#### 日本語
+縦書きの文字認識（OCR）精度を改善しました。組版方向を断定できない範囲は縦横の両モデルで認識して比較し、余分に挿入された重複文字の除去と、短い列の低確信度漢字の局所再確認を追加しています。あわせて、精度を安定して保証できなかった「ルビ（ふりがな）優先読み」設定を削除し、OCRの進捗表示が開始直後にほぼ100%で止まって見える問題を修正しました。ページ内アイコンのサイズ上限を64pxから128pxへ拡張しています。文字認識は引き続き同梱のTesseract.js（WASM）によりブラウザ内で完結し、画像が外部へ送信されることはありません。
+
+#### English (Recommended)
+Improved OCR accuracy for vertical Japanese text. When the text direction cannot be determined reliably, the region is now recognized with both the horizontal and vertical models and compared; duplicated characters inserted by the recognizer are removed, and low-confidence kanji in short columns are re-checked locally. The "prefer furigana" OCR option, whose accuracy could not be guaranteed, has been removed, and the OCR progress bar no longer appears to stall near 100% right after starting. The maximum size of the on-page icon has been raised from 64 px to 128 px. OCR still runs entirely inside the browser using the bundled Tesseract.js (WASM); captured images are never transmitted externally.
+
 ### v1.4.0
 
 #### 日本語
@@ -103,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 出力: `dist/web-reader-for-voicevox-<version>.zip`
 
-**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
+**含めるもの**: `manifest.json` / `background-entry.js` / `background-security.js` / `background.js` / `content-guard.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `offscreen.html` / `offscreen-security.js` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
 
 **除外するもの**: `README.md`、`docs/`、`tools/`、`dist/`、ストア掲載用の素材（`images/Web-Reader-for-VOICEVOX_*.png`、`images/Web_Reader_for_VOICEVOX.mp4`）、`.claude/`、`AGENTS.md`、`CLAUDE.md`、`audio/`
 

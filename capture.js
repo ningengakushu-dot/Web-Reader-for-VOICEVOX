@@ -299,8 +299,10 @@
     // background から転送される再生状態（target:'tab'）を反映する。
     // offscreen が全拡張ページへブロードキャストする通知（target:'background'）は
     // background 経由の転送と二重になるため、ここでは処理しない。
-    chrome.runtime.onMessage.addListener((request) => {
-        if (request.target !== "tab") return;
+    chrome.runtime.onMessage.addListener((request, sender) => {
+        // 拡張機能内部（background）からの転送のみ扱う（他コンテキストからの偽装を排除）
+        if (sender?.id !== chrome.runtime.id) return;
+        if (!request || request.target !== "tab") return;
 
         switch (request.type) {
             case "PLAYBACK_STARTED":

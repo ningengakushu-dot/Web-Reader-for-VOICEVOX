@@ -6,7 +6,6 @@
 
 // CJK統合漢字（U+4E00–U+9FFF）＋拡張A（U+3400–U+4DBF）の判定を1か所に集約する。
 const OCR_KANJI_CLASS = "㐀-䶿一-鿿";
-const OCR_KANJI_RE = new RegExp(`[${OCR_KANJI_CLASS}]`);       // 部分一致（漢字を含むか）
 const OCR_KANJI_ONE_RE = new RegExp(`^[${OCR_KANJI_CLASS}]$`);  // 単一文字が漢字か
 
 /**
@@ -100,9 +99,10 @@ function buildTextFromBlocks(blocks, orientation, glyphSize) {
 function estimateGlyphSizeFromBlocks(blocks, orientation) {
     const sizes = [];
     forEachOcrLine(blocks, (line) => {
-        const s = orientation === "vertical"
-            ? line.bbox.x1 - line.bbox.x0
-            : line.bbox.y1 - line.bbox.y0;
+        // 実機の Tesseract は行座標が得られないことがある（他の走査と同じく防御する）
+        const bbox = line.bbox;
+        if (!bbox) return;
+        const s = orientation === "vertical" ? bbox.x1 - bbox.x0 : bbox.y1 - bbox.y0;
         if (s > 0) sizes.push(s);
     });
     if (!sizes.length) return null;
@@ -539,10 +539,17 @@ const OCR_CONSENSUS_CONFIDENCE_MARGIN = 3;
 // 拡大後の画素数の上限（巨大な選択範囲で時間とメモリを浪費しないための保護）
 const OCR_FUSION_MAX_AREA = 8400000;
 
+// 編集距離の表（n×m セル、1セル4バイト）の上限。融合が発火するのは文字が小さい
+// ＝文字数が多い入力なので、密な全面選択では数千文字同士の整列になり得る。
+// 3000×3000（36MB・9M反復）までは許し、それを超える極端な入力では整列せず
+// 融合を見送る（無変更＝安全側）。実文書の1回の選択は千数百文字程度に収まる。
+const OCR_ALIGN_MAX_CELLS = 9000000;
+
 // 2つのシンボル列を編集距離で整列し、[baseIndex, otherSymbol] の対応を返す
 function alignOcrSymbols(baseEntries, otherEntries) {
     const n = baseEntries.length;
     const m = otherEntries.length;
+    if (n === 0 || m === 0 || n * m > OCR_ALIGN_MAX_CELLS) return [];
     const dp = [];
     for (let i = 0; i <= n; i++) {
         dp.push(new Int32Array(m + 1));

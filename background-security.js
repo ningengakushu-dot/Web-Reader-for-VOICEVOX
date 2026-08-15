@@ -1,5 +1,6 @@
 // Background message boundary validation.
-// Runs before background.js and wraps its onMessage listener without changing normal requests.
+// Loaded before background.js; its onMessage listener calls validateRequest first and
+// rejects malformed or unauthorized messages without changing normal requests.
 (() => {
     const MAX_TEXT_CHARS = 200000;
     const MAX_OCR_DATA_URL_CHARS = 64 * 1024 * 1024;
@@ -64,6 +65,10 @@
                 return { ok: false, error: "tabId が不正です" };
             }
             if (request.type === "OCR_COMPLETE") {
+                if (request.requestId != null
+                    && (!Number.isInteger(request.requestId) || request.requestId < 0)) {
+                    return { ok: false, error: "requestId が不正です" };
+                }
                 if (request.text != null && typeof request.text !== "string") {
                     return { ok: false, error: "認識結果が不正です" };
                 }

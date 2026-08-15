@@ -100,7 +100,30 @@ function createPrimaryOcrProgressTracker() {
  * @returns {Promise<object>} Tesseract のワーカー
  */
 function createOcrWorker(lang, logger) {
-    const created = Tesseract.createWorker(lang, 1, {
+    let created;
+    try {
+        created = createOcrWorkerPromise(lang, logger);
+    } catch (error) {
+        // Tesseract 本体（同梱 tesseract.min.js）が読み込めていない等の同期例外も
+        // 拒否された Promise として返し、呼び出し側の .catch（エラー表示）に届かせる。
+        return Promise.reject(error);
+    }
+
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            // タイムアウト後に遅れて生成が完了した場合は破棄する（リーク防止）
+            created.then((worker) => worker.terminate()).catch(() => {});
+            reject(new Error("文字認識エンジンの初期化がタイムアウトしました。"));
+        }, OCR_WORKER_INIT_TIMEOUT_MS);
+        created.then(
+            (worker) => { clearTimeout(timer); resolve(worker); },
+            (err) => { clearTimeout(timer); reject(err); }
+        );
+    });
+}
+
+function createOcrWorkerPromise(lang, logger) {
+    return Tesseract.createWorker(lang, 1, {
         workerPath: chrome.runtime.getURL("vendor/tesseract/worker.min.js"),
         // ディレクトリを指定すると SIMD 対応状況に応じたコアが自動選択される
         corePath: chrome.runtime.getURL("vendor/tesseract/core"),
@@ -119,24 +142,18 @@ function createOcrWorker(lang, logger) {
         // 横書きモデルはTesseract既定のSINGLE_BLOCK(6)と同値を明示設定する。値は
         // 変えないが、局所漢字再確認がPSMを一時変更した後の復元先（同じ定数）と
         // 生成時の値が一致することをコード上で保証するため。
-        await worker.setParameters({
-            tessedit_pageseg_mode: lang === "jpn_vert"
-                ? Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
-                : Tesseract.PSM.SINGLE_BLOCK
-        });
+        try {
+            await worker.setParameters({
+                tessedit_pageseg_mode: lang === "jpn_vert"
+                    ? Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
+                    : Tesseract.PSM.SINGLE_BLOCK
+            });
+        } catch (error) {
+            // 生成済みworker（WASM＋学習データ）を抱えたまま失敗させない
+            try { await worker.terminate(); } catch (terminateError) { /* 破棄失敗は無視 */ }
+            throw error;
+        }
         return worker;
-    });
-
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            // タイムアウト後に遅れて生成が完了した場合は破棄する（リーク防止）
-            created.then((worker) => worker.terminate()).catch(() => {});
-            reject(new Error("文字認識エンジンの初期化がタイムアウトしました。"));
-        }, OCR_WORKER_INIT_TIMEOUT_MS);
-        created.then(
-            (worker) => { clearTimeout(timer); resolve(worker); },
-            (err) => { clearTimeout(timer); reject(err); }
-        );
     });
 }
 
@@ -709,6 +726,22 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         }
     }
 
+    } catch (error) {
+        // 精錬段（拡大・二値化・副方向・構造証拠・融合）の失敗で、既に手元にある
+        // 主経路の全文認識まで捨てて OCR 全体を失敗させない。text が未組み立てなら
+        // その時点の採用結果（少なくとも主経路）から作り、組み立て済みならそれを使う。
+        console.warn("OCR: 精錬段で失敗したため、その時点の認識結果を使用します:", error);
+        if (text == null) {
+            bestOrientation = bestLang === "jpn_vert" ? "vertical" : "horizontal";
+            try {
+                bestGlyphSize = estimateGlyphSizeFromBlocks(best.blocks, bestOrientation);
+                text = best.blocks
+                    ? buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize)
+                    : best.text;
+            } catch (rebuildError) {
+                text = best.text ?? "";
+            }
+        }
     } finally {
         // 途中の全文認識が失敗しても、共有workerのPSM復元が終わるまで次要求へ進ませない。
         localReplacements = await localRescanPromise;

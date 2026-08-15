@@ -61,14 +61,19 @@
                 || !Number.isInteger(message.tabId) || message.tabId < 0) {
                 return { ok: false, error: "OCR要求が不正です" };
             }
-            return { ok: true, message: {
+            const sanitized = {
                 type: "OCR_RECOGNIZE",
                 target: "offscreen",
                 dataUrl: message.dataUrl,
                 rect: { x: r.x, y: r.y, width: r.width, height: r.height },
                 viewportWidth: message.viewportWidth,
                 tabId: message.tabId
-            } };
+            };
+            // background が古い要求の結果を捨てるための通し番号（省略可・非負整数のみ通す）
+            if (Number.isInteger(message.requestId) && message.requestId >= 0) {
+                sanitized.requestId = message.requestId;
+            }
+            return { ok: true, message: sanitized };
         }
         if (message.type === "STOP_AUDIO" || message.type === "PREWARM_OCR") {
             return { ok: true, message };

@@ -215,7 +215,24 @@ async function startCaptureOcrInTab(tab) {
         // chrome:// ページ等のキャプチャ不可画面ではここに到達する。
         // ページ内にUIを出せない場面もあるため、ツールバーバッジで簡易通知する。
         console.warn("Background: 画面キャプチャに失敗:", err.message);
-        flashActionBadge("ERR", "このページは画面をキャプチャできません（Chromeの設定画面・ウェブストア等）");
+        const isFileUrl = /^file:/i.test(String(tab.url ?? ""));
+        flashActionBadge(tab.id, "ERR", isFileUrl
+            ? "ローカルファイルをキャプチャできません。拡張機能の詳細で「ファイルの URL へのアクセスを許可する」を ON にしてください"
+            : "このページは画面をキャプチャできません（Chromeの設定画面・ウェブストア等）");
+    }
+}
+
+// タブごとの「最新の範囲OCR要求」。OCRは数十秒かかることがあり、その間に利用者が
+// 別の範囲を選び直したり、テキスト選択の読み上げを始めたり、停止したりできる。
+// 古い要求の結果が後から届いて新しい読み上げを中断・上書きしないよう、要求に通し番号を
+// 付けて offscreen に往復させ、完了時に最新の番号と一致するものだけを読み上げる。
+//   値が番号: その番号の要求だけ有効 / null: 停止・別読み上げで無効化済み（結果は捨てる）
+// SW休止で失われた場合は照合できないので、その要求の結果は従来どおり受け付ける。
+let ocrRequestSeq = 0;
+const latestOcrRequestByTab = new Map();
+function invalidatePendingOcr(tabId) {
+    if (Number.isInteger(tabId) && latestOcrRequestByTab.has(tabId)) {
+        latestOcrRequestByTab.set(tabId, null);
     }
 }
 
@@ -231,13 +248,31 @@ async function captureAndRecognizeRegion(request, tab) {
         throw new Error("キャプチャ画像が大きすぎます。表示倍率を下げて再度お試しください。");
     }
     await setupOffscreen();
+    const requestId = ++ocrRequestSeq;
+    latestOcrRequestByTab.set(tab.id, requestId);
     await sendToOffscreen({
         type: "OCR_RECOGNIZE",
         dataUrl,
         rect: request.rect,
         viewportWidth: request.viewportWidth,
-        tabId: tab.id
+        tabId: tab.id,
+        requestId
     });
+}
+
+// OCR_COMPLETE が今も有効な要求のものかを判定する。無効なら true を返して呼び出し側に
+// 捨てさせる。停止・別読み上げで無効化された場合は「文字認識中…」表示だけを片付ける
+// （より新しいOCRが進行中の場合はそのトーストを消さないよう何も通知しない）。
+function consumeStaleOcrCompletion(tabId, requestId) {
+    if (!Number.isInteger(requestId) || !latestOcrRequestByTab.has(tabId)) return false;
+    const latest = latestOcrRequestByTab.get(tabId);
+    if (latest === requestId) {
+        latestOcrRequestByTab.delete(tabId);
+        return false;
+    }
+    // null は次の要求が来るまで残す（同じタブに複数の古い要求が並んでいても全て捨てる）。
+    if (latest === null) notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
+    return true;
 }
 
 // PNGのdataURLをJPEG（品質92%）へ再エンコードする。
@@ -281,21 +316,29 @@ async function blobToDataUrl(blob) {
 
 // ツールバーアイコンのバッジを一時表示する（キャプチャ不可ページ等のエラー通知）。
 // 短時間に連続失敗しても前回のクリアタイマーが表示中のバッジを早消ししないようにする。
-let badgeClearTimer = null;
+// タブごとに表示するため、タイマーもタブごとに持つ（共有すると先に失敗したタブの
+// 解除が取り消され、そのタブに ERR が残り続ける）。
+const badgeClearTimers = new Map();
 // manifest.json の action.default_title と同一。エラー通知後に戻すため保持する。
 const ACTION_DEFAULT_TITLE = "画面をキャプチャしてOCR読み上げ（画像・PDF向け）";
 // ページ内にUIを出せない画面（chrome:// 等）での唯一の通知手段。
 // バッジは3文字程度しか出せないため、理由は必ずツールチップにも入れる。
-function flashActionBadge(text, title) {
-    chrome.action.setBadgeBackgroundColor({ color: "#e01e5a" });
-    chrome.action.setBadgeText({ text });
-    if (title) chrome.action.setTitle({ title: `${ACTION_DEFAULT_TITLE}\n${title}` });
-    if (badgeClearTimer) clearTimeout(badgeClearTimer);
-    badgeClearTimer = setTimeout(() => {
-        badgeClearTimer = null;
-        chrome.action.setBadgeText({ text: "" });
-        chrome.action.setTitle({ title: ACTION_DEFAULT_TITLE });
-    }, 3000);
+// 失敗したタブに限定して表示する（全タブのアイコンに ERR が出ないように）。
+// タブが3秒以内に閉じられると解除側の呼び出しが失敗するが、タブ限定の表示は
+// タブと一緒に消えるので無視してよい。
+function flashActionBadge(tabId, text, title) {
+    const target = Number.isInteger(tabId) ? { tabId } : {};
+    const swallow = (promise) => Promise.resolve(promise).catch(() => {});
+    swallow(chrome.action.setBadgeBackgroundColor({ ...target, color: "#e01e5a" }));
+    swallow(chrome.action.setBadgeText({ ...target, text }));
+    if (title) swallow(chrome.action.setTitle({ ...target, title: `${ACTION_DEFAULT_TITLE}\n${title}` }));
+    const timerKey = Number.isInteger(tabId) ? tabId : "global";
+    if (badgeClearTimers.has(timerKey)) clearTimeout(badgeClearTimers.get(timerKey));
+    badgeClearTimers.set(timerKey, setTimeout(() => {
+        badgeClearTimers.delete(timerKey);
+        swallow(chrome.action.setBadgeText({ ...target, text: "" }));
+        swallow(chrome.action.setTitle({ ...target, title: ACTION_DEFAULT_TITLE }));
+    }, 3000));
 }
 
 // content.js が未注入のタブ（拡張のインストール/リロード前から開かれていたタブ等）では
@@ -444,29 +487,56 @@ async function switchPlaybackTabTo(tabId) {
     await setPlaybackTabId(tabId);
 }
 
-// タブが閉じられたら、保持している状態（再生宛先・ショートカット重複抑制）を掃除する。
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-    lastShortcut.delete(tabId);
-    if (await getPlaybackTabId() === tabId) {
-        await setPlaybackTabId(null);
+// offscreen ドキュメントが存在するときだけ再生停止を送る。
+// 存在しなければ再生中でもないので、停止のためだけに生成しない（生成すると
+// 以後ブラウザ終了まで常駐し、SW休止によるメモリ削減効果を打ち消す）。
+// GENERATE_VOICE の「STOP_AUDIO → ENQUEUE_TEXTS」の間に割り込むと積んだ直後の
+// キューが消えて無音になるため、必ず同じ直列キューを通す。
+async function stopOffscreenAudioIfPresent() {
+    let contexts = [];
+    try {
+        contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+    } catch (e) {
+        // 存在確認ができないときは何もしない（再生中でなければ実害なし）
+        return;
     }
+    if (contexts.length > 0) await sendToOffscreen({ type: "STOP_AUDIO" });
+}
+
+// 指定タブが再生宛先のままなら、宛先を外して再生を止める（タブ終了・遷移用）。
+// 宛先の照合も直列キューの内側で行う: 別タブの読み上げ開始（switchPlaybackTabTo）が
+// 先にキューへ入っていた場合、その完了後に照合すれば宛先は既に別タブなので、
+// 始まったばかりの読み上げを誤って止めない。
+async function stopPlaybackForTab(tabId) {
+    // 事前確認: 再生に無関係なタブの読み込みで直列キューを塞がない
+    if (await getPlaybackTabId() !== tabId) return;
+    return enqueueVoiceOperation(async () => {
+        if (await getPlaybackTabId() !== tabId) return;
+        // 宛先を先にクリアするので、offscreen が返す PLAYBACK_STOPPED は転送先が
+        // 無くなり、遷移先の新しいページのインジケーターを誤って点灯させない。
+        await setPlaybackTabId(null);
+        try {
+            await stopOffscreenAudioIfPresent();
+        } catch (e) {
+            // 送信失敗は無視（offscreen が消えていれば再生も止まっている）
+        }
+    });
+}
+
+// タブが閉じられたら、保持している状態（再生宛先・ショートカット重複抑制・OCR要求）を
+// 掃除する。読み上げ中のタブを閉じた場合は音声も止める（閉じたタブには停止する
+// 手段が残らないため、鳴りっぱなしを防ぐ）。
+chrome.tabs.onRemoved.addListener((tabId) => {
+    lastShortcut.delete(tabId);
+    latestOcrRequestByTab.delete(tabId);
+    stopPlaybackForTab(tabId);
 });
 
 // 再生中のタブが別ページへ遷移／リロードされたら、音声が鳴りっぱなしになるのを防ぐため
-// 再生を停止する。宛先を先にクリアするので、offscreen が返す PLAYBACK_STOPPED は
-// 転送先が無くなり、遷移先の新しいページのインジケーターを誤って点灯させない。
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+// 再生を停止する。
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status !== "loading") return;
-    if (await getPlaybackTabId() !== tabId) return;
-    await setPlaybackTabId(null);
-    try {
-        const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-        if (contexts.length > 0) {
-            sendToOffscreen({ type: "STOP_AUDIO" }).catch(() => {});
-        }
-    } catch (e) {
-        // getContexts 失敗時は何もしない（再生中でなければ実害なし）
-    }
+    stopPlaybackForTab(tabId);
 });
 
 // --- Offscreen Document 管理 ---
@@ -671,6 +741,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
 
         case "GENERATE_VOICE":
+            // 新しい読み上げの開始は、そのタブで進行中の範囲OCRを無効化する
+            // （古い認識結果が後から届いてこの読み上げを中断しないように）。
+            invalidatePendingOcr(sender.tab?.id);
             // 宛先の保存を完了してから合成を開始し、直後の PLAYBACK_STARTED を取りこぼさない。
             enqueueVoiceOperation(async () => {
                 await switchPlaybackTabTo(sender.tab?.id ?? null);
@@ -679,10 +752,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
 
         case "STOP_ALL":
-            respondWith(
-                enqueueVoiceOperation(() =>
-                    setupOffscreen().then(() => sendToOffscreen({ type: 'STOP_AUDIO' }))),
-                sendResponse);
+            // 停止はそのタブで進行中の範囲OCRも取り消す（完了後に勝手に読み上げを始めない）。
+            invalidatePendingOcr(sender.tab?.id);
+            respondWith(enqueueVoiceOperation(stopOffscreenAudioIfPresent), sendResponse);
             return true;
 
         case "CAPTURE_OCR_REGION": {
@@ -714,6 +786,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case "OCR_COMPLETE": {
             // offscreen でのOCR完了。認識テキストを既存の読み上げパイプラインへ流す。
             const tabId = request.tabId ?? null;
+            // 選び直し・停止・別の読み上げ開始で古くなった要求の結果は使わない。
+            if (consumeStaleOcrCompletion(tabId, request.requestId)) return false;
             if (request.error || !request.text) {
                 notifyTab(tabId, {
                     type: "OCR_STATUS",
@@ -834,19 +908,53 @@ async function fetchSpeakerIcon(speakerId) {
 /**
  * テキストを文末記号（。！？）と改行で分割する
  * 読点（、）等はVOICEVOXが自然なポーズで処理するため分割しない
+ *
+ * 1文の上限（MAX_CHUNK_CHARS）を超える長い文だけは、読点・空白で二次分割する。
+ * VOICEVOX の audio_query は本文を URL に載せる（日本語1文字≈9バイト）ため、
+ * 句点の無い長文（表・箇条書き・スライドの OCR 結果は行を読点でつないだ1文になる）を
+ * そのまま送るとエンジン側の要求行サイズ上限（16KB前後）で拒否され、また1回の合成が
+ * 60秒のタイムアウトに達して読み上げ全体が失敗する。上限は数百字にとどめる。
  */
+const MAX_CHUNK_CHARS = 600;
 function splitText(text) {
     if (!text) return [];
 
-    const MAX_CHUNK_CHARS = 5000;
     const sentences = text.match(/[^。！？\n]+[。！？\n]?/g) || [text];
     const result = [];
     for (const sentence of sentences) {
         const trimmed = sentence.trim();
         if (!trimmed) continue;
-        for (let offset = 0; offset < trimmed.length; offset += MAX_CHUNK_CHARS) {
-            result.push(trimmed.slice(offset, offset + MAX_CHUNK_CHARS));
+        if (trimmed.length <= MAX_CHUNK_CHARS) {
+            result.push(trimmed);
+            continue;
         }
+        result.push(...splitLongSentence(trimmed));
     }
     return result.length > 0 ? result : [text.slice(0, MAX_CHUNK_CHARS)];
+}
+
+// 上限を超える1文を、読点・空白の直後で MAX_CHUNK_CHARS 以内のかたまりへ分ける。
+// 区切りが無い部分は上限で機械的に切る（それでも読めなくなるより良い）。
+function splitLongSentence(sentence) {
+    const pieces = sentence.match(/[^、，,\s]+[、，,\s]*|[、，,\s]+/g) || [sentence];
+    const out = [];
+    let buffer = "";
+    const flush = () => {
+        const trimmed = buffer.trim();
+        if (trimmed) out.push(trimmed);
+        buffer = "";
+    };
+    for (const piece of pieces) {
+        if (buffer && buffer.length + piece.length > MAX_CHUNK_CHARS) flush();
+        if (piece.length > MAX_CHUNK_CHARS) {
+            flush();
+            for (let offset = 0; offset < piece.length; offset += MAX_CHUNK_CHARS) {
+                out.push(piece.slice(offset, offset + MAX_CHUNK_CHARS).trim());
+            }
+            continue;
+        }
+        buffer += piece;
+    }
+    flush();
+    return out.filter(Boolean);
 }
