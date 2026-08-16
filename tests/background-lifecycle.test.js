@@ -191,19 +191,37 @@ const send = (message, sender) => new Promise((resolve) => {
         const splitText = (text) => Array.from(context.__test.splitText(text));
         assert.deepEqual(splitText('短い文。次の文！'), ['短い文。', '次の文！'],
             '通常の文は文末記号でのみ分割する');
+        // 120字以内の文はそのまま（読点では分割しない）
+        const medium = 'これは、読点を含む、しかし長すぎない、普通の一文です。';
+        assert.deepEqual(splitText(medium), [medium], '120字以内の文は読点で分割しない');
+        // 長い文は読点の直後で120字以内に分ける（先読み合成が再生に追いつくため）
         const clause = 'あいうえおかきくけこ、';
         const long = clause.repeat(120); // 1,320文字・句点なし
         const chunks = splitText(long);
-        assert.ok(chunks.length > 1, '上限を超える1文は分割される');
-        assert.ok(chunks.every((c) => c.length <= 600), `各チャンクは600文字以内: ${chunks.map((c) => c.length)}`);
+        assert.ok(chunks.length > 1, '長い1文は分割される');
+        assert.ok(chunks.every((c) => c.length <= 120), `各チャンクは120文字以内: ${chunks.map((c) => c.length)}`);
         assert.ok(chunks.every((c) => c.endsWith('、')), '読点の直後で区切る');
         assert.equal(chunks.join(''), long, '文字を落とさない');
+        // 読点の無い部分は600字まで切らず、それを超えるときだけ機械的に切る
         const noBreak = 'あ'.repeat(1300);
         const hard = splitText(noBreak);
         assert.ok(hard.every((c) => c.length <= 600));
         assert.equal(hard.join(''), noBreak);
+        const oneRun = 'い'.repeat(300);
+        assert.deepEqual(splitText(oneRun), [oneRun], '区切りの無い300字は途中で切らない');
         const sentence = 'これは普通の長さの文です。'.repeat(3);
         assert.equal(splitText(sentence).join(''), sentence);
+        // 実機報告の再現: 句点の無い箇条書き（約390字）が1件にならない
+        const mail = '思っております。' + '-'.repeat(60) + '、◆フェンリル株式会社／【リモート可／大阪】UXコンサルタント◆'
+            + '「Sleipnir」開発企業◆土日祝休・フレックス、URL省略、〜スマホに入っているそのアプリ、'
+            + 'フェンリルがつくっているかもしれません〜、■世界シリーズ累計5,000万超ダウンロードのWebブラウザ'
+            + '「Sleipnir」を自社プロダクトとして保有、■iPhone向けアプリケーション開発に関わり、600件以上の実績あり、'
+            + '■所属するクリエイター／技術者の技術書出版、技術フォーラムにスピーカーとして登壇、'
+            + 'フロアを利用した最新トレンドの勉強会の一般開放など、高い専門性を持つ社員多数、' + '-'.repeat(60);
+        const mailChunks = splitText(mail);
+        assert.ok(mailChunks.length >= 4 && mailChunks.every((c) => c.length <= 120),
+            `箇条書きは読点単位の120字以内へ分かれる: ${mailChunks.map((c) => c.length)}`);
+        assert.equal(mailChunks.join(''), mail);
     }
 
     console.log('background lifecycle and stale OCR handling: PASSED');

@@ -907,14 +907,21 @@ async function fetchSpeakerIcon(speakerId) {
 
 /**
  * テキストを文末記号（。！？）と改行で分割する
- * 読点（、）等はVOICEVOXが自然なポーズで処理するため分割しない
+ * 読点（、）等はVOICEVOXが自然なポーズで処理するため、通常の長さの文では分割しない
  *
- * 1文の上限（MAX_CHUNK_CHARS）を超える長い文だけは、読点・空白で二次分割する。
+ * 長い文だけは読点・空白の直後で二次分割する（SOFT_CHUNK_CHARS を超えるとき）。
+ * 合成は「再生中の1件＋先読み1件」で進むため、1文が長いとその合成が前の文の再生時間に
+ * 収まらず、文と文の間に無音が空く。実測（CPU合成・0.47秒/音声1秒）: 句点の無い
+ * 箇条書き約390字（音声55秒）は合成に26秒かかり、直前の1文（音声7秒）の後に約20秒
+ * 無音になった。読点単位（100字前後）にすれば1件の合成が数秒に収まり、先読みが追いつく。
+ * 読点で区切っても VOICEVOX は読点で「間」を置くため、聞こえ方はほぼ変わらない。
+ *
+ * 読点も空白も無い部分は MAX_CHUNK_CHARS まで許し、それを超えるときだけ機械的に切る。
  * VOICEVOX の audio_query は本文を URL に載せる（日本語1文字≈9バイト）ため、
- * 句点の無い長文（表・箇条書き・スライドの OCR 結果は行を読点でつないだ1文になる）を
- * そのまま送るとエンジン側の要求行サイズ上限（16KB前後）で拒否され、また1回の合成が
- * 60秒のタイムアウトに達して読み上げ全体が失敗する。上限は数百字にとどめる。
+ * 数千字を1件で送るとエンジン側の要求行サイズ上限（16KB前後）で拒否され、
+ * 60秒の合成タイムアウトにも達して読み上げ全体が失敗する。
  */
+const SOFT_CHUNK_CHARS = 120;
 const MAX_CHUNK_CHARS = 600;
 function splitText(text) {
     if (!text) return [];
@@ -924,7 +931,7 @@ function splitText(text) {
     for (const sentence of sentences) {
         const trimmed = sentence.trim();
         if (!trimmed) continue;
-        if (trimmed.length <= MAX_CHUNK_CHARS) {
+        if (trimmed.length <= SOFT_CHUNK_CHARS) {
             result.push(trimmed);
             continue;
         }
@@ -933,8 +940,9 @@ function splitText(text) {
     return result.length > 0 ? result : [text.slice(0, MAX_CHUNK_CHARS)];
 }
 
-// 上限を超える1文を、読点・空白の直後で MAX_CHUNK_CHARS 以内のかたまりへ分ける。
-// 区切りが無い部分は上限で機械的に切る（それでも読めなくなるより良い）。
+// 長い1文を、読点・空白の直後で SOFT_CHUNK_CHARS 以内のかたまりへ分ける。
+// 区切りの無い部分はそのまま（最大 MAX_CHUNK_CHARS）とし、それすら超えるときだけ
+// 上限で機械的に切る（それでも読めなくなるより良い）。
 function splitLongSentence(sentence) {
     const pieces = sentence.match(/[^、，,\s]+[、，,\s]*|[、，,\s]+/g) || [sentence];
     const out = [];
@@ -945,7 +953,7 @@ function splitLongSentence(sentence) {
         buffer = "";
     };
     for (const piece of pieces) {
-        if (buffer && buffer.length + piece.length > MAX_CHUNK_CHARS) flush();
+        if (buffer && buffer.length + piece.length > SOFT_CHUNK_CHARS) flush();
         if (piece.length > MAX_CHUNK_CHARS) {
             flush();
             for (let offset = 0; offset < piece.length; offset += MAX_CHUNK_CHARS) {
