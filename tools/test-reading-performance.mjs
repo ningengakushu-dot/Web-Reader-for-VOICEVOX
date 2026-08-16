@@ -204,9 +204,13 @@ async function testAudioBackpressure() {
         async readBlobResponseWithLimit(response) { return response.blob(); },
         async fetchWithTimeout(url) {
             if (url.includes("/audio_query")) {
+                // 1件 = 音声10秒相当（先読みの秒数上限が効くことを確かめる）
                 return {
                     ok: true,
-                    async json() { return {}; }
+                    async json() {
+                        return { prePhonemeLength: 0.1, postPhonemeLength: 0.1,
+                            accent_phrases: [{ moras: [{ vowel_length: 9.8, consonant_length: 0 }] }] };
+                    }
                 };
             }
             synthesisRequests++;
@@ -234,17 +238,18 @@ async function testAudioBackpressure() {
     }, { id: "test-extension" }, () => {});
 
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(synthesisRequests, 2, "再生中1件と先読み1件を超えて合成しない");
+    // 再生中1件＋完成済み音声が45秒分（10秒×5件）に達したら、それ以上は合成しない
+    assert.equal(synthesisRequests, 6, "先読みは完成済み音声の秒数上限（45秒）で止まる");
     assert.equal(audioInstances.length, 1, "先頭の音声だけを再生する");
 
     audioInstances[0].onended();
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(synthesisRequests, 3, "再生待ちに空きができたら次の1件を合成する");
+    assert.equal(synthesisRequests, 7, "再生が進んで空きができたら次の1件を合成する");
     assert.equal(audioInstances.length, 2, "次の音声へ途切れず進む");
 
     listener({ target: "offscreen", type: "STOP_AUDIO" },
         { id: "test-extension" }, () => {});
-    assert.ok(revokedUrls >= 3, "停止時に再生中・待機中のBlob URLを解放する");
+    assert.ok(revokedUrls >= 7, "停止時に再生中・待機中のBlob URLを解放する");
 }
 
 const chrome = findChrome();

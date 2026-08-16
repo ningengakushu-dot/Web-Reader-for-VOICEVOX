@@ -1000,7 +1000,7 @@ class VVRadioReader {
                 // 段落の切れ目はDOM構造から正確に分かっているので、改行のまま渡して
                 // 合成側で「間」にしてもらう（OCR経路と同じ扱い）。
                 this.setUpdateNoticeHidden(false);
-                this.speakText(result.text, { keepParagraphs: true });
+                this.speakText(result.text);
                 return;
             }
         }
@@ -1171,10 +1171,10 @@ class VVRadioReader {
     }
 
     // 音声再生リクエスト
-    speakText(text, options = {}) {
+    speakText(text) {
         if (!text) return;
 
-        const cleanText = this.cleanMessage(text, options.keepParagraphs === true);
+        const cleanText = this.cleanMessage(text);
         if (!cleanText) return;
 
         try {
@@ -1209,16 +1209,17 @@ class VVRadioReader {
     }
 
     // メッセージの整形（不要な情報の削除・置換）
-    // keepParagraphs=true のときは改行を残す。合成側が改行を文の区切りとして扱い、
-    // 段落の「間」になるため（ページ内テキスト経路で段落構造が分かる場合に使う）。
-    cleanMessage(text, keepParagraphs = false) {
+    // 改行は残す。合成側（background の splitText）が改行を文の区切りとして扱うため、
+    // 見出し・箇条書き・表のセルが1件ずつになり、段落の「間」も自然に入る。
+    // 以前はテキスト選択の経路だけ改行を空白にしていたが、見出しと本文が1つの長い
+    // 「文」につながって分割位置が不自然になるだけで、利点は無かった。
+    // 細かな整形（不可視文字・記号の連続・日付や単位の読み・URLの取りこぼし）は
+    // すべての経路が通る background 側で行う。
+    cleanMessage(text) {
         if (!text) return "";
-        const withoutUrls = text
-            .replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略");
-        if (keepParagraphs) {
-            return withoutUrls.replace(/[ \t]*\n[ \t]*/g, "\n").replace(/\n{2,}/g, "\n").trim();
-        }
-        return withoutUrls.replace(/\n+/g, " ").trim();
+        return text
+            .replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略")
+            .replace(/[ \t]*\n[ \t]*/g, "\n").replace(/\n{2,}/g, "\n").trim();
     }
 }
 

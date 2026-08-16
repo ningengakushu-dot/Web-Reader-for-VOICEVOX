@@ -86,6 +86,15 @@ jobs:
       - name: タブ終了時の停止・古いOCR結果の破棄・長文分割の検査
         run: node tests/background-lifecycle.test.js
 
+      - name: 読み上げテキストの整形・分割の検査
+        run: node tests/speech-text.test.js
+
+      - name: OCRテキスト整形（段落・見出し・英文折り返し）の検査
+        run: node tests/ocr-text-normalize.test.js
+
+      - name: 音声先読み（件数・秒数の上限）の検査
+        run: node tests/offscreen-prefetch.test.js
+
       - name: 合成失敗時のキュー破棄と停止通知の検査
         run: node tests/offscreen-synthesis-failure.test.js
 

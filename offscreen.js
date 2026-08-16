@@ -6,11 +6,15 @@ let isSynthesizing = false;
 let isPlaying = false;
 let currentAudio = null;
 let currentAudioUrl = null;
-// 再生中の音声とは別に、完成済み音声を何件まで先読みするか。
-// 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が
-// 読み上げ終了まで増え続ける。次の1件だけを用意すれば文間の途切れを防ぎつつ、
-// メモリとCPUの使用量を文章量に依存しない一定範囲へ抑えられる。
-const MAX_READY_AUDIO_QUEUE = 1;
+// 再生中の音声とは別に、完成済み音声をどれだけ先読みするか（件数と合計秒数の両方で制限）。
+// 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が読み上げ終了まで
+// 増え続ける。一方で「次の1件だけ」では、短い文（見出し・箇条書きの1行）の直後に長い文が
+// 来ると、その合成（音声長の約0.5〜0.7倍）が短い文の再生中に終わらず無音になる。
+// 実測（音声1秒あたり合成0.5秒）では、再生済みの音声が数十秒分たまっていれば
+// 1件の合成時間（最長で音声30〜60秒＝合成15〜40秒）を吸収できる。
+// 24kHz/16bit の WAV は1分で約2.9MB なので、メモリは文章量に依存しない一定範囲に収まる。
+const MAX_READY_AUDIO_QUEUE = 24;
+const MAX_READY_AUDIO_SECONDS = 45;
 // 合成の世代トークン。stopAll() で繰り上げることで、停止前に開始済みの
 // 合成（in-flight）が完了しても、その結果を破棄して状態に反映させない。
 let synthesisGeneration = 0;
@@ -196,9 +200,14 @@ function enqueueTexts(texts, settings) {
 /**
  * 合成待ちキューを処理し、音声を生成する
  */
+function readyAudioSeconds() {
+    return audioQueue.reduce((sum, item) => sum + (item.durationSec || 0), 0);
+}
+
 async function processSynthesis() {
     if (isSynthesizing || textQueue.length === 0
-        || audioQueue.length >= MAX_READY_AUDIO_QUEUE) return;
+        || audioQueue.length >= MAX_READY_AUDIO_QUEUE
+        || readyAudioSeconds() >= MAX_READY_AUDIO_SECONDS) return;
 
     isSynthesizing = true;
     const item = textQueue.shift();
@@ -206,13 +215,13 @@ async function processSynthesis() {
     const generation = synthesisGeneration;
 
     try {
-        const blobUrl = await generateVoiceBlob(item.text, item.settings);
+        const { url: blobUrl, durationSec } = await generateVoiceBlob(item.text, item.settings);
         // 合成中に stopAll() が走った場合、生成済み Blob を破棄して状態を触らない
         if (generation !== synthesisGeneration) {
             URL.revokeObjectURL(blobUrl);
             return;
         }
-        audioQueue.push({ url: blobUrl, text: item.text });
+        audioQueue.push({ url: blobUrl, text: item.text, durationSec });
         processPlayback();
     } catch (err) {
         // stale な世代のエラーは通知も状態変更もしない
@@ -243,8 +252,27 @@ function isVoicevoxUnreachableError(err) {
 }
 
 /**
- * VOICEVOX APIを使用して音声を合成し、Blob URLを返す。
+ * audio_query の結果から音声の長さ（秒）を見積もる。先読み量の制御にだけ使うので
+ * 厳密でなくてよい（モーラと休止の長さの合計を話速で割る）。
+ */
+function estimateQueryDurationSec(query, speedScale) {
+    let seconds = (Number(query.prePhonemeLength) || 0) + (Number(query.postPhonemeLength) || 0);
+    const phrases = Array.isArray(query.accent_phrases) ? query.accent_phrases : [];
+    for (const phrase of phrases) {
+        const moras = Array.isArray(phrase?.moras) ? phrase.moras : [];
+        for (const mora of moras) {
+            seconds += (Number(mora?.consonant_length) || 0) + (Number(mora?.vowel_length) || 0);
+        }
+        seconds += Number(phrase?.pause_mora?.vowel_length) || 0;
+    }
+    const speed = Number(speedScale) > 0 ? Number(speedScale) : 1;
+    return seconds / speed;
+}
+
+/**
+ * VOICEVOX APIを使用して音声を合成し、Blob URL と音声長の見積もりを返す。
  * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
+ * @returns {Promise<{url: string, durationSec: number}>}
  */
 async function generateVoiceBlob(text, settings) {
     const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
@@ -275,7 +303,10 @@ async function generateVoiceBlob(text, settings) {
     if (!synthResponse.ok) throw new Error(`Synthesis失敗(${synthResponse.status})`);
 
     const audioBlob = await readBlobResponseWithLimit(synthResponse);
-    return URL.createObjectURL(audioBlob);
+    return {
+        url: URL.createObjectURL(audioBlob),
+        durationSec: estimateQueryDurationSec(queryJson, speedScale)
+    };
 }
 
 /**

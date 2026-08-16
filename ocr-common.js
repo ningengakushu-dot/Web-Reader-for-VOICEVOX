@@ -564,6 +564,34 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     // （ゴシック体の小さい文字はこちらが大きく改善する）
     await recognizePreprocessed();
 
+    // 横書きで明らかに低品質なら、ページ分割を自動（PSM=AUTO）にして再認識する。
+    // 横書き worker は「1ブロックの横書き」（SINGLE_BLOCK）を仮定するため、罫線付きの表の
+    // ように全高を貫く縦線があると行分割が破綻する（実測: 罫線表で confidence 17・出力は
+    // 無意味な文字列。横罫線だけなら 83、AUTO なら罫線ありでも 85 で CER 96.9%→6.3%）。
+    // 壊れた結果のまま次の「もう一方の組版方向」に進むと、縦書き worker の結果（44）が
+    // 素の大小比較で採用され、列を縦に読んだ文字列になっていた。
+    // 【不変条件】横書き（primaryLang === "jpn"）に限る: 縦書き経路の局所漢字再確認は
+    // 同じ jpn worker の PSM を SINGLE_CHAR に切り替えるため、そこと並行させてはならない
+    // （縦書き経路では localRescanPromise が動き得るが、横書き経路では常に空）。
+    // 既存の到達点（小説コーパス・kakushin・MS）は confidence 78〜92 でこの分岐に入らず、
+    // 出力が変更前後で一致することを実測で確認済み。
+    if (primaryLang === "jpn" && best.confidence < OCR_CONFIDENCE_ACCEPT && canRefine()) {
+        useRefine();
+        try {
+            await primaryWorker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.AUTO });
+            const auto = (await primaryWorker.recognize(grayCanvas, {}, outputFields)).data;
+            if (auto.confidence >= best.confidence + OCR_PREPROCESS_ADOPT_MARGIN) best = auto;
+        } catch (error) {
+            console.warn("OCR: 自動ページ分割での再認識に失敗:", error?.message || error);
+        } finally {
+            try {
+                await primaryWorker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK });
+            } catch (error) {
+                console.warn("OCR: PSM の復元に失敗:", error?.message || error);
+            }
+        }
+    }
+
     // それでも明らかに低品質なときだけ、もう一方の組版方向も試す
     if (best.confidence < OCR_CONFIDENCE_ACCEPT) {
         const secondaryLang = primaryLang === "jpn" ? "jpn_vert" : "jpn";
@@ -781,15 +809,24 @@ function normalizeOcrText(rawText) {
     // 行頭の箇条書きマーカー。全角ダッシュ/ハイフン類（‐‑‒–—―）は小説の行頭「――」等で
     // 多用され地の文を箇条書きと誤判定するため、マーカーには含めない（半角ハイフン - は維持）。
     const bulletStart = /^\s*(?:[-・･*+●○◦■□▪▶▷›»→◆◇☆★#]+\s*|[(（【\[]?\s*(?:\d{1,3}|[０-９]{1,3}|[一二三四五六七八九十]{1,3})\s*[.)）】\].、:：]\s*)/;
+    // 「第1章」「第３条」のような番号付き見出し・条文（目次では1行1項目になる）
+    const numberedHeading = /^\s*第\s*(?:\d{1,3}|[０-９]{1,3}|[一二三四五六七八九十百]{1,4})\s*[章節条項部編款回話]/;
+    // 「価格：12,800円」「重量: 1.2kg」のような項目名＋値の行（スペック表・案内文で連続する）
+    const labelLine = /^\s*[^\s：:]{1,10}\s*[：:]\s*\S/;
     const endsSentence = /[。．！？!?…]$/;
     const endsPunct = /[、，。．！？!?｡､：:；;]$/;
     const endsHiragana = /[ぁ-ゖ]$/;
+    // 英文の折り返し: 小文字（または英文の読点）で終わる行に小文字で始まる行が続くなら
+    // 同じ文の途中（Tesseract は行間が広いと行の間に空行を出すことがある）
+    const englishWrap = (prev, cur) => /[a-z,]$/.test(prev) && /^[a-z]/.test(cur);
 
     const normalized = rawText.replace(/[ \t　]+/g, " ").replace(spaceNextToCjk, "");
 
     const isBoundary = (prev, cur) => {
         if (bulletStart.test(cur)) return true;
         if (bulletStart.test(prev)) return true;
+        if (numberedHeading.test(cur) || numberedHeading.test(prev)) return true;
+        if (labelLine.test(cur) || labelLine.test(prev)) return true;
         if (endsSentence.test(prev)) return true;
         // 見出しらしい短い行の後。折り返し（活用・助詞の途中で改行）の誤爆を避けるため、
         // 「短い」かつ「句読点で終わらない」かつ「ひらがなで終わらない（名詞的な語尾）」かつ
@@ -806,7 +843,9 @@ function normalizeOcrText(rawText) {
         const line = raw.trim();
         if (!line) { blankBefore = true; continue; }
         if (!result) { result = line; prev = line; blankBefore = false; continue; }
-        if (blankBefore || isBoundary(prev, line)) {
+        if (englishWrap(prev, line)) {
+            result += " " + line;
+        } else if (blankBefore || isBoundary(prev, line)) {
             const needsPause = !endsPunct.test(result);
             result += (needsPause ? "、" : "") + line;
         } else {
