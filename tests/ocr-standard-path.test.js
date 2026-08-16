@@ -34,6 +34,10 @@ assert.match(common, /for \(const data of \[upscaled2x, preprocessedData\]\)/,
     '候補不足時に認識済み2倍版と二値化版を画像証拠として再利用する');
 assert.match(common, /unanimousVariantCount: others\.length/,
     '補充候補が既存の全会一致判定へ混ざらない');
+assert.equal((common.match(/pruneOcrConsensusInsertions/g) || []).length, 3,
+    '整列一致による余剰文字削除は3つの融合・構造証拠地点で一度ずつだけ呼ぶ');
+assert.doesNotMatch(common, /isInflatedOcrVariant|filterInflatedOcrVariants/,
+    '文字数膨張ゲートは実測で悪化したため導入しない（neko_v_mincho_13 4→5誤り、2026-08-16）');
 assert.match(common, /fuseOcrSymbols\(best\.blocks, others, \{ consensusClasses: \["kanji"\] \}\)/,
     '小文字融合経路の強い多数一致は漢字限定にする（仮名・数字の2/3置換を許さない）');
 assert.match(common, /resolvedFullData\?\.\[primaryLang\][\s\S]*primaryWorker\.recognize/,

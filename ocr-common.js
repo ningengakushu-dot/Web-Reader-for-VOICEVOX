@@ -650,9 +650,12 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         ]
             .filter((data) => data?.blocks && data !== best)
             .map((data) => data.blocks);
+        // 幾何（列の物理長）による重複除去に加え、整列一致による余剰文字の削除も一度行う
+        // （詳細は OCR_PRUNE_INSERTION_MAX_CONFIDENCE のコメント参照）。
         const pruned = structuralVariants.length
             ? pruneOcrLineInsertions(
                 best.blocks, structuralVariants, bestOrientation, bestGlyphSize)
+                + pruneOcrConsensusInsertions(best.blocks, structuralVariants)
             : 0;
         if (pruned > 0) text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
     }
@@ -706,7 +709,9 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
             // 改善を全て回収し悪化ゼロ。全文字種だと2/3一致だけで仮名・数字も置換され、
             // 実測済みベースラインの出力が変わるため許可しない。
             const fused = fuseOcrSymbols(best.blocks, others, { consensusClasses: ["kanji"] });
-            if (pruned + fused > 0) {
+            // 融合の直後に一度だけ、整列一致による余剰文字の削除を行う。
+            const consensusPruned = pruneOcrConsensusInsertions(best.blocks, others);
+            if (pruned + fused + consensusPruned > 0) {
                 text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
             }
         }
@@ -749,7 +754,10 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
             consensusClasses: others.length < 3 ? ["kanji"] : null,
             consensusIncludesBase: others.length < 3
         }) : 0;
-        if (pruned + fused > 0) {
+        // 融合の直後に一度だけ、整列一致による余剰文字の削除を行う。
+        const consensusPruned = variants.length
+            ? pruneOcrConsensusInsertions(best.blocks, variants) : 0;
+        if (pruned + fused + consensusPruned > 0) {
             text = buildTextFromBlocks(best.blocks, bestOrientation, bestGlyphSize);
         }
     }

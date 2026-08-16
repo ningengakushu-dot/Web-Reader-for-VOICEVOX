@@ -76,6 +76,13 @@ const BUDGET_PATCH = (value) => ({
     label: `budget=${value}`
 });
 const CONSENSUS_CURRENT = 'fuseOcrSymbols(best.blocks, others, { consensusClasses: ["kanji"] })';
+// 整列一致による余剰文字の削除段(A)だけを外す。確信度の上限を0にすると
+// どの文字も「確信度 < 上限」を満たさず、削除は一件も起きない。
+const CONSENSUS_PRUNE_OFF = {
+    from: "const OCR_PRUNE_INSERTION_MAX_CONFIDENCE = 95;",
+    to: "const OCR_PRUNE_INSERTION_MAX_CONFIDENCE = 0;",
+    label: "consensus-prune=off"
+};
 const VARIANTS = {
     // 比較基準。OCR_E2E_BASELINE に旧版4ファイルを置いたディレクトリを指定する
     // （例: for f in constants.js ocr-image.js ocr-refine.js ocr-common.js;
@@ -98,12 +105,29 @@ const VARIANTS = {
         to: "const OCR_INSERTION_PRUNE_MAX_TOTAL_CANDIDATES = Infinity;",
         label: "cap=inf"
     }]),
+    // 二値化（拡大＋大津）段だけを一切走らせない。AAあり明朝で二値化が害になるかの測定用
+    "head-nobinar": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "if (preprocessedAttempted || best.confidence >= OCR_PREPROCESS_SKIP_CONFIDENCE",
+        to: "if (true || preprocessedAttempted || best.confidence >= OCR_PREPROCESS_SKIP_CONFIDENCE",
+        label: "binarize=off"
+    }]),
+    "head-noprune": () => loadSources(repo, [BUDGET_PATCH(60000), CONSENSUS_PRUNE_OFF]),
     "head-budget12": () => loadSources(repo, [BUDGET_PATCH(12000)]),
     "head-budget9": () => loadSources(repo, [BUDGET_PATCH(9000)]),
-    "head-prod": () => loadSources(repo, [])
+    "head-prod": () => loadSources(repo, []),
+    // 実運用予算での待ち時間比較用（baseline の無改造版）
+    "baseline-prod": () => loadSources(
+        process.env.OCR_E2E_BASELINE || join(here, "baseline"), [])
 };
 
 // ---- 入力画像 ----
+// 等倍(scale=1)のときは実機の cropToOcrCanvas と同じく「画素完全」で取り込む。
+// @napi-rs/canvas は imageSmoothingQuality="high" だと1:1のdrawImageでも再標本化し、
+// 2値ビットマップ描画のコーパスで階調が 2 → 33 に増えていた（実測 2026-08-16）。
+// 出荷 ocr-image.js の cropToOcrCanvas は smoothing 品質を指定せず、
+// 1:1 では画素完全（実測で差分0）なので等倍は smoothing を切って一致させる。
+// 縮小/拡大(scale≠1)は「低解像度キャプチャの再現」であり、実機の
+// createSmoothOcrCanvas と同じ高品質補間を従来どおり使う。
 async function loadInputCanvas(spec) {
     const image = await loadImage(spec.file);
     const crop = spec.crop || { left: 0, top: 0, width: image.width, height: image.height };
@@ -111,8 +135,12 @@ async function loadInputCanvas(spec) {
     const canvas = createCanvas(
         Math.round(crop.width * scale), Math.round(crop.height * scale));
     const context = canvas.getContext("2d");
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
+    if (scale === 1) {
+        context.imageSmoothingEnabled = false;
+    } else {
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
+    }
     context.drawImage(image, crop.left, crop.top, crop.width, crop.height,
         0, 0, canvas.width, canvas.height);
     return canvas;

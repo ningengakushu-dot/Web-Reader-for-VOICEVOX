@@ -41,6 +41,9 @@ jobs:
       - name: OCR画像証拠の多数一致融合検査
         run: node tests/ocr-consensus-fusion.test.js
 
+      - name: OCR余剰文字削除段の検査
+        run: node tests/ocr-refine-prune.test.js
+
       - name: OCR標準経路の構造検査
         run: node tests/ocr-standard-path.test.js
 

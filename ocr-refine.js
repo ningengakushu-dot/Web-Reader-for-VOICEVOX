@@ -747,6 +747,113 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
     return replaced;
 }
 
+// ===== 整列一致による余剰文字の削除 =====
+
+// 削除してよい base symbol の確信度の上限。
+// 試作の実測（明朝合成コーパス6件・出荷経路へ注入）: 上限なし = 誤り 37→36
+// （改善2・悪化1）／95未満に限定 = 37→36（改善1・悪化0）。
+// 本採用時の実測（2026-08-16、tools/ocr-e2e 33入力: 既存9＋AAあり明朝・ゴシック24、
+// HEAD比・予算60秒固定・逐次）: 誤り 128→123、改善5・悪化0。削除された文字は
+// ぎ・は・人・和・ぬ の余剰挿入のみで、正しい文字の削除は0件。
+// 確信度の高い文字は実在する可能性が高く、候補側が整列の都合で対応を持たないだけの
+// ことがあるため、明らかに自信のない文字だけを削除対象にする。
+const OCR_PRUNE_INSERTION_MAX_CONFIDENCE = 95;
+
+/**
+ * 既存の整列（alignOcrVariants / alignOcrSymbols）の結果だけを使い、
+ * base にしか存在しない余剰文字を削除する。追加のOCRは行わない。
+ * 幾何・ピッチを使わないため縦書き・横書きの両方で使える
+ * （列の物理長を根拠にする pruneOcrLineInsertions は縦書き専用のまま）。
+ *
+ * 削除するのは次をすべて満たす symbol だけ:
+ *  - 同じ行に前後の symbol がある（行頭・行末は対象外）
+ *  - 「前後の symbol が同一文字として対応付いた候補」が minVariants 件以上ある
+ *  - その候補すべてが「その位置に対応する文字を持たない」＝全会一致で余剰と言う
+ *  - base symbol の確信度が maxConfidence 未満（確信度が取れない文字は削除しない）
+ *
+ * 判定は開始時のスナップショットに対して行うため決定的で、条件が成立しなければ
+ * blocks を一切変更しない（例外時も無変更）。symbol の同一性は後段（局所再確認の
+ * 置換適用）が参照するため、blocks は複製せずその場から余剰 symbol だけを取り除き、
+ * word.text を組み直す。呼び出し側は戻り値が正なら buildTextFromBlocks で組み直す。
+ *
+ * @param {object[]} baseBlocks 変更対象（採用中の認識結果）
+ * @param {object[][]} otherBlocksList 比較候補の blocks
+ * @param {{minVariants?: number, maxConfidence?: number}} [options]
+ * @returns {number} 削除した symbol 数（0 なら呼び出し側は無変更）
+ */
+function pruneOcrConsensusInsertions(baseBlocks, otherBlocksList, options = {}) {
+    const minVariants = Number.isInteger(options.minVariants)
+        ? Math.max(2, options.minVariants) : 2;
+    const maxConfidence = Number.isFinite(options.maxConfidence)
+        ? options.maxConfidence : OCR_PRUNE_INSERTION_MAX_CONFIDENCE;
+    let removals;
+    try {
+        // 候補が2件未満なら何もしない（1候補の欠落を根拠に実在文字を消さない）。
+        if (!otherBlocksList || otherBlocksList.length < minVariants) return 0;
+        const baseEntries = collectOcrSymbols(baseBlocks);
+        if (baseEntries.length < 3) return 0;
+        const maps = [];
+        for (const pairs of alignOcrVariants(baseEntries, otherBlocksList)) {
+            // 空認識（整列できない候補）は「その位置に文字なし」の証拠に数えない。
+            if (!pairs.length) continue;
+            const map = new Map();
+            for (const [index, symbol] of pairs) {
+                if (!map.has(index)) map.set(index, symbol);
+            }
+            maps.push(map);
+        }
+        if (maps.length < minVariants) return 0;
+        // 先行削除の影響を後続判定へ持ち込まないよう、開始時の文字と行を固定する。
+        const snapshot = baseEntries.map((entry) => ({
+            text: entry.symbol.text, line: entry.line
+        }));
+        removals = [];
+        baseEntries.forEach((entry, index) => {
+            const current = snapshot[index];
+            const previous = snapshot[index - 1];
+            const next = snapshot[index + 1];
+            if (!previous || !next
+                || previous.line !== current.line || next.line !== current.line) return;
+            let anchored = 0;
+            let missing = 0;
+            for (const map of maps) {
+                // 両隣が同一文字として対応付いた候補だけが、この位置について証言できる。
+                if (map.get(index - 1)?.text !== previous.text
+                    || map.get(index + 1)?.text !== next.text) continue;
+                anchored++;
+                if (!map.has(index)) missing++;
+            }
+            if (anchored < minVariants || missing !== anchored) return;
+            // 確信度が数値で得られない文字は削除しない（安全側）。
+            const confidence = entry.symbol.confidence;
+            if (typeof confidence !== "number" || !Number.isFinite(confidence)
+                || confidence >= maxConfidence) return;
+            removals.push({ entry, index });
+        });
+    } catch (error) {
+        // 整列・走査の失敗で認識結果を壊さない（安全側＝無変更）。
+        console.warn("OCR: 一致による余剰文字の削除に失敗:", error?.message || error);
+        return 0;
+    }
+    if (!removals.length) return 0;
+
+    const removedSymbols = new Set();
+    const touchedWords = new Set();
+    for (const removal of removals) {
+        removedSymbols.add(removal.entry.symbol);
+        touchedWords.add(removal.entry.word);
+    }
+    for (const word of touchedWords) {
+        word.symbols = (word.symbols || []).filter((symbol) => !removedSymbols.has(symbol));
+    }
+    rebuildOcrWordTexts(touchedWords);
+    // 削除した文字と base 内の位置を残す（既定では表示されない verbose レベル）。
+    console.debug("OCR: 一致により余剰文字を削除:", removals.slice(0, 20)
+        .map((removal) => `${removal.entry.symbol.text}@${removal.index}`).join(" "),
+    removals.length > 20 ? `ほか${removals.length - 20}件` : "");
+    return removals.length;
+}
+
 // 二値化版を全文採用した後、同じ位置の漢字についてだけ元寸grayと2倍grayを照合する。
 // 二つのgrayが同じ文字を二値化版以上のconfidenceで支持する場合、または元寸grayが
 // 二つの加工結果をマージン以上上回る場合だけ元寸文字を復元する。単語辞書は使わず、

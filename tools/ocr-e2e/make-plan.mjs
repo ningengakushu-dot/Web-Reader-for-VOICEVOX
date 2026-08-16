@@ -1,5 +1,7 @@
 // 測定計画の生成。inputs(画像+GT)と runs(入力×バリアントの逐次リスト)を組み立てる。
-// 使い方: node make-plan.mjs <main|smoke|extra> [作業ディレクトリ]
+// 使い方: node make-plan.mjs <main|smoke|extra|mincho> [作業ディレクトリ]
+// mincho は gen-corpus-mincho.mjs で作る AAあり明朝コーパス（corpus-mincho.json）を
+// 既存9入力と一緒に head で1周する計画（ベースライン取得用）。
 // 事前に gen-corpus.mjs でコーパスを生成し、kakushin.png / MS.png を作業ディレクトリへ
 // ダウンロードしておく（URLは docs/OCR-ACCURACY.md とプロジェクトmemoryを参照）。
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -33,6 +35,23 @@ if (existsSync(ms)) {
         crop: { left: 300, top: 20, width: 668, height: 830 } };
 }
 
+// 既存9入力（GT付き）。mincho 計画ではこれを従来どおり head で回して比較の土台にする。
+const existingNames = Object.keys(inputs).filter((name) => inputs[name].gt);
+
+// AAあり明朝コーパス（mincho モードのときだけ inputs へ加える。
+// main/extra の計画を変えないため他モードでは読み込まない）。
+const minchoNames = [];
+if (mode === "mincho") {
+    const minchoFile = join(workDir, "corpus-mincho.json");
+    if (!existsSync(minchoFile)) {
+        throw new Error(`missing ${minchoFile}: run gen-corpus-mincho.mjs first`);
+    }
+    for (const item of JSON.parse(readFileSync(minchoFile, "utf8"))) {
+        inputs[item.name] = { file: item.file, gt: item.gt };
+        minchoNames.push(item.name);
+    }
+}
+
 let runs = [];
 if (mode === "smoke") {
     runs = [{ input: corpus[0].name, variant: "head" }];
@@ -56,7 +75,34 @@ if (mode === "smoke") {
         runs.push({ input: "kakushin_full", variant: "head" },
             { input: "kakushin_full", variant: "head-nocap" });
     }
+} else if (mode === "mincho") {
+    // AAあり明朝コーパスのベースライン取得。既存9入力 → 新コーパス全枚を
+    // head（予算60秒固定）で1回ずつ。必ず逐次実行し、他の重い処理と並行させない。
+    for (const name of existingNames) runs.push({ input: name, variant: "head" });
+    for (const name of minchoNames) runs.push({ input: name, variant: "head" });
 }
+// mincho-ab: 「整列一致による余剰文字の削除段」のA/B（文字数膨張ゲートは実測で悪化し不採用）。
+// 既存のGT付き入力（合成コーパス + kakushin + MS）に加え、AAあり明朝コーパス
+// work/corpus-mincho.json があれば入力へ足す（無ければ存在チェックで飛ばす）。
+// 入力ごとに baseline → head → head-noprune を逐次で回し、削除段の寄与を切り分ける
+// （並行実行は時間予算の回数化を通じて測定を汚染する）。
+if (mode === "mincho-ab") {
+    const minchoFile = join(workDir, "corpus-mincho.json");
+    if (existsSync(minchoFile)) {
+        const mincho = JSON.parse(readFileSync(minchoFile, "utf8"));
+        for (const item of (Array.isArray(mincho) ? mincho : [])) {
+            if (!item || !item.name || !item.file || !item.gt || inputs[item.name]) continue;
+            inputs[item.name] = { file: item.file, gt: item.gt };
+        }
+    }
+    for (const name of Object.keys(inputs)) {
+        if (!inputs[name].gt) continue;
+        for (const variant of ["baseline", "head", "head-noprune"]) {
+            runs.push({ input: name, variant });
+        }
+    }
+}
+
 const planFile = join(workDir, `plan-${mode}.json`);
 writeFileSync(planFile, JSON.stringify({ inputs, runs }, null, 1));
 console.log(`${planFile}: ${runs.length} runs`);
