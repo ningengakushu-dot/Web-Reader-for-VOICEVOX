@@ -84,6 +84,17 @@ function createScenario({ ambiguous, horizontalConfidence, withLogger }) {
             })
         },
         toGrayscale: (canvas) => ({ kind: 'gray', width: canvas.width, height: canvas.height }),
+        // 認識入力の余白付与（進捗の検査には無関係なので寸法だけ再現する）
+        OCR_INPUT_PAD_PX: 10,
+        padOcrCanvasToMargin: (canvas, pad) => ({
+            canvas: { kind: canvas.kind, width: canvas.width + pad * 2, height: canvas.height + pad * 2 },
+            insets: { left: pad, top: pad, right: pad, bottom: pad }
+        }),
+        padOcrCanvas: (canvas, insets) => ({
+            kind: canvas.kind,
+            width: canvas.width + (insets.left || 0) + (insets.right || 0),
+            height: canvas.height + (insets.top || 0) + (insets.bottom || 0)
+        }),
         detectTextOrientation: () => (
             ambiguous
                 ? { orientation: 'horizontal', confident: false }

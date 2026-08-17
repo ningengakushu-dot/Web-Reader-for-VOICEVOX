@@ -103,6 +103,67 @@ if (mode === "mincho-ab") {
     }
 }
 
-const planFile = join(workDir, `plan-${mode}.json`);
-writeFileSync(planFile, JSON.stringify({ inputs, runs }, null, 1));
-console.log(`${planFile}: ${runs.length} runs`);
+// round2-ab: 「認識入力の余白付与」と「全票 base 以上の漢字多数一致」の A/B。
+// 33入力（既存9 + AAあり明朝24）を baseline → head → head-nopad → head-noconseq の順に
+// 逐次で回し、2案それぞれの寄与を切り分ける。
+// round2-tight: 同じ33入力を「インク境界ぴったり（余白0px）」に切り詰めた入力で
+// baseline → head。実利用の「タイトな選択」（文字が選択枠に接する）を模す。
+// コーパス画像はどれも四辺に 12〜36px の余白があり、従来はこの条件を一度も測っていなかった。
+// round2-extra: 余白付与が効くタイト入力で 決定性（head×2）・実運用予算（head-prod）・
+// 予算逼迫（12秒/9秒）を確認し、余白付き入力で baseline-prod / head-prod の待ち時間を比べる。
+if (mode === "round2-ab" || mode === "round2-tight" || mode === "round2-extra") {
+    const minchoFile = join(workDir, "corpus-mincho.json");
+    if (existsSync(minchoFile)) {
+        const mincho = JSON.parse(readFileSync(minchoFile, "utf8"));
+        for (const item of (Array.isArray(mincho) ? mincho : [])) {
+            if (!item || !item.name || !item.file || !item.gt || inputs[item.name]) continue;
+            inputs[item.name] = { file: item.file, gt: item.gt };
+        }
+    }
+    const names = Object.keys(inputs).filter((name) => inputs[name].gt);
+    if (mode === "round2-ab") {
+        for (const name of names) {
+            for (const variant of ["baseline", "head", "head-nopad", "head-noconseq"]) {
+                runs.push({ input: name, variant });
+            }
+        }
+    } else if (mode === "round2-tight") {
+        for (const name of names) {
+            const tightName = `${name}_tight0`;
+            inputs[tightName] = { ...inputs[name], tight: 0 };
+            for (const variant of ["baseline", "head"]) runs.push({ input: tightName, variant });
+        }
+    } else {
+        for (const name of ["melos_h_gothic_13", "neko_v_mincho_13"]) {
+            if (!inputs[name]) continue;
+            const tightName = `${name}_tight0`;
+            inputs[tightName] = { ...inputs[name], tight: 0 };
+            for (const variant of ["head", "head", "head-prod", "head-budget12", "head-budget9"]) {
+                runs.push({ input: tightName, variant });
+            }
+        }
+        for (const name of ["rashomon_v_mincho_14", "melos_v_mincho_16_dark", "yumin_neko_v_16_dsf15",
+            "yumin_neko_v_19_dsf1", "kakushin_p1", "ms_body"]) {
+            if (!inputs[name]) continue;
+            for (const variant of ["baseline-prod", "head-prod"]) runs.push({ input: name, variant });
+        }
+    }
+}
+
+// 1計画が100ランを超えるときは分割して書き出す（結果は最後にまとめて書かれるため、
+// 長い計画は途中で止まると全損する。README の注意も参照）。
+const MAX_RUNS_PER_PLAN = 100;
+if (runs.length <= MAX_RUNS_PER_PLAN) {
+    const planFile = join(workDir, `plan-${mode}.json`);
+    writeFileSync(planFile, JSON.stringify({ inputs, runs }, null, 1));
+    console.log(`${planFile}: ${runs.length} runs`);
+} else {
+    const parts = Math.ceil(runs.length / MAX_RUNS_PER_PLAN);
+    const size = Math.ceil(runs.length / parts);
+    for (let part = 0; part < parts; part++) {
+        const chunk = runs.slice(part * size, (part + 1) * size);
+        const planFile = join(workDir, `plan-${mode}-${part + 1}.json`);
+        writeFileSync(planFile, JSON.stringify({ inputs, runs: chunk }, null, 1));
+        console.log(`${planFile}: ${chunk.length} runs`);
+    }
+}

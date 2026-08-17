@@ -229,9 +229,11 @@ function createOcrWorkerPool(logger) {
  * ロードに失敗した場合は補正なしで続行する。
  */
 async function refineVerticalGlyphsWithHorizontalWorker(
-    grayCanvas, blocks, blockScale, workerProvider) {
+    grayCanvas, blocks, blockScale, workerProvider, edgeInsets = null) {
+    // edgeInsets は認識入力に足した各辺の余白（元の画像端は余白の内側にある）。
+    // 端で欠けたセルの除外は元の画像端を基準に行う。
     const targets = collectVerticalGlyphRescanTargets(
-        blocks, blockScale, grayCanvas.width, grayCanvas.height);
+        blocks, blockScale, grayCanvas.width, grayCanvas.height, edgeInsets);
     if (!targets.length) return [];
 
     const replacements = [];
@@ -433,8 +435,19 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     const outputFields = { text: true, blocks: true };
 
     // まずグレースケール化した元寸画像を作る（拡大・二値化はしない。
-    // 明朝体等、強い前処理が裏目に出るフォントがあるため）
-    const grayCanvas = toGrayscale(sourceCanvas);
+    // 明朝体等、強い前処理が裏目に出るフォントがあるため）。
+    // 認識に渡す画像（grayCanvas と、そこから作る拡大版・二値化版）には、文字が画像端に
+    // 接している辺にだけ背景色の余白を足し、インクと端の間に最低 OCR_INPUT_PAD_PX を確保する
+    // （理由と実測は OCR_INPUT_PAD_PX のコメント参照。既に余白がある画像は無変更）。
+    // 組版方向の判定と面積によるしきい値は、余白の無い元画像（unpaddedGrayCanvas /
+    // sourceCanvas）で行い、余白の有無で判定が変わらないようにする。
+    const unpaddedGrayCanvas = toGrayscale(sourceCanvas);
+    const paddedInput = padOcrCanvasToMargin(unpaddedGrayCanvas, OCR_INPUT_PAD_PX);
+    const grayCanvas = paddedInput.canvas;
+    // 認識入力の座標系で「元の画像端」がどこにあるか（各辺に足した余白。局所再確認で
+    // 端の欠けセルを除く基準と、二値化版へ同じ余白を付けるのに使う）
+    const inputInsets = paddedInput.insets;
+    const sourceArea = sourceCanvas.width * sourceCanvas.height;
 
     const detected = detectTextOrientation(sourceCanvas);
     let orientation = detected.orientation;
@@ -443,10 +456,11 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     if (!detected.confident) {
         // 小～中規模の選択は局所パッチの偏りを避けるため全体を比較する。全画面級は
         // CPU・メモリ回帰を避け、従来の小領域比較を維持する。
-        const compareFull = grayCanvas.width * grayCanvas.height
-            <= OCR_ORIENTATION_FULL_COMPARE_MAX_AREA;
+        const compareFull = sourceArea <= OCR_ORIENTATION_FULL_COMPARE_MAX_AREA;
+        // 局所パッチは余白の無い画像から選ぶ（格子が余白でずれると判定が変わる）。
+        // 全体比較は認識入力（余白付き）をそのまま使い、主経路として再利用する。
         const comparisonCanvas = compareFull
-            ? grayCanvas : pickOcrTextPatch(grayCanvas, OCR_ORIENTATION_PATCH_PX);
+            ? grayCanvas : pickOcrTextPatch(unpaddedGrayCanvas, OCR_ORIENTATION_PATCH_PX);
         const resolved = comparisonCanvas ? await resolveOcrOrientation(
             comparisonCanvas, workerProvider,
             compareFull ? outputFields : { text: true }, orientation,
@@ -484,7 +498,6 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     const primaryMs = resolvedFullData
         ? resolvedFullMs
         : Math.max(1, Date.now() - startedAt);
-    const sourceArea = grayCanvas.width * grayCanvas.height;
     const refinable = sourceArea <= OCR_REFINE_MAX_AREA;
     let refinesLeft = refinable
         ? Math.max(0, Math.floor((OCR_REFINE_TIME_BUDGET_MS - primaryMs) / primaryMs))
@@ -507,9 +520,19 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
             || !canRefine()) return;
         preprocessedAttempted = true;
         useRefine();
+        // 二値化（大津のしきい値・インク率の判定）は余白の無い元画像で行い、その結果に
+        // 余白を付けて認識へ渡す（余白の画素でしきい値が動かないようにする）。
+        // 二値化版は2倍に拡大されているので、余白も元寸換算で同じ幅（倍率ぶん）にする。
+        // 二値化の出力は黒文字・白背景に正規化されているので余白は白（255）。
         const prepared = prepareOcrCanvas(sourceCanvas);
         if (prepared === sourceCanvas) return;
-        const preprocessed = await primaryWorker.recognize(prepared, {}, outputFields);
+        const preparedScale = prepared.width / Math.max(1, sourceCanvas.width);
+        const preprocessed = await primaryWorker.recognize(padOcrCanvas(prepared, {
+            left: inputInsets.left * preparedScale,
+            top: inputInsets.top * preparedScale,
+            right: inputInsets.right * preparedScale,
+            bottom: inputInsets.bottom * preparedScale
+        }, 255), {}, outputFields);
         preprocessedData = preprocessed.data;
         if (preprocessed.data.confidence >= best.confidence + OCR_PREPROCESS_ADOPT_MARGIN) {
             best = preprocessed.data;
@@ -539,7 +562,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         && (primary.data.confidence >= OCR_CONFIDENCE_ACCEPT || resolvedFullData?.jpn)
         && refinable && canRefine()
         ? refineVerticalGlyphsWithHorizontalWorker(
-            grayCanvas, primary.data.blocks, 1, workerProvider)
+            grayCanvas, primary.data.blocks, 1, workerProvider, inputInsets)
         : Promise.resolve([]);
     try {
 
@@ -620,7 +643,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
             if (structuralUpscaledData.size >= 2) break;
             if (scale === 1 || scale === 2 || scale < 0.4 || scale > 3
                 || structuralUpscaledData.has(scale)) continue;
-            const area = grayCanvas.width * scale * grayCanvas.height * scale;
+            const area = sourceArea * scale * scale;
             if (area > OCR_FUSION_MAX_AREA) continue;
             if (!canRefine()) break;
             useRefine();
@@ -679,7 +702,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     const collectUpscaledVariants = async (scales) => {
         const others = [];
         for (const scale of scales) {
-            const area = grayCanvas.width * scale * grayCanvas.height * scale;
+            const area = sourceArea * scale * scale;
             if (area > OCR_FUSION_MAX_AREA) continue;
             // 2倍拡大版は既に持っているので予算を使わずに再利用する。
             // （面積の判定を先に置いても結果は変わらない: 2倍拡大版が存在するのは

@@ -62,13 +62,23 @@ npm install
    node harness.mjs work/plan-mincho.json
    node make-plan.mjs mincho-ab   # 同33入力を baseline / head / head-noprune で A/B
    node harness.mjs work/plan-mincho-ab.json
+   node make-plan.mjs round2-ab   # 同33入力を baseline / head / head-nopad / head-noconseq で A/B
+   node harness.mjs work/plan-round2-ab-1.json   # 100ラン超は自動で分割される
+   node harness.mjs work/plan-round2-ab-2.json
+   node make-plan.mjs round2-tight  # 同33入力をインク境界ぴったりに切り詰めた入力（*_tight0）で baseline / head
+   node harness.mjs work/plan-round2-tight.json
    ```
+
+   入力に `tight: <margin px>` を付けると、取り込み後にインク境界＋margin で切り詰める
+   （実利用の「文字が選択枠に接するタイトな選択」の再現。コーパス画像は四辺に 12〜36px の
+   余白があるので、余白付与 `padOcrCanvas` の効果はこの入力でしか測れない）。
 
    比較基準の場所は環境変数 `OCR_E2E_BASELINE` で差し替えられる（例: 直前のコミットと
    比べるなら `git show "HEAD:$f" > baseline-head/$f` を4ファイル分作り、そのディレクトリを
    指定する）。1計画が100ランを超えるときは `runs` を分割して1プロセスずつ回す
    （結果は最後にまとめて書き出されるため、途中で止まると全損する）。
-   `head-nobinar`（二値化段OFF）・`baseline-prod` / `head-prod`（実運用予算での待ち時間比較）
+   `head-nobinar`（二値化段OFF）・`baseline-prod` / `head-prod`（実運用予算での待ち時間比較）・
+   `head-nopad`（認識入力の余白付与OFF）・`head-noconseq`（「全票が元寸以上」の漢字多数一致OFF）
    のバリアントもある。
 
    結果は `work/results_plan-*.json`（全文テキスト付き）。

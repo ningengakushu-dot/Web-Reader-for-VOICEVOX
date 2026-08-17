@@ -44,6 +44,9 @@ jobs:
       - name: OCR余剰文字削除段の検査
         run: node tests/ocr-refine-prune.test.js
 
+      - name: OCR認識入力の余白付与と全票一致融合の検査
+        run: node tests/ocr-input-padding.test.js
+
       - name: OCR標準経路の構造検査
         run: node tests/ocr-standard-path.test.js
 

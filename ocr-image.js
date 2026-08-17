@@ -70,6 +70,133 @@ function cropToOcrCanvas(source, sx, sy, sw, sh) {
     return canvas;
 }
 
+// Tesseract へ渡す認識入力で、インク（文字）と画像端の間に最低限確保する背景の余白（px）。
+// Tesseract は文字が画像端に接すると行分割・文字認識が崩れる（公式 FAQ も 10px 程度の
+// 余白を推奨）。ユーザーの範囲選択は文字の枠ぎりぎりをなぞることが多く、選択枠に列の
+// 右端や行の上端が接した入力がそのまま認識に渡っていた。
+// 実測（tools/ocr-e2e、2026-08-17）: 33入力をインク境界ぴったりに切り詰めた入力では
+// 誤り合計 362→119（全33入力で改善・悪化0）で、余白付きの元画像（123）と同じ水準まで
+// 回復する。一方、既に十分な余白（12〜36px）がある画像へさらに一律 10px を足すと、
+// 出力が別の形で揺れて 1 入力で悪化した（msgo_neko_v_19 1→3）。そのため余白は一律に足す
+// のではなく、辺ごとに「インクまでの距離がこの値に満たない分だけ」足す（既に余白がある
+// 画像は無変更＝出力バイト一致）。余白は「認識に渡す画像」にだけ付け、組版方向の判定
+// （detectTextOrientation / pickOcrTextPatch）と面積によるしきい値の判定は元の無余白画像で
+// 行う（余白を先に付けると 240px 局所パッチの格子がずれ、大きな横書き画像が縦書きと
+// 誤判定される事故を実測: ms_body 4→236）。
+const OCR_INPUT_PAD_PX = 10;
+
+// 背景輝度の推定に使う、画像端からの画素の帯の幅（px）
+const OCR_INPUT_PAD_SAMPLE_PX = 2;
+
+// 背景輝度からこれ以上離れた画素を「インク」とみなす（余白の測定用。AA の縁の薄い画素は
+// 数えず、文字の芯（白地の黒文字で差 150 以上、薄いグレー文字でも 80 以上）だけを拾う）
+const OCR_INPUT_INK_CONTRAST = 40;
+
+/**
+ * 画像の背景輝度を、外周の画素の輝度ヒストグラムの最頻値で推定する。
+ * 余白の目的は「画像端との連続性」なので、画像全体の多数派ではなく端の画素だけを見る
+ * （写真・グラデーション・2色背景でも端に段差を作りにくい）。暗背景の白抜き文字にも
+ * そのまま追従する。透明な画素（alpha < 255）は集計から外す。
+ * @param {HTMLCanvasElement} canvas
+ * @returns {number} 0-255
+ */
+function estimateOcrBackgroundLuminance(canvas) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const pixels = readOcrCanvasPixels(canvas);
+    const hist = new Int32Array(256);
+    const band = OCR_INPUT_PAD_SAMPLE_PX;
+    const count = (x, y) => {
+        const i = (y * width + x) * 4;
+        if (pixels[i + 3] < 255) return;
+        hist[(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]) | 0]++;
+    };
+    for (let y = 0; y < height; y++) {
+        if (y < band || y >= height - band) {
+            for (let x = 0; x < width; x++) count(x, y);
+            continue;
+        }
+        for (let x = 0; x < Math.min(band, width); x++) count(x, y);
+        for (let x = Math.max(band, width - band); x < width; x++) count(x, y);
+    }
+    let best = 255;
+    for (let l = 0; l < 256; l++) if (hist[l] > hist[best]) best = l;
+    return best;
+}
+
+/**
+ * 画像の各辺から、最も近いインク画素までの距離（px）を測る。
+ * インクが無ければ各辺とも画像の幅/高さを返す。
+ * @param {HTMLCanvasElement} canvas
+ * @param {number} background 背景輝度（estimateOcrBackgroundLuminance）
+ * @returns {{left: number, top: number, right: number, bottom: number}}
+ */
+function measureOcrInkMargins(canvas, background) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const pixels = readOcrCanvasPixels(canvas);
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            if (pixels[i + 3] < 255) continue;
+            const l = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+            if (Math.abs(l - background) < OCR_INPUT_INK_CONTRAST) continue;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+    }
+    if (maxX < 0) return { left: width, top: height, right: width, bottom: height };
+    return { left: minX, top: minY, right: width - 1 - maxX, bottom: height - 1 - maxY };
+}
+
+/**
+ * 認識入力の各辺に、指定した幅の背景色の余白を付ける。
+ * 4辺とも 0 なら元の canvas をそのまま返す（無変更）。
+ * @param {HTMLCanvasElement} source
+ * @param {{left: number, top: number, right: number, bottom: number}} insets 各辺の余白（px）
+ * @param {number} [background] 背景輝度（省略時は source から推定）
+ * @returns {HTMLCanvasElement}
+ */
+function padOcrCanvas(source, insets, background = null) {
+    const left = Math.max(0, Math.round(insets?.left || 0));
+    const top = Math.max(0, Math.round(insets?.top || 0));
+    const right = Math.max(0, Math.round(insets?.right || 0));
+    const bottom = Math.max(0, Math.round(insets?.bottom || 0));
+    if (left + top + right + bottom === 0) return source;
+    const fill = Number.isFinite(background) ? background : estimateOcrBackgroundLuminance(source);
+    const canvas = createOcrCanvas(source.width + left + right, source.height + top + bottom);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = `rgb(${fill},${fill},${fill})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, left, top);
+    return canvas;
+}
+
+/**
+ * インクと画像端の間に最低 minMargin px の背景を確保する（OCR_INPUT_PAD_PX のコメント参照）。
+ * 既にその余白がある辺には何も足さない。全辺に余白があれば canvas は元のまま返る。
+ * @param {HTMLCanvasElement} source
+ * @param {number} minMargin
+ * @returns {{canvas: HTMLCanvasElement, insets: {left: number, top: number, right: number, bottom: number}}}
+ *   insets は各辺に足した余白（元の画像端が新しい canvas のどこにあるか）
+ */
+function padOcrCanvasToMargin(source, minMargin) {
+    const none = { left: 0, top: 0, right: 0, bottom: 0 };
+    if (!(minMargin > 0)) return { canvas: source, insets: none };
+    const background = estimateOcrBackgroundLuminance(source);
+    const margins = measureOcrInkMargins(source, background);
+    const insets = {
+        left: Math.max(0, minMargin - margins.left),
+        top: Math.max(0, minMargin - margins.top),
+        right: Math.max(0, minMargin - margins.right),
+        bottom: Math.max(0, minMargin - margins.bottom)
+    };
+    return { canvas: padOcrCanvas(source, insets, background), insets };
+}
+
 // 小さい文字の再認識用: canvas を高品質補間で拡大する（二値化はしない。
 // 明朝体等では二値化が裏目に出るため、拡大のみの候補として確信度で競わせる）。
 function upscaleOcrCanvas(source, scale) {

@@ -112,6 +112,18 @@ const VARIANTS = {
         label: "binarize=off"
     }]),
     "head-noprune": () => loadSources(repo, [BUDGET_PATCH(60000), CONSENSUS_PRUNE_OFF]),
+    // 認識入力の余白付与だけを外す（余白 0px = 付与しない）
+    "head-nopad": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_INPUT_PAD_PX = 10;",
+        to: "const OCR_INPUT_PAD_PX = 0;",
+        label: "pad=off"
+    }]),
+    // 「全票が base 以上」の漢字多数一致だけを外す（票の下限を Infinity にすると成立しない）
+    "head-noconseq": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = 95;",
+        to: "const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = Infinity;",
+        label: "consensus-equal=off"
+    }]),
     "head-budget12": () => loadSources(repo, [BUDGET_PATCH(12000)]),
     "head-budget9": () => loadSources(repo, [BUDGET_PATCH(9000)]),
     "head-prod": () => loadSources(repo, []),
@@ -143,7 +155,45 @@ async function loadInputCanvas(spec) {
     }
     context.drawImage(image, crop.left, crop.top, crop.width, crop.height,
         0, 0, canvas.width, canvas.height);
+    if (Number.isFinite(spec.tight)) return tightCropCanvas(canvas, spec.tight);
     return canvas;
+}
+
+// 実利用の「タイトな選択」（文字が選択枠に接する）を模すため、インク境界 + margin px で
+// 切り詰める。極性は平均輝度で決め、平均から30以上離れた画素をインクとみなす。
+// コーパス画像は四辺に 12〜36px の余白があり、余白付与（padOcrCanvas）の効果は
+// この入力でしか測れない。
+function tightCropCanvas(canvas, margin) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const data = canvas.getContext("2d").getImageData(0, 0, width, height).data;
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) sum += (data[i] + data[i + 1] + data[i + 2]) / 3;
+    const mean = sum / (width * height);
+    const darkInk = mean >= 128;
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            const l = (data[i] + data[i + 1] + data[i + 2]) / 3;
+            const ink = darkInk ? l < mean - 30 : l > mean + 30;
+            if (!ink) continue;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+    }
+    if (maxX < 0) return canvas;
+    const x0 = Math.max(0, minX - margin);
+    const y0 = Math.max(0, minY - margin);
+    const x1 = Math.min(width - 1, maxX + margin);
+    const y1 = Math.min(height - 1, maxY + margin);
+    const out = createCanvas(x1 - x0 + 1, y1 - y0 + 1);
+    const context = out.getContext("2d");
+    context.imageSmoothingEnabled = false;
+    context.drawImage(canvas, x0, y0, out.width, out.height, 0, 0, out.width, out.height);
+    return out;
 }
 
 // ---- CER（読み上げに影響しない括弧の全角半角差は比較前に正規化する） ----

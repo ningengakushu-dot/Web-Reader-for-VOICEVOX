@@ -62,6 +62,23 @@ assert.match(common, /finally[\s\S]*localReplacements = await localRescanPromise
     '局所OCRは例外時もworker復元まで合流し、全文融合後に置換案だけを適用する');
 assert.match(common + read('ocr-image.js'), /OCR_ORIENTATION_FULL_COMPARE_MAX_AREA[\s\S]*pickOcrTextPatch/,
     '全画面級の曖昧画像は全体二重認識せず小領域比較へ戻す');
+// 認識入力の余白付与（2026-08-17）: 余白は認識に渡す画像にだけ付け、判定は無余白で行う
+assert.match(common, /const unpaddedGrayCanvas = toGrayscale\(sourceCanvas\);\s*\n\s*const paddedInput = padOcrCanvasToMargin\(unpaddedGrayCanvas, OCR_INPUT_PAD_PX\);/,
+    '認識入力（gray）は文字が端に接する辺にだけ背景色の余白を足し、最低余白を確保する（余白がある画像は無変更）');
+assert.match(common, /const sourceArea = sourceCanvas\.width \* sourceCanvas\.height;/,
+    '面積によるしきい値は余白の無い元画像で計算する');
+assert.doesNotMatch(common, /grayCanvas\.width \* grayCanvas\.height|grayCanvas\.width \* scale/,
+    '余白付き canvas の寸法をしきい値判定に使わない');
+assert.match(common, /detectTextOrientation\(sourceCanvas\)/,
+    '組版方向の画素判定は余白の無い元画像で行う');
+assert.match(common, /pickOcrTextPatch\(unpaddedGrayCanvas, OCR_ORIENTATION_PATCH_PX\)/,
+    '局所パッチは余白の無い gray から選ぶ（余白で格子がずれると大きな横書きが縦書きに誤判定される: ms_body 4→236）');
+assert.match(common, /const prepared = prepareOcrCanvas\(sourceCanvas\);[\s\S]*padOcrCanvas\(prepared, \{[\s\S]*inputInsets\.left \* preparedScale[\s\S]*\}, 255\)/,
+    '二値化は無余白で行い（しきい値を動かさない）、その結果に同じ余白（白）を付けて認識する');
+assert.match(common, /refineVerticalGlyphsWithHorizontalWorker\(\s*grayCanvas, primary\.data\.blocks, 1, workerProvider, inputInsets\)/,
+    '局所再確認には余白幅を渡し、元の画像端で欠けたセルの除外を維持する');
+assert.match(read('ocr-refine.js'), /const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = 95;/,
+    '「全票が元寸以上」の漢字多数一致は 95 以上・漢字限定（実測 123→120、悪化0）');
 assert.doesNotMatch(common + read('ocr-refine.js'), /自己主張|ジミシュチョウ|彼らちは|普段かちら/,
     '特定語句の辞書・置換規則をOCR実行コードへ入れない');
 

@@ -366,8 +366,18 @@ const OCR_RESCAN_HAN_RE = /^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]$/u;
  * 短い縦書き列から、横書きモデルで再確認する漢字セルを集める。
  * 語彙は使わず、低確信度の列・本文相当の太さ・画像端で欠けていないことだけを見る。
  */
-function collectVerticalGlyphRescanTargets(blocks, blockScale, sourceWidth, sourceHeight) {
+function collectVerticalGlyphRescanTargets(
+    blocks, blockScale, sourceWidth, sourceHeight, edgeInsets = null) {
     if (!(blockScale > 0) || !(sourceWidth > 0) || !(sourceHeight > 0)) return [];
+    // 認識入力に余白が付いている場合、元の画像端は余白の内側（edgeInsets）にある。
+    // 端で欠けたセルの除外はその内側の矩形を基準に行う（余白の有無で対象が変わらない）。
+    // 数値なら4辺同じ幅、{left, top, right, bottom} なら辺ごとの幅。省略時は canvas の端。
+    const insetOf = (value) => (Number.isFinite(value) && value > 0 ? value : 0);
+    const uniform = typeof edgeInsets === "number" ? insetOf(edgeInsets) : null;
+    const innerLeft = uniform ?? insetOf(edgeInsets?.left);
+    const innerTop = uniform ?? insetOf(edgeInsets?.top);
+    const innerRight = sourceWidth - (uniform ?? insetOf(edgeInsets?.right));
+    const innerBottom = sourceHeight - (uniform ?? insetOf(edgeInsets?.bottom));
     const lines = [];
     forEachOcrLine(blocks, (line) => {
         const entries = [];
@@ -394,7 +404,8 @@ function collectVerticalGlyphRescanTargets(blocks, blockScale, sourceWidth, sour
         if (length < 4 || length > 16 || !Number.isFinite(lineConfidence)
             || lineConfidence >= 90) continue;
         if (item.width < medianWidth * 0.6
-            || item.line.bbox.x0 <= 0 || item.line.bbox.x1 >= sourceWidth * blockScale) continue;
+            || item.line.bbox.x0 <= innerLeft * blockScale
+            || item.line.bbox.x1 >= innerRight * blockScale) continue;
         const pitch = item.span / length;
         if (!(pitch > 0) || item.width > pitch * 2.2) continue;
         const firstText = item.entries[0]?.symbol.text || "";
@@ -449,7 +460,8 @@ function collectVerticalGlyphRescanTargets(blocks, blockScale, sourceWidth, sour
             const height = scaledHeight / blockScale;
             // 画像端に達したセルは文字の一部が選択範囲外の可能性が高い。見えていない
             // 画を推測で補わず、局所補正の対象から外す。
-            if (x < 0 || y < 0 || x + width > sourceWidth || y + height > sourceHeight) continue;
+            if (x < innerLeft || y < innerTop
+                || x + width > innerRight || y + height > innerBottom) continue;
             targets.push({ ...entry, x, y, width, height, lineConfidence });
         }
     }
@@ -535,6 +547,16 @@ const OCR_CONSENSUS_TARGET_GLYPH_PX = [20, 24, 30];
 // 全候補89-90で判別不能だった。語彙を参照せず、この画素由来の差だけを利用する。
 const OCR_CONSENSUS_MIN_CONFIDENCE = 90;
 const OCR_CONSENSUS_CONFIDENCE_MARGIN = 3;
+
+// 強い多数一致のもう一つの成立条件（漢字限定）: 平均のマージンでは元寸の高い確信度
+// （96〜98）が壁になって届かないが、「同じ文字を支持する各票（新規倍率の gray 候補で、
+// 前後どちらかの文字が元寸と一致して位置が裏付けられたもの）が全て この値以上、かつ
+// 全て元寸の確信度以上、かつ次点の平均以上」なら採る。実測（2026-08-17、tools/ocr-e2e
+// 33入力・HEAD比）: 除→際（票98/98 vs 元寸98）・間→問（98/98 vs 98）・暴→虹（98/96 vs 96）
+// の3件を改善し悪化0、他30入力は出力バイト一致。候補が誤っている側の26件（同じ別字を
+// 2票以上が支持したが不採用）で発火するものはゼロ。94 にすると仮名の い→し(95,94) が
+// 漢字限定でなければ発火するため 95 とし、文字種は漢字に限る。
+const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = 95;
 
 // 拡大後の画素数の上限（巨大な選択範囲で時間とメモリを浪費しないための保護）
 const OCR_FUSION_MAX_AREA = 8400000;
@@ -688,19 +710,27 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
                         votes.set(original.text, {
                             text: original.text,
                             count: 1,
-                            total: confidence
+                            total: confidence,
+                            primaryCount: 0,
+                            primaryMin: Infinity
                         });
                     }
                 }
-                variantMaps.forEach((map) => {
+                variantMaps.forEach((map, variantIndex) => {
                     const candidate = map.get(index);
                     if (!candidate || classifyOcrSymbol(candidate.text) !== baseClass
                         || !hasStableNeighbor(map, index)) return;
                     const confidence = Number(candidate.confidence);
                     if (!Number.isFinite(confidence)) return;
-                    const vote = votes.get(candidate.text) || { text: candidate.text, count: 0, total: 0 };
+                    const vote = votes.get(candidate.text)
+                        || { text: candidate.text, count: 0, total: 0, primaryCount: 0, primaryMin: Infinity };
                     vote.count++;
                     vote.total += confidence;
+                    // 「全票が元寸以上」の判定には、新規倍率の候補（補充候補より前）だけを数える。
+                    if (unanimousVariantCount == null || variantIndex < unanimousVariantCount) {
+                        vote.primaryCount++;
+                        vote.primaryMin = Math.min(vote.primaryMin, confidence);
+                    }
                     votes.set(candidate.text, vote);
                 });
             }
@@ -713,10 +743,20 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
             const baseConfidence = Number.isFinite(original.confidence)
                 ? original.confidence : 0;
             const comparison = Math.max(baseConfidence, runnerUp?.average || 0);
+            // 「全票が元寸以上」（OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE のコメント参照）:
+            // 漢字限定、元寸の確信度が数値で得られていること、新規倍率の票が2件以上あり、
+            // その最小値が しきい値・元寸・次点平均 のすべて以上であること。
+            const allVotesAtLeastBase = !!top && baseClass === "kanji"
+                && Number.isFinite(original.confidence)
+                && top.primaryCount >= 2
+                && top.primaryMin >= OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE
+                && top.primaryMin >= baseConfidence
+                && (!runnerUp || top.primaryMin >= runnerUp.average);
             if (top && top.text !== original.text && top.count >= 2
                 && (!runnerUp || top.count > runnerUp.count)
                 && top.average >= OCR_CONSENSUS_MIN_CONFIDENCE
-                && top.average >= comparison + OCR_CONSENSUS_CONFIDENCE_MARGIN) {
+                && (top.average >= comparison + OCR_CONSENSUS_CONFIDENCE_MARGIN
+                    || allVotesAtLeastBase)) {
                 symbol.text = top.text;
                 touchedWords.add(entry.word);
                 replaced++;
