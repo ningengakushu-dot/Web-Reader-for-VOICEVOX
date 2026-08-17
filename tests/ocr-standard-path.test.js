@@ -62,6 +62,16 @@ assert.match(common, /finally[\s\S]*localReplacements = await localRescanPromise
     '局所OCRは例外時もworker復元まで合流し、全文融合後に置換案だけを適用する');
 assert.match(common + read('ocr-image.js'), /OCR_ORIENTATION_FULL_COMPARE_MAX_AREA[\s\S]*pickOcrTextPatch/,
     '全画面級の曖昧画像は全体二重認識せず小領域比較へ戻す');
+// 組版方向の全体比較の上限（2026-08-17）: 精錬を許す面積と同じ 120万px まで縦横2モデルで
+// 全体を比較する。40万px だと 552x796 の小説ページが 240px パッチ比較に回り、jpn 77 / jpn_vert 76
+// で横書きに倒れて全文が崩壊した（CER 99%）。全画面級のパッチは 480px。
+const image = read('ocr-image.js');
+assert.match(image, /const OCR_ORIENTATION_FULL_COMPARE_MAX_AREA = 1200000;/,
+    '方向の全体比較は 120万px（OCR_REFINE_MAX_AREA と同じ）まで行う');
+assert.match(common, /const OCR_REFINE_MAX_AREA = 1200000;/,
+    '精錬を許す面積の上限（全体比較の上限と揃える）');
+assert.match(image, /const OCR_ORIENTATION_PATCH_PX = 480;/,
+    '全画面級の方向確認パッチは 480px（240px は 20px 明朝で縦横の差が付かない）');
 // 認識入力の余白付与（2026-08-17）: 余白は認識に渡す画像にだけ付け、判定は無余白で行う
 assert.match(common, /const unpaddedGrayCanvas = toGrayscale\(sourceCanvas\);\s*\n\s*const paddedInput = padOcrCanvasToMargin\(unpaddedGrayCanvas, OCR_INPUT_PAD_PX\);/,
     '認識入力（gray）は文字が端に接する辺にだけ背景色の余白を足し、最低余白を確保する（余白がある画像は無変更）');

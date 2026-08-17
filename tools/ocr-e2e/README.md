@@ -67,6 +67,9 @@ npm install
    node harness.mjs work/plan-round2-ab-2.json
    node make-plan.mjs round2-tight  # 同33入力をインク境界ぴったりに切り詰めた入力（*_tight0）で baseline / head
    node harness.mjs work/plan-round2-tight.json
+   node gen-corpus-page.mjs         # 小説1ページ（40万px超・縦書き明朝20px・ルビ付き）4枚 → work/corpus-page.json
+   node make-plan.mjs page          # 全体 / タイト / 部分選択（右端5列・上下の半欠け）を baseline / head
+   node harness.mjs work/plan-page.json
    ```
 
    入力に `tight: <margin px>` を付けると、取り込み後にインク境界＋margin で切り詰める

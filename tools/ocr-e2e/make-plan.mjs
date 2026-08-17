@@ -150,6 +150,34 @@ if (mode === "round2-ab" || mode === "round2-tight" || mode === "round2-extra") 
     }
 }
 
+// page: gen-corpus-page.mjs で作る「小説1ページ（40万px超・縦書き明朝20px・ルビ付き）」を
+// baseline / head で回す。全体（余白あり）・インク境界ぴったり・部分選択（右端5列・
+// 上端/下端の半欠け）を含む。方向判定（全体比較の上限・パッチ）の回帰確認用。
+if (mode === "page") {
+    const pageFile = join(workDir, "corpus-page.json");
+    if (!existsSync(pageFile)) throw new Error(`missing ${pageFile}: run gen-corpus-page.mjs first`);
+    const pages = JSON.parse(readFileSync(pageFile, "utf8"));
+    for (const item of pages) {
+        inputs[item.name] = { file: item.file, gt: item.gt };
+        inputs[`${item.name}_tight0`] = { file: item.file, gt: item.gt, tight: 0 };
+        for (const name of [item.name, `${item.name}_tight0`]) {
+            for (const variant of ["baseline", "head"]) runs.push({ input: name, variant });
+        }
+    }
+    const first = pages[0];
+    if (first) {
+        inputs.page_part_right5 = { file: first.file,
+            crop: { left: first.width - 5 * 31 - 12, top: 0, width: 5 * 31 + 12, height: first.height } };
+        inputs.page_part_bottomcut = { file: first.file,
+            crop: { left: 0, top: 0, width: first.width, height: first.height - 14 } };
+        inputs.page_part_topcut = { file: first.file,
+            crop: { left: 0, top: 14, width: first.width, height: first.height - 14 } };
+        for (const name of ["page_part_right5", "page_part_bottomcut", "page_part_topcut"]) {
+            for (const variant of ["baseline", "head"]) runs.push({ input: name, variant });
+        }
+    }
+}
+
 // 1計画が100ランを超えるときは分割して書き出す（結果は最後にまとめて書かれるため、
 // 長い計画は途中で止まると全損する。README の注意も参照）。
 const MAX_RUNS_PER_PLAN = 100;

@@ -454,8 +454,8 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     let resolvedFullData = null;
     let resolvedFullMs = 0;
     if (!detected.confident) {
-        // 小～中規模の選択は局所パッチの偏りを避けるため全体を比較する。全画面級は
-        // CPU・メモリ回帰を避け、従来の小領域比較を維持する。
+        // 精錬を許す面積（120万px）までは局所パッチの偏りを避けるため全体を比較する。
+        // それを超える全画面級は CPU・メモリ回帰を避け、小領域比較を維持する。
         const compareFull = sourceArea <= OCR_ORIENTATION_FULL_COMPARE_MAX_AREA;
         // 局所パッチは余白の無い画像から選ぶ（格子が余白でずれると判定が変わる）。
         // 全体比較は認識入力（余白付き）をそのまま使い、主経路として再利用する。
