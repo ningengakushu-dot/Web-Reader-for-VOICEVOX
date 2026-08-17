@@ -54,7 +54,11 @@ const SAMPLES = [
     { id: "yumin_20_ruby", font: "yumin", px: 20, dsf: 1, ruby: true, lh: 1.55 },
     { id: "yumin_20_plain", font: "yumin", px: 20, dsf: 1, ruby: false, lh: 1.55 },
     { id: "noto_20_ruby", font: "noto", px: 20, dsf: 1, ruby: true, lh: 1.55 },
-    { id: "yumin_16_dsf125_ruby", font: "yumin", px: 16, dsf: 1.25, ruby: true, lh: 1.55 }
+    { id: "yumin_16_dsf125_ruby", font: "yumin", px: 16, dsf: 1.25, ruby: true, lh: 1.55 },
+    // 表示倍率を上げた場合（実効30px相当）。20px は Tesseract の最適域(20-30px)の下端で、
+    // 拡大すると誤りが大きく減るかを測るための対照。
+    { id: "yumin_20_dsf15_ruby", font: "yumin", px: 20, dsf: 1.5, ruby: true, lh: 1.55 },
+    { id: "yumin_28_ruby", font: "yumin", px: 28, dsf: 1, ruby: true, lh: 1.55 }
 ];
 
 const browser = await chromium.launch({ executablePath });
