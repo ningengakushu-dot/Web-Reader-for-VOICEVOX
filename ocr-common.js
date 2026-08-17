@@ -443,7 +443,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     // sourceCanvas）で行い、余白の有無で判定が変わらないようにする。
     const unpaddedGrayCanvas = toGrayscale(sourceCanvas);
     const paddedInput = padOcrCanvasToMargin(unpaddedGrayCanvas, OCR_INPUT_PAD_PX);
-    const grayCanvas = paddedInput.canvas;
+    let grayCanvas = paddedInput.canvas;
     // 認識入力の座標系で「元の画像端」がどこにあるか（各辺に足した余白。局所再確認で
     // 端の欠けセルを除く基準と、二値化版へ同じ余白を付けるのに使う）
     const inputInsets = paddedInput.insets;
@@ -451,6 +451,14 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
 
     const detected = detectTextOrientation(sourceCanvas);
     let orientation = detected.orientation;
+    // 縦書きと画素統計で確定した入力に限り、本文列と直交する細い帯（書籍の柱・
+    // ページ番号）を認識前に背景で塗る。縦書きモデルは柱を列ごとに切り刻んで各列の
+    // 先頭へ無意味な断片として出力し、それが読み上げられてしまう
+    // （詳細と実測は findOcrOutlierInkBands のコメント参照）。
+    // 方向が確定した縦書きに限るため、横書きの見出し行を消すことはない。
+    const outlierBands = detected.confident && detected.orientation === "vertical"
+        ? findOcrOutlierInkBands(grayCanvas) : [];
+    if (outlierBands.length) grayCanvas = fillOcrCanvasBands(grayCanvas, outlierBands);
     let resolvedFullData = null;
     let resolvedFullMs = 0;
     if (!detected.confident) {
@@ -527,7 +535,14 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         const prepared = prepareOcrCanvas(sourceCanvas);
         if (prepared === sourceCanvas) return;
         const preparedScale = prepared.width / Math.max(1, sourceCanvas.width);
-        const preprocessed = await primaryWorker.recognize(padOcrCanvas(prepared, {
+        // gray側で柱・ページ番号の帯を塗った場合は、二値化版でも同じ帯を塗る
+        // （候補どうしで見えている文字が違うと、後段の整列・融合がずれる）。
+        // 帯の座標は余白付きgray基準なので、元寸へ戻してから二値化の倍率を掛ける。
+        const preparedMasked = fillOcrCanvasBands(prepared, outlierBands.map((band) => ({
+            y0: (band.y0 - inputInsets.top) * preparedScale,
+            y1: (band.y1 - inputInsets.top) * preparedScale
+        })), 1, 255);
+        const preprocessed = await primaryWorker.recognize(padOcrCanvas(preparedMasked, {
             left: inputInsets.left * preparedScale,
             top: inputInsets.top * preparedScale,
             right: inputInsets.right * preparedScale,

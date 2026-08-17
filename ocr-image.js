@@ -197,6 +197,128 @@ function padOcrCanvasToMargin(source, minMargin) {
     return { canvas: padOcrCanvas(source, insets, background), insets };
 }
 
+// 縦書きの選択範囲に混じる「本文列と直交する細いインクの帯」（書籍の柱＝ページ上部の
+// 書名・章名、ページ番号、下端のノンブル）を認識前に背景で塗りつぶすためのしきい値。
+//
+// 縦書きページでは柱は本文列の上を横切るため、縦書きモデルは柱を列ごとに切り刻んで
+// 各列の先頭へ1〜2文字ぶんの断片として出力する。断片は本文として読み上げられ、
+// 「ホソ」「エイエイ」「ク」のような無意味な語が文の間に入る（実測: 新潮社の試し読み
+// ページの右9列の選択で余剰8文字のうち4文字が柱の断片、全体の選択では9文字）。
+// 柱そのものは横書きなので縦書きモデルでは読めておらず（実測: 柱16文字はどの倍率でも
+// 出力に現れない）、塗りつぶしても読み上げから失われる文字は無い。
+//
+// 判定は「行ごとのインク量から帯を切り出し、主帯（最も高い帯）に対して十分に薄く、
+// 主帯と明確に離れている帯」だけを対象にする。横書きの複数行テキストは帯が多数に
+// なるため OCR_OUTLIER_BAND_MAX_BANDS で除外され、1行だけの選択は主帯しか無く
+// 対象にならない（＝この処理は縦書きの本文ブロック＋柱の形にだけ発火する）。
+const OCR_OUTLIER_BAND_MAX_RATIO = 0.25;
+const OCR_OUTLIER_BAND_MIN_GAP_PX = 4;
+const OCR_OUTLIER_BAND_MAX_BANDS = 4;
+const OCR_OUTLIER_BAND_MAX_COUNT = 2;
+// 主帯が入力の高さのこの割合以上を占めていなければ（＝本文ブロックが支配的でなければ）
+// 何も塗らない
+const OCR_OUTLIER_BAND_MAIN_MIN_RATIO = 0.4;
+// 帯のインクの横幅が帯の高さのこの倍数以上であることを要求する。柱は本文列を横切って
+// 伸びる（横幅≫高さ）が、縦に数文字だけ離れて置かれた縦書きの短い添え書きは
+// 横幅が1文字ぶんしかないため対象外になる。
+const OCR_OUTLIER_BAND_MIN_ASPECT = 3;
+
+/**
+ * 本文ブロックから外れた細いインクの帯（柱・ページ番号）を探す。
+ * @param {HTMLCanvasElement} canvas グレースケール化・余白付与済みの認識入力
+ * @returns {Array<{y0: number, y1: number}>} 塗りつぶす帯（無ければ空配列）
+ */
+function findOcrOutlierInkBands(canvas) {
+    const width = canvas.width;
+    const height = canvas.height;
+    if (!(width > 0) || !(height > 0)) return [];
+    const pixels = readOcrCanvasPixels(canvas);
+    const { mean, darkInk } = measureOcrInkPolarity(pixels);
+    const rowInk = new Int32Array(height);
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            if (pixels[i + 3] < 255) continue;
+            const l = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+            const ink = darkInk
+                ? l < mean - OCR_INPUT_INK_CONTRAST : l > mean + OCR_INPUT_INK_CONTRAST;
+            if (ink) rowInk[y]++;
+        }
+    }
+    // インクのある行の連なりを帯にする（1〜2pxの隙間は同じ帯として繋げる）
+    const bands = [];
+    let start = -1;
+    let lastInk = -1;
+    for (let y = 0; y <= height; y++) {
+        const hasInk = y < height && rowInk[y] > 0;
+        if (hasInk) {
+            if (start < 0) start = y;
+            lastInk = y;
+        } else if (start >= 0 && (y - lastInk > 2 || y === height)) {
+            bands.push({ y0: start, y1: lastInk });
+            start = -1;
+        }
+    }
+    if (bands.length < 2 || bands.length > OCR_OUTLIER_BAND_MAX_BANDS) return [];
+    let main = bands[0];
+    for (const band of bands) {
+        if (band.y1 - band.y0 > main.y1 - main.y0) main = band;
+    }
+    const mainHeight = main.y1 - main.y0 + 1;
+    if (mainHeight < height * OCR_OUTLIER_BAND_MAIN_MIN_RATIO) return [];
+    const outliers = [];
+    for (const band of bands) {
+        if (band === main) continue;
+        const bandHeight = band.y1 - band.y0 + 1;
+        const gap = band.y1 < main.y0 ? main.y0 - band.y1 : band.y0 - main.y1;
+        if (bandHeight > mainHeight * OCR_OUTLIER_BAND_MAX_RATIO) return [];
+        if (gap < OCR_OUTLIER_BAND_MIN_GAP_PX) return [];
+        // 帯のインクが本文列を横切って伸びているか（柱かどうか）を横幅で確かめる
+        let minX = width;
+        let maxX = -1;
+        for (let y = band.y0; y <= band.y1; y++) {
+            for (let x = 0; x < width; x++) {
+                const i = (y * width + x) * 4;
+                if (pixels[i + 3] < 255) continue;
+                const l = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+                const ink = darkInk
+                    ? l < mean - OCR_INPUT_INK_CONTRAST : l > mean + OCR_INPUT_INK_CONTRAST;
+                if (!ink) continue;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+            }
+        }
+        if (maxX < 0 || (maxX - minX + 1) < bandHeight * OCR_OUTLIER_BAND_MIN_ASPECT) return [];
+        outliers.push(band);
+    }
+    if (!outliers.length || outliers.length > OCR_OUTLIER_BAND_MAX_COUNT) return [];
+    return outliers;
+}
+
+/**
+ * 指定した帯（画像の全幅）を背景色で塗りつぶした canvas を返す。
+ * 帯が無ければ元の canvas をそのまま返す（無変更）。
+ * @param {HTMLCanvasElement} source
+ * @param {Array<{y0: number, y1: number}>} bands
+ * @param {number} [scale] source が bands の座標系から拡大されている場合の倍率
+ * @param {number} [background] 背景輝度（省略時は source から推定）
+ * @returns {HTMLCanvasElement}
+ */
+function fillOcrCanvasBands(source, bands, scale = 1, background = null) {
+    if (!bands || !bands.length) return source;
+    const fill = Number.isFinite(background) ? background : estimateOcrBackgroundLuminance(source);
+    const canvas = createOcrCanvas(source.width, source.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(source, 0, 0);
+    ctx.fillStyle = `rgb(${fill},${fill},${fill})`;
+    for (const band of bands) {
+        const y0 = Math.max(0, Math.floor(band.y0 * scale));
+        const y1 = Math.min(source.height, Math.ceil((band.y1 + 1) * scale));
+        if (y1 > y0) ctx.fillRect(0, y0, source.width, y1 - y0);
+    }
+    return canvas;
+}
+
 // 小さい文字の再認識用: canvas を高品質補間で拡大する（二値化はしない。
 // 明朝体等では二値化が裏目に出るため、拡大のみの候補として確信度で競わせる）。
 function upscaleOcrCanvas(source, scale) {

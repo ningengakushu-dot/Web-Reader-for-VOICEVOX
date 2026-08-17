@@ -83,12 +83,16 @@ assert.match(common, /detectTextOrientation\(sourceCanvas\)/,
     '組版方向の画素判定は余白の無い元画像で行う');
 assert.match(common, /pickOcrTextPatch\(unpaddedGrayCanvas, OCR_ORIENTATION_PATCH_PX\)/,
     '局所パッチは余白の無い gray から選ぶ（余白で格子がずれると大きな横書きが縦書きに誤判定される: ms_body 4→236）');
-assert.match(common, /const prepared = prepareOcrCanvas\(sourceCanvas\);[\s\S]*padOcrCanvas\(prepared, \{[\s\S]*inputInsets\.left \* preparedScale[\s\S]*\}, 255\)/,
+assert.match(common, /const prepared = prepareOcrCanvas\(sourceCanvas\);[\s\S]*padOcrCanvas\(preparedMasked, \{[\s\S]*inputInsets\.left \* preparedScale[\s\S]*\}, 255\)/,
     '二値化は無余白で行い（しきい値を動かさない）、その結果に同じ余白（白）を付けて認識する');
 assert.match(common, /refineVerticalGlyphsWithHorizontalWorker\(\s*grayCanvas, primary\.data\.blocks, 1, workerProvider, inputInsets\)/,
     '局所再確認には余白幅を渡し、元の画像端で欠けたセルの除外を維持する');
 assert.match(read('ocr-refine.js'), /const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = 95;/,
     '「全票が元寸以上」の漢字多数一致は 95 以上・漢字限定（実測 123→120、悪化0）');
+assert.match(common, /detected\.confident && detected\.orientation === "vertical"\s*\?\s*findOcrOutlierInkBands\(grayCanvas\)/,
+    '柱・ページ番号の帯の塗りつぶしは、画素統計で縦書きと確定した入力だけに適用する（横書きの見出し行を消さない）');
+assert.match(common, /fillOcrCanvasBands\(prepared, outlierBands\.map\(/,
+    '二値化版にも同じ帯を塗る（候補間で見えている文字が違うと整列・融合がずれる）');
 assert.doesNotMatch(common + read('ocr-refine.js'), /自己主張|ジミシュチョウ|彼らちは|普段かちら/,
     '特定語句の辞書・置換規則をOCR実行コードへ入れない');
 

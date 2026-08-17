@@ -70,7 +70,15 @@ npm install
    node gen-corpus-page.mjs         # 小説1ページ（40万px超・縦書き明朝20px・ルビ付き）4枚 → work/corpus-page.json
    node make-plan.mjs page          # 全体 / タイト / 部分選択（右端5列・上下の半欠け）を baseline / head
    node harness.mjs work/plan-page.json
+   node make-plan.mjs real-ab       # 既存33入力 + 生成ページ + 実書籍ページを baseline / head で全入力A/B
+   node harness.mjs work/plan-real-ab.json
    ```
+
+   `real-ab` の実書籍ページ（柱・ページ番号つき縦書き。合成コーパスには無い条件）は、
+   画像 `work/user-page-180262.jpg` と GT `work/user-page-gt.json`（キー `full` / `body` /
+   `cols9`）が置かれているときだけ計画へ加わる。**画像とGTは著作物なのでリポジトリには
+   入れない**（kakushin.png / MS.png と同じ扱い。出典URLは docs/OCR-ACCURACY.md の
+   2026-08-18 の節を参照）。
 
    入力に `tight: <margin px>` を付けると、取り込み後にインク境界＋margin で切り詰める
    （実利用の「文字が選択枠に接するタイトな選択」の再現。コーパス画像は四辺に 12〜36px の

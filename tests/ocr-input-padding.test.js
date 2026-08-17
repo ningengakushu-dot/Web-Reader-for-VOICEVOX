@@ -77,7 +77,7 @@ function makeCanvas(width, height, fill = 255, alpha = 255) {
 }
 
 const imageSource = fs.readFileSync(path.join(root, 'ocr-image.js'), 'utf8')
-    + '\n;globalThis.imageTestApi = {padOcrCanvas, padOcrCanvasToMargin, measureOcrInkMargins, estimateOcrBackgroundLuminance, OCR_INPUT_PAD_PX};';
+    + '\n;globalThis.imageTestApi = {padOcrCanvas, padOcrCanvasToMargin, measureOcrInkMargins, estimateOcrBackgroundLuminance, OCR_INPUT_PAD_PX, findOcrOutlierInkBands, fillOcrCanvasBands};';
 const imageContext = vm.createContext({
     console, Map, Set, Math, Number, Uint8Array, Uint8ClampedArray, Int32Array,
     document: { createElement: () => new FakeCanvas() }
@@ -305,6 +305,62 @@ function fuse(baseText, baseConfs, variants, options = { consensusClasses: ['kan
     ]);
     assert.equal(r.replaced, 1, '従来の強い多数一致（平均マージン）はそのまま動く');
     assert.equal(r.text, '王を際かね');
+}
+
+// ---- 柱・ページ番号の帯の塗りつぶし（findOcrOutlierInkBands / fillOcrCanvasBands） ----
+// 縦書き本文（高い1帯）＋直交する細い帯（柱）だけに発火し、横書きの複数行や
+// 主帯に接した帯には発火しないことを確認する。
+function withBands(height, bands, { width = 120 } = {}) {
+    // 実際の文字列と同じく、背景が多数派になるよう縞状（列相当）にインクを置く
+    const c = makeCanvas(width, height, 255);
+    for (const [y0, y1, x0 = 5, x1 = width - 6] of bands) {
+        for (let y = y0; y <= y1; y++) {
+            for (let x = x0; x <= x1; x++) {
+                if (x % 8 < 2) c.set(x, y, 0, 0, 0, 255);
+            }
+        }
+    }
+    return c;
+}
+{
+    // 本文ブロック（y=60..940）＋柱（y=20..36）→ 柱だけを返す
+    const c = withBands(1000, [[20, 36], [60, 940]]);
+    const bands = image.findOcrOutlierInkBands(c);
+    assert.equal(bands.length, 1, '本文ブロックから離れた細い帯を1件返す');
+    assert.equal(bands[0].y0, 20);
+    assert.equal(bands[0].y1, 36);
+    const filled = image.fillOcrCanvasBands(c, bands);
+    assert.notEqual(filled, c, '塗るときは新しい canvas を返す（元画像を壊さない）');
+    assert.deepEqual(Array.from(filled.get(8, 30)), [255, 255, 255, 255], '柱の画素は背景色になる');
+    assert.deepEqual(Array.from(filled.get(8, 100)), [0, 0, 0, 255], '本文の画素は変えない');
+    assert.deepEqual(Array.from(c.get(8, 30)), [0, 0, 0, 255], '元の canvas は変更しない');
+    // 倍率つきの塗り（二値化版は2倍に拡大されている）
+    const doubled = withBands(2000, [[40, 73], [120, 1880]]);
+    const scaled = image.fillOcrCanvasBands(doubled, bands, 2, 255);
+    assert.deepEqual(Array.from(scaled.get(8, 60)), [255, 255, 255, 255], '倍率を掛けた位置を塗る');
+    assert.deepEqual(Array.from(scaled.get(8, 200)), [0, 0, 0, 255], '本文側は残る');
+}
+{
+    const single = withBands(1000, [[60, 940]]);
+    assert.deepEqual(Array.from(image.findOcrOutlierInkBands(single)), [],
+        '帯が1つだけ（通常の本文選択）なら何も塗らない');
+    const many = withBands(600, [[20, 40], [60, 80], [100, 120], [140, 160], [180, 200]]);
+    assert.deepEqual(Array.from(image.findOcrOutlierInkBands(many)), [],
+        '横書きの複数行のように帯が多い入力には発火しない');
+    const adjacent = withBands(1000, [[55, 59], [62, 940]]);
+    assert.deepEqual(Array.from(image.findOcrOutlierInkBands(adjacent)), [],
+        '主帯に接した帯（本文の一部・傍点等）は塗らない');
+    const thick = withBands(1000, [[20, 300], [400, 940]]);
+    assert.deepEqual(Array.from(image.findOcrOutlierInkBands(thick)), [],
+        '主帯に対して厚い帯は本文の一部の可能性があるため塗らない');
+    const notDominant = withBands(1000, [[20, 36], [60, 300]]);
+    assert.deepEqual(Array.from(image.findOcrOutlierInkBands(notDominant)), [],
+        '主帯が入力の大半を占めない選択では塗らない');
+    // 縦に離れて置かれた「1文字ぶんの幅しかない」短い添え書きは柱ではない
+    const narrow = withBands(1000, [[20, 44, 8, 9], [60, 940]]);
+    assert.deepEqual(Array.from(image.findOcrOutlierInkBands(narrow)), [],
+        '横幅が帯の高さに比べて狭い（柱ではない）帯は塗らない');
+    assert.equal(image.fillOcrCanvasBands(single, []), single, '帯が無ければ同じ canvas を返す');
 }
 
 console.log('OCR input padding / consensus-equal: PASSED');

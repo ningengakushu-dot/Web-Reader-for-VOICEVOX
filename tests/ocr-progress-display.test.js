@@ -90,6 +90,9 @@ function createScenario({ ambiguous, horizontalConfidence, withLogger }) {
             canvas: { kind: canvas.kind, width: canvas.width + pad * 2, height: canvas.height + pad * 2 },
             insets: { left: pad, top: pad, right: pad, bottom: pad }
         }),
+        // 柱・ページ番号の帯の塗りつぶし（進捗の検査には無関係なので何も塗らない）
+        findOcrOutlierInkBands: () => [],
+        fillOcrCanvasBands: (canvas) => canvas,
         padOcrCanvas: (canvas, insets) => ({
             kind: canvas.kind,
             width: canvas.width + (insets.left || 0) + (insets.right || 0),

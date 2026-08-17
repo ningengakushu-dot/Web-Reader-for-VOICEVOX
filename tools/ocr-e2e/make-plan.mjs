@@ -178,6 +178,37 @@ if (mode === "page") {
     }
 }
 
+// real-ab: 既存33入力 + 生成した小説1ページ + （あれば）実書籍ページ画像
+// work/user-page-180262.jpg を baseline → head で回す全入力A/B。実書籍ページは
+// 柱（ページ上部の書名）とページ番号を含み、合成コーパスでは再現できない条件を測る。
+// 実書籍ページのGTは著作物のため work/user-page-gt.json（git管理外）に置き、
+// 存在するときだけ計画へ加える（kakushin.png / MS.png と同じ扱い）。
+if (mode === "real-ab") {
+    for (const file of ["corpus-mincho.json", "corpus-page.json"]) {
+        const path = join(workDir, file);
+        if (!existsSync(path)) continue;
+        for (const item of JSON.parse(readFileSync(path, "utf8"))) {
+            if (!item?.name || !item.file || !item.gt || inputs[item.name]) continue;
+            inputs[item.name] = { file: item.file, gt: item.gt };
+        }
+    }
+    const userPage = join(workDir, "user-page-180262.jpg");
+    const userGtFile = join(workDir, "user-page-gt.json");
+    if (existsSync(userPage) && existsSync(userGtFile)) {
+        const gts = JSON.parse(readFileSync(userGtFile, "utf8"));
+        // 全体（柱・ページ番号を含む）と、報告された選択（右9列）の等倍・0.83倍
+        inputs.userpage_full = { file: userPage, gt: gts.full };
+        inputs.userpage_cols9 = { file: userPage, gt: gts.cols9,
+            crop: { left: 402, top: 66, width: 356, height: 1036 } };
+        inputs.userpage_cols9_083 = { file: userPage, gt: gts.cols9,
+            crop: { left: 402, top: 66, width: 356, height: 1036 }, scale: 0.83 };
+    }
+    for (const name of Object.keys(inputs)) {
+        if (!inputs[name].gt) continue;
+        for (const variant of ["baseline", "head"]) runs.push({ input: name, variant });
+    }
+}
+
 // 1計画が100ランを超えるときは分割して書き出す（結果は最後にまとめて書かれるため、
 // 長い計画は途中で止まると全損する。README の注意も参照）。
 const MAX_RUNS_PER_PLAN = 100;
