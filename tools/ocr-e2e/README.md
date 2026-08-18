@@ -117,6 +117,18 @@ npm install
 
    結果は `work/results_plan-*.json`（全文テキスト付き）。
 
+### 縦書きプロポーショナル書体コーパス（gen-corpus-vpitch.mjs）
+
+ＭＳ Ｐ明朝・ＭＳ Ｐゴシックの縦書きは1文字ぶんの送りが一定でない
+（ＭＳ Ｐ明朝 24px で実測 15.3〜24px の17種類）。「列の長さ ÷ 文字数」で
+余分な文字を消す段が誤作動しないかを測るためのコーパス（12入力）。
+
+```powershell
+$env:OCR_CHROMIUM = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+node gen-corpus-vpitch.mjs
+node make-plan.mjs vpitch      # baseline / head / head-noprune
+```
+
 ### Web媒体コーパス（gen-corpus-web.mjs）
 
 既存コーパスは**青空文庫の文学作品・縦書き明朝**にほぼ偏っており、この拡張の主用途である
@@ -162,6 +174,9 @@ GT には**CSSが描く箇条書きマーカー（`•` `1.`）も含める**。
   2026-08-18 はこれで「罫線表は SINGLE_BLOCK で確信度43・AUTOで83」を確かめた。
 - `probe-derule.mjs <画像>...` 「文字の画より長い直線」を消した画像と原画を並べて認識する。
   罫線・枠線の除去を出荷コードへ入れる前の検証に使った。
+- `probe-timing.mjs <画像>...` 1回のOCRで**何回の認識が走り、それぞれ何秒か**を出す
+  （出荷コードに触れず Tesseract の呼び出しを包む）。2026-08-19 はこれで
+  「スマホ画面の切り出しで6回・15.8秒、採用されるのは最初の2.17秒だけ」を突き止めた。
 
 ## 測定の規律（過去の失敗から）
 

@@ -337,6 +337,23 @@ if (mode === "dict-ab") {
     }
 }
 
+// vpitch: 縦書きプロポーショナル書体（ＭＳ Ｐ明朝・ＭＳ Ｐゴシック）のコーパス。
+// 「列の長さ ÷ 文字数」が1文字ぶんの送りと一致しない条件で、余分な文字を消す段が
+// 実在する本文を削除していないかを測る（head-noprune との差が削除段の寄与）。
+if (mode === "vpitch") {
+    const file = join(workDir, "corpus-vpitch.json");
+    if (!existsSync(file)) throw new Error(`missing ${file}: run gen-corpus-vpitch.mjs first`);
+    const names = [];
+    for (const item of JSON.parse(readFileSync(file, "utf8"))) {
+        if (!item?.name || !item.file || !item.gt) continue;
+        inputs[item.name] = { file: item.file, gt: item.gt };
+        names.push(item.name);
+    }
+    for (const name of names) {
+        for (const variant of ["baseline", "head", "head-noprune"]) runs.push({ input: name, variant });
+    }
+}
+
 // 1計画が100ランを超えるときは分割して書き出す（結果は最後にまとめて書かれるため、
 // 長い計画は途中で止まると全損する。README の注意も参照）。
 const MAX_RUNS_PER_PLAN = 100;

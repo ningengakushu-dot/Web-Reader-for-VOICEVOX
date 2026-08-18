@@ -100,6 +100,7 @@ const CONSENSUS_PRUNE_OFF = {
     to: "const OCR_PRUNE_INSERTION_MAX_CONFIDENCE = 0;",
     label: "consensus-prune=off"
 };
+const FUSE_TRIGGER = "if (best === primary.data && glyphSize != null && glyphSize < OCR_FUSION_TRIGGER_GLYPH_PX) {";
 const VARIANTS = {
     // 比較基準。OCR_E2E_BASELINE に旧版4ファイルを置いたディレクトリを指定する
     // （例: for f in constants.js ocr-image.js ocr-refine.js ocr-common.js;
@@ -147,6 +148,56 @@ const VARIANTS = {
         from: "const OCR_RULE_MIN_LENGTH_PX = 24;",
         to: "const OCR_RULE_MIN_LENGTH_PX = Infinity;",
         label: "rule-removal=off"
+    }]),
+    // 主経路の確信度が十分高いときは複数倍率の融合段を丸ごと省く案（待ち時間の短縮）。
+    // 前処理版を省く OCR_PREPROCESS_SKIP_CONFIDENCE=92 と同じ考え方。
+    "head-fuseskip90": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: FUSE_TRIGGER,
+        to: FUSE_TRIGGER.replace(") {", " && best.confidence < 90) {"),
+        label: "fuse-skip>=90"
+    }]),
+    "head-fuseskip92": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: FUSE_TRIGGER,
+        to: FUSE_TRIGGER.replace(") {", " && best.confidence < 92) {"),
+        label: "fuse-skip>=92"
+    }]),
+    "head-prod-fuseskip92": () => loadSources(repo, [{
+        from: FUSE_TRIGGER,
+        to: FUSE_TRIGGER.replace(") {", " && best.confidence < 92) {"),
+        label: "fuse-skip>=92 prod"
+    }]),
+    "head-prod-fuseskip90": () => loadSources(repo, [{
+        from: FUSE_TRIGGER,
+        to: FUSE_TRIGGER.replace(") {", " && best.confidence < 90) {"),
+        label: "fuse-skip>=90 prod"
+    }]),
+    // 融合に使う倍率を固定 [1.5,2,3] ではなく、文字寸から LSTM 最適域(20/24/30px)を
+    // 狙って決める案。小さい文字ほど3倍が最適域を通り越して重いだけになる。
+    "head-fusescale": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const others = await collectUpscaledVariants(OCR_FUSION_SCALES);",
+        to: "const others = await collectUpscaledVariants(OCR_CONSENSUS_TARGET_GLYPH_PX"
+            + ".map((target) => Math.round((target / glyphSize) * 100) / 100)"
+            + ".filter((scale) => scale > 1.05 && scale <= 3));",
+        label: "fusion-scales=adaptive"
+    }]),
+    "head-prod-fusescale": () => loadSources(repo, [{
+        from: "const others = await collectUpscaledVariants(OCR_FUSION_SCALES);",
+        to: "const others = await collectUpscaledVariants(OCR_CONSENSUS_TARGET_GLYPH_PX"
+            + ".map((target) => Math.round((target / glyphSize) * 100) / 100)"
+            + ".filter((scale) => scale > 1.05 && scale <= 3));",
+        label: "fusion-scales=adaptive prod"
+    }]),
+    // 前処理版（2倍＋大津二値化）を省く確信度のしきい値を下げる案（待ち時間の短縮）。
+    // 実測の一例: 確信度91の縦書き入力で、二値化版は確信度61しか出さないのに2.96秒使う。
+    "head-binskip88": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_PREPROCESS_SKIP_CONFIDENCE = 92;",
+        to: "const OCR_PREPROCESS_SKIP_CONFIDENCE = 88;",
+        label: "binarize-skip>=88"
+    }]),
+    "head-binskip85": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_PREPROCESS_SKIP_CONFIDENCE = 92;",
+        to: "const OCR_PREPROCESS_SKIP_CONFIDENCE = 85;",
+        label: "binarize-skip>=85"
     }]),
     "head-nofuse": () => loadSources(repo, [BUDGET_PATCH(60000), {
         from: CONSENSUS_CURRENT,
