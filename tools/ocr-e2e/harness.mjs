@@ -235,6 +235,12 @@ const VARIANTS = {
             + "        if (deleteCount < 1 || deleteCount > 3) return;",
         label: "votecount"
     }]),
+    // 短列の局所再確認が使うセル格子のピッチも中央値に揃える（同じ系統誤差の残り1か所）
+    "head-rescanmed": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "        ? longPitches[Math.floor((longPitches.length - 1) * 0.75)]",
+        to: "        ? longPitches[Math.floor((longPitches.length - 1) * OCR_LINE_PITCH_QUANTILE)]",
+        label: "rescan-pitch=median"
+    }]),
     "head-budget12": () => loadSources(repo, [BUDGET_PATCH(12000)]),
     "head-budget9": () => loadSources(repo, [BUDGET_PATCH(9000)]),
     "head-prod": () => loadSources(repo, []),

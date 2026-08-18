@@ -416,7 +416,7 @@ function collectVerticalGlyphRescanTargets(
         .map((item) => item.span / item.entries.length)
         .sort((a, b) => a - b);
     const nominalPitch = longPitches.length >= 2
-        ? longPitches[Math.floor((longPitches.length - 1) * 0.75)]
+        ? longPitches[Math.floor((longPitches.length - 1) * OCR_LINE_PITCH_QUANTILE)]
         : null;
     const targets = [];
     for (const item of lines) {
