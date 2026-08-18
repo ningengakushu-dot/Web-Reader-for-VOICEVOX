@@ -372,12 +372,15 @@ const OCR_ORIENTATION_FULL_CONFIDENCE_MARGIN = 8;
 /**
  * 比較用画像を横書き・縦書きの両モデルで並行認識し、確信度差が明確な側を返す。
  * 比較用画像が選択範囲全体の場合だけ、両結果を後段の本文・副方向候補として再利用する。
+ * verticalCanvas を渡した場合、縦書きモデルだけはそちらを認識する（柱を塗った画像を
+ * 縦書き側にだけ使うため。採用された側の結果がそのまま本文認識になる）。
  * @returns {Promise<{orientation: "horizontal"|"vertical", fullData: object|null,
  * elapsedMs: number}|null>} 判定できないときは null
  */
 async function resolveOcrOrientation(
     comparisonCanvas, workerProvider, outputFields, fallbackOrientation,
-    confidenceMargin = OCR_ORIENTATION_FULL_CONFIDENCE_MARGIN, reuseAsFull = true) {
+    confidenceMargin = OCR_ORIENTATION_FULL_CONFIDENCE_MARGIN, reuseAsFull = true,
+    verticalCanvas = null) {
     try {
         const [horizontalWorker, verticalWorker] = await Promise.all([
             workerProvider("jpn"),
@@ -395,7 +398,7 @@ async function resolveOcrOrientation(
         try {
             [horizontal, vertical] = await Promise.all([
                 horizontalWorker.recognize(comparisonCanvas, {}, outputFields),
-                verticalWorker.recognize(comparisonCanvas, {}, outputFields)
+                verticalWorker.recognize(verticalCanvas || comparisonCanvas, {}, outputFields)
             ]);
         } finally {
             ocrPrimaryPassLangs = null;
@@ -451,14 +454,23 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
 
     const detected = detectTextOrientation(sourceCanvas);
     let orientation = detected.orientation;
-    // 縦書きと画素統計で確定した入力に限り、本文列と直交する細い帯（書籍の柱・
+    // 縦書き寄りと画素統計が判断した入力に限り、本文列と直交する細い帯（書籍の柱・
     // ページ番号）を認識前に背景で塗る。縦書きモデルは柱を列ごとに切り刻んで各列の
     // 先頭へ無意味な断片として出力し、それが読み上げられてしまう
     // （詳細と実測は findOcrOutlierInkBands のコメント参照）。
-    // 方向が確定した縦書きに限るため、横書きの見出し行を消すことはない。
-    const outlierBands = detected.confident && detected.orientation === "vertical"
+    // 塗った画像は「縦書きモデルへ渡す入力」にだけ使う。方向が未確定のときは
+    // 縦横の比較でも縦書き側だけがこの画像を見るので、横書きに決まった場合は
+    // 塗る前の画像がそのまま使われる（横書きの見出し行を消すことはない）。
+    const outlierBands = detected.orientation === "vertical"
         ? findOcrOutlierInkBands(grayCanvas) : [];
-    if (outlierBands.length) grayCanvas = fillOcrCanvasBands(grayCanvas, outlierBands);
+    const maskedGrayCanvas = outlierBands.length
+        ? fillOcrCanvasBands(grayCanvas, outlierBands) : grayCanvas;
+    // 実際に採用した（＝以降の全ての認識入力の基準になる）帯。二値化版へ同じ帯を塗るのに使う。
+    let appliedBands = [];
+    if (detected.confident && outlierBands.length) {
+        grayCanvas = maskedGrayCanvas;
+        appliedBands = outlierBands;
+    }
     let resolvedFullData = null;
     let resolvedFullMs = 0;
     if (!detected.confident) {
@@ -469,15 +481,25 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         // 全体比較は認識入力（余白付き）をそのまま使い、主経路として再利用する。
         const comparisonCanvas = compareFull
             ? grayCanvas : pickOcrTextPatch(unpaddedGrayCanvas, OCR_ORIENTATION_PATCH_PX);
+        // 縦書き側だけ柱を塗った画像で認識する（採用された側の結果がそのまま本文認識に
+        // なるため、横書きに決まった場合は塗る前の画像の結果が使われる）。
+        const verticalComparisonCanvas = compareFull && outlierBands.length
+            ? maskedGrayCanvas : comparisonCanvas;
         const resolved = comparisonCanvas ? await resolveOcrOrientation(
             comparisonCanvas, workerProvider,
             compareFull ? outputFields : { text: true }, orientation,
             compareFull ? OCR_ORIENTATION_FULL_CONFIDENCE_MARGIN : 0,
-            compareFull) : null;
+            compareFull, verticalComparisonCanvas) : null;
         if (resolved) {
             orientation = resolved.orientation;
             resolvedFullData = resolved.fullData;
             resolvedFullMs = resolved.elapsedMs;
+        }
+        // 縦書きに決まったら、以降の認識入力も柱を塗った画像に揃える
+        // （全体比較で再利用する縦書き側の結果と同じ画像座標系にする）。
+        if (orientation === "vertical" && outlierBands.length && !appliedBands.length) {
+            grayCanvas = maskedGrayCanvas;
+            appliedBands = outlierBands;
         }
     }
     const primaryLang = orientation === "vertical" ? "jpn_vert" : "jpn";
@@ -538,7 +560,7 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
         // gray側で柱・ページ番号の帯を塗った場合は、二値化版でも同じ帯を塗る
         // （候補どうしで見えている文字が違うと、後段の整列・融合がずれる）。
         // 帯の座標は余白付きgray基準なので、元寸へ戻してから二値化の倍率を掛ける。
-        const preparedMasked = fillOcrCanvasBands(prepared, outlierBands.map((band) => ({
+        const preparedMasked = fillOcrCanvasBands(prepared, appliedBands.map((band) => ({
             y0: (band.y0 - inputInsets.top) * preparedScale,
             y1: (band.y1 - inputInsets.top) * preparedScale
         })), 1, 255);

@@ -89,10 +89,14 @@ assert.match(common, /refineVerticalGlyphsWithHorizontalWorker\(\s*grayCanvas, p
     '局所再確認には余白幅を渡し、元の画像端で欠けたセルの除外を維持する');
 assert.match(read('ocr-refine.js'), /const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = 95;/,
     '「全票が元寸以上」の漢字多数一致は 95 以上・漢字限定（実測 123→120、悪化0）');
-assert.match(common, /detected\.confident && detected\.orientation === "vertical"\s*\?\s*findOcrOutlierInkBands\(grayCanvas\)/,
-    '柱・ページ番号の帯の塗りつぶしは、画素統計で縦書きと確定した入力だけに適用する（横書きの見出し行を消さない）');
-assert.match(common, /fillOcrCanvasBands\(prepared, outlierBands\.map\(/,
-    '二値化版にも同じ帯を塗る（候補間で見えている文字が違うと整列・融合がずれる）');
+assert.match(common, /const outlierBands = detected\.orientation === "vertical"\s*\?\s*findOcrOutlierInkBands\(grayCanvas\)/,
+    '柱・ページ番号の帯は、画素統計が縦書き寄りと判断した入力でだけ探す');
+assert.match(common, /verticalComparisonCanvas = compareFull && outlierBands\.length\s*\?\s*maskedGrayCanvas/,
+    '方向未確定のときは縦書きモデルへ渡す入力にだけ塗った画像を使う（横書きに決まれば塗る前の結果が使われる）');
+assert.match(common, /if \(orientation === "vertical" && outlierBands\.length && !appliedBands\.length\)/,
+    '縦書きに決まった場合だけ、以降の認識入力を塗った画像に揃える');
+assert.match(common, /fillOcrCanvasBands\(prepared, appliedBands\.map\(/,
+    '二値化版にも「実際に採用した」帯を塗る（候補間で見えている文字が違うと整列・融合がずれる）');
 assert.doesNotMatch(common + read('ocr-refine.js'), /自己主張|ジミシュチョウ|彼らちは|普段かちら/,
     '特定語句の辞書・置換規則をOCR実行コードへ入れない');
 
