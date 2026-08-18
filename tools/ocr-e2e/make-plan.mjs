@@ -198,6 +198,8 @@ if (mode === "real-ab") {
         const gts = JSON.parse(readFileSync(userGtFile, "utf8"));
         // 全体（柱・ページ番号を含む）と、報告された選択（右9列）の等倍・0.83倍
         inputs.userpage_full = { file: userPage, gt: gts.full };
+        // 柱・ノンブルは読み上げ対象外なので、本文だけを正解にした同じ入力も測る
+        inputs.userpage_body = { file: userPage, gt: gts.body };
         inputs.userpage_cols9 = { file: userPage, gt: gts.cols9,
             crop: { left: 402, top: 66, width: 356, height: 1036 } };
         inputs.userpage_cols9_083 = { file: userPage, gt: gts.cols9,
