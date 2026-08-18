@@ -118,6 +118,54 @@ const VARIANTS = {
         to: "const OCR_INPUT_PAD_PX = 0;",
         label: "pad=off"
     }]),
+    // 余白を「文字の並ぶ向き」だけ広げる/直交方向だけ広げる（縦書きなら上下/左右）。
+    // 45px 一律では大きなページで改善・小さな切り出しで悪化したため、方向別に切り分ける。
+    "head-padtb45": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "        top: Math.max(0, minMargin - margins.top),",
+        to: "        top: Math.max(0, 45 - margins.top),",
+        label: "pad-top=45"
+    }, {
+        from: "        bottom: Math.max(0, minMargin - margins.bottom)",
+        to: "        bottom: Math.max(0, 45 - margins.bottom)",
+        label: "pad-bottom=45"
+    }]),
+    "head-padlr45": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "        left: Math.max(0, minMargin - margins.left),",
+        to: "        left: Math.max(0, 45 - margins.left),",
+        label: "pad-left=45"
+    }, {
+        from: "        right: Math.max(0, minMargin - margins.right),",
+        to: "        right: Math.max(0, 45 - margins.right),",
+        label: "pad-right=45"
+    }]),
+    // グレースケール化のときにガンマで暗部を持ち上げる（明朝の細線が小さい字で
+    // 消えかける仮説の検証用。単発認識の実測では 1.5 が最良）。
+    "head-gamma15": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "        pixels[i] = pixels[i + 1] = pixels[i + 2] = l;",
+        to: "        pixels[i] = pixels[i + 1] = pixels[i + 2] = 255 * Math.pow(l / 255, 1.5);",
+        label: "gamma=1.5"
+    }]),
+    "head-gamma18": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "        pixels[i] = pixels[i + 1] = pixels[i + 2] = l;",
+        to: "        pixels[i] = pixels[i + 1] = pixels[i + 2] = 255 * Math.pow(l / 255, 1.8);",
+        label: "gamma=1.8"
+    }]),
+    // 認識入力の余白付与の量を変える（列頭・列末の文字が不安定な仮説の検証用）
+    "head-pad20": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_INPUT_PAD_PX = 10;",
+        to: "const OCR_INPUT_PAD_PX = 20;",
+        label: "pad=20"
+    }]),
+    "head-pad30": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_INPUT_PAD_PX = 10;",
+        to: "const OCR_INPUT_PAD_PX = 30;",
+        label: "pad=30"
+    }]),
+    "head-pad45": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_INPUT_PAD_PX = 10;",
+        to: "const OCR_INPUT_PAD_PX = 45;",
+        label: "pad=45"
+    }]),
     // 「全票が base 以上」の漢字多数一致だけを外す（票の下限を Infinity にすると成立しない）
     "head-noconseq": () => loadSources(repo, [BUDGET_PATCH(60000), {
         from: "const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = 95;",

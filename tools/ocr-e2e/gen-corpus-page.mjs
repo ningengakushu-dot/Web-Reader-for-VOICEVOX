@@ -27,7 +27,7 @@ const PARAS = [
 ];
 
 function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
-function paraHtml(text, useRuby) {
+function paraHtml(text, useRuby, bold) {
     let out = "";
     let gt = "";
     const re = /｜([^《]+)《([^》]+)》/g;
@@ -42,7 +42,8 @@ function paraHtml(text, useRuby) {
     out += esc(text.slice(last)); gt += text.slice(last);
     // 段落頭の字下げ（「 で始まる段落は字下げなし）
     const indent = /^[「（]/.test(gt) ? "" : "　";
-    return { html: `<p style="margin:0;text-indent:${indent ? "1em" : "0"}">${out}</p>`, gt: indent + gt };
+    const weight = bold ? ";font-weight:700" : "";
+    return { html: `<p style="margin:0;text-indent:${indent ? "1em" : "0"}${weight}">${out}</p>`, gt: indent + gt };
 }
 
 const FONTS = {
@@ -67,14 +68,23 @@ const SAMPLES = [
     { id: "noto_20_header", font: "noto", px: 20, dsf: 1, ruby: true, lh: 1.55, header: "top" },
     // 横書きの見出し行＋本文ブロック。帯の塗りつぶしが横書きの見出しを消さないことの確認用
     // （GT に見出しを含めるので、消えたら誤りとして必ず出る）。
-    { id: "yumin_18_hheading", font: "yumin", px: 18, dsf: 1, ruby: false, lh: 1.7, horizontal: true, heading: true }
+    { id: "yumin_18_hheading", font: "yumin", px: 18, dsf: 1, ruby: false, lh: 1.7, horizontal: true, heading: true },
+    // 本文中の強調（太字）。ユーザー報告（2026-08-18）の「太字の一文がまるごと読み飛ばされる／
+    // 化ける」条件。明朝の太字は画が太って隣接ストロークが埋まりやすく、細字と混在する。
+    { id: "yumin_20_bold", font: "yumin", px: 20, dsf: 1, ruby: true, lh: 1.55, bold: [2, 6, 9] },
+    { id: "noto_20_bold", font: "noto", px: 20, dsf: 1, ruby: true, lh: 1.55, bold: [2, 6, 9] },
+    // 本文が画像の四辺に接する（余白ゼロ）。ユーザー報告の「列の末尾がごっそり落ちる」条件。
+    // 縦書きでは列の先頭＝上端・末尾＝下端が画像端に接し、認識入力の余白付与が効く唯一の経路。
+    { id: "yumin_20_flush", font: "yumin", px: 20, dsf: 1, ruby: true, lh: 1.55, flush: true },
+    { id: "yumin_16_dsf125_flush", font: "yumin", px: 16, dsf: 1.25, ruby: true, lh: 1.55, flush: true }
 ];
 
 const browser = await chromium.launch({ executablePath });
 const manifest = [];
 for (const s of SAMPLES) {
     const page = await browser.newPage({ deviceScaleFactor: s.dsf, viewport: { width: 1600, height: 1200 } });
-    const parts = PARAS.map((p) => paraHtml(p, s.ruby));
+    const boldSet = new Set(s.bold || []);
+    const parts = PARAS.map((p, i) => paraHtml(p, s.ruby, boldSet.has(i)));
     const family = FONTS[s.font].replace(/"/g, "&quot;");
     let html;
     if (s.horizontal) {
@@ -95,8 +105,9 @@ for (const s of SAMPLES) {
         const body = `<div style="font-family:${family};font-size:${s.px}px;`
             + `line-height:${s.lh};color:#111;writing-mode:vertical-rl;`
             + `height:${Math.round(s.px * 39)}px;width:max-content;">${parts.map((p) => p.html).join("")}</div>`;
+        const pad = s.flush ? "0" : "8px 10px";
         html = `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#fff;">`
-            + `<div id="t" style="background:#fff;padding:8px 10px;width:max-content;">`
+            + `<div id="t" style="background:#fff;padding:${pad};width:max-content;">`
             + `${s.header === "top" ? bar : ""}${body}${s.header === "bottom" ? bar : ""}</div>`;
     }
     await page.setContent(html);

@@ -92,6 +92,12 @@ npm install
    `head-nopad`（認識入力の余白付与OFF）・`head-noconseq`（「全票が元寸以上」の漢字多数一致OFF）
    のバリアントもある。
 
+   `pad-ab` は認識入力の余白量（`head-pad20` / `head-pad30` / `head-pad45`）を、
+   `gamma-ab` はグレースケール化のガンマ（`head-gamma15` / `head-gamma18`）を比べる計画。
+   余白の方向別（縦書きの上下だけ／左右だけ）は `head-padtb45` / `head-padlr45`。
+   いずれも 2026-08-18 の実測では悪化ゼロにならず不採用（docs/OCR-ACCURACY.md 参照）だが、
+   再測できるよう残してある。
+
    結果は `work/results_plan-*.json`（全文テキスト付き）。
 
 ## 測定の規律（過去の失敗から）

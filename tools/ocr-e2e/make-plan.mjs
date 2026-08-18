@@ -211,6 +211,82 @@ if (mode === "real-ab") {
     }
 }
 
+// pad-ab: 認識入力の余白付与の量（OCR_INPUT_PAD_PX）を 10/20/30/45 で比べる。
+// 縦書きでは「列の先頭・末尾の文字」が不安定（実測: 段落頭の「が欠落、列末の文字が
+// 化ける）で、これが画像端との距離に依存するかを切り分ける。
+if (mode === "pad-ab" || mode === "pad-full") {
+    for (const file of ["corpus-mincho.json", "corpus-page.json"]) {
+        const path = join(workDir, file);
+        if (!existsSync(path)) continue;
+        for (const item of JSON.parse(readFileSync(path, "utf8"))) {
+            if (!item?.name || !item.file || !item.gt || inputs[item.name]) continue;
+            inputs[item.name] = { file: item.file, gt: item.gt };
+        }
+    }
+    const userPage = join(workDir, "user-page-180262.jpg");
+    const userGtFile = join(workDir, "user-page-gt.json");
+    if (existsSync(userPage) && existsSync(userGtFile)) {
+        const gts = JSON.parse(readFileSync(userGtFile, "utf8"));
+        inputs.userpage_full = { file: userPage, gt: gts.full };
+        inputs.userpage_body = { file: userPage, gt: gts.body };
+        inputs.userpage_cols9 = { file: userPage, gt: gts.cols9,
+            crop: { left: 402, top: 66, width: 356, height: 1036 } };
+        inputs.userpage_cols9_083 = { file: userPage, gt: gts.cols9,
+            crop: { left: 402, top: 66, width: 356, height: 1036 }, scale: 0.83 };
+    }
+    const variants = mode === "pad-ab"
+        ? ["head", "head-pad20", "head-pad30", "head-pad45"] : ["head", "head-pad20"];
+    // 余白ゼロ（本文が画像端に接する）入力を中心に据える。既存コーパスは四辺に
+    // 12〜36px の余白があるため、*_tight0（インク境界で切り詰め）も足して測る。
+    const tightNames = ["rashomon_v_mincho_14", "neko_v_mincho_13", "yumin_rashomon_v_16_dsf1"];
+    for (const name of tightNames) {
+        if (inputs[name]) inputs[`${name}_tight0`] = { ...inputs[name], tight: 0 };
+    }
+    const subset = mode === "pad-ab"
+        ? ["page_yumin_20_flush", "page_yumin_16_dsf125_flush", "userpage_cols9", "userpage_body",
+            "page_yumin_20_ruby", "page_noto_20_ruby",
+            ...tightNames.map((name) => `${name}_tight0`),
+            "yumin_rashomon_v_16_dsf1", "msgo_rashomon_v_16_dsf1", "kakushin_p1", "ms_body"]
+        : Object.keys(inputs).filter((name) => inputs[name].gt);
+    for (const name of subset) {
+        if (!inputs[name]?.gt) continue;
+        for (const variant of variants) runs.push({ input: name, variant });
+    }
+}
+
+// gamma-ab: グレースケール化のガンマ（暗部の持ち上げ）を 1.0/1.5/1.8 で比べる。
+// 太字・余白ゼロの新規ページ入力も同時に測り、報告された条件の再現を確認する。
+if (mode === "gamma-ab") {
+    for (const file of ["corpus-mincho.json", "corpus-page.json"]) {
+        const path = join(workDir, file);
+        if (!existsSync(path)) continue;
+        for (const item of JSON.parse(readFileSync(path, "utf8"))) {
+            if (!item?.name || !item.file || !item.gt || inputs[item.name]) continue;
+            inputs[item.name] = { file: item.file, gt: item.gt };
+        }
+    }
+    const userPage = join(workDir, "user-page-180262.jpg");
+    const userGtFile = join(workDir, "user-page-gt.json");
+    if (existsSync(userPage) && existsSync(userGtFile)) {
+        const gts = JSON.parse(readFileSync(userGtFile, "utf8"));
+        inputs.userpage_cols9 = { file: userPage, gt: gts.cols9,
+            crop: { left: 402, top: 66, width: 356, height: 1036 } };
+        inputs.userpage_body = { file: userPage, gt: gts.body };
+    }
+    const subset = ["userpage_cols9", "userpage_body",
+        "page_yumin_20_ruby", "page_yumin_16_dsf125_ruby", "page_noto_20_ruby",
+        "page_yumin_20_bold", "page_noto_20_bold",
+        "page_yumin_20_flush", "page_yumin_16_dsf125_flush", "page_yumin_18_hheading",
+        "rashomon_v_mincho_14", "neko_v_mincho_13", "melos_h_gothic_13",
+        "yumin_rashomon_v_16_dsf1", "msgo_rashomon_v_16_dsf1", "kakushin_p1", "ms_body"];
+    for (const name of subset) {
+        if (!inputs[name]?.gt) continue;
+        for (const variant of ["head", "head-gamma15", "head-gamma18"]) {
+            runs.push({ input: name, variant });
+        }
+    }
+}
+
 // 1計画が100ランを超えるときは分割して書き出す（結果は最後にまとめて書かれるため、
 // 長い計画は途中で止まると全損する。README の注意も参照）。
 const MAX_RUNS_PER_PLAN = 100;
