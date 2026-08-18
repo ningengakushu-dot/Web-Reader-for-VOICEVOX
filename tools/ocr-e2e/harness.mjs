@@ -172,6 +172,69 @@ const VARIANTS = {
         to: "const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = Infinity;",
         label: "consensus-equal=off"
     }]),
+    // 列ピッチの基準を「長い列の span/文字数 の上位四分位」から「中央値」へ変える。
+    // 上位四分位は文字が欠落した列（比が大きくなる）に引っ張られ、正しい列まで
+    // 「1文字余分」と見なして削除していた（実測は work/prune-detail.json）。
+    "head-pitchmed": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.75)];",
+        to: "    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.5)];",
+        label: "pitch=median"
+    }]),
+    // 上の中央値ピッチに加えて、列の先頭・末尾の文字を削除候補から外す
+    // （pruneOcrConsensusInsertions が行頭・行末を対象外にしているのと同じ安全弁）。
+    "head-pitchmed-noedge": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.75)];",
+        to: "    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.5)];",
+        label: "pitch=median"
+    }, {
+        from: "            const target = [...candidate.text];",
+        to: "            if (candidate.deletedIndices.includes(0)"
+            + " || candidate.deletedIndices.includes(baseLength - 1)) return;\n"
+            + "            const target = [...candidate.text];",
+        label: "prune-noedge"
+    }]),
+    // 物理セル数を「幾何（span/ピッチ）」だけで決めず、候補（別倍率の認識結果）の
+    // 文字数の中央値と多い方を採る。幾何が1つ少なく出る系統誤差に対する二重の歯止め。
+    "head-votecount": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "        const physicalCount = Math.round(baseLine.span / nominalPitch);\n"
+            + "        const deleteCount = baseLength - physicalCount;\n"
+            + "        if (deleteCount < 1 || deleteCount > 3) return;\n"
+            + "\n"
+            + "        const variantTexts = variants.map((lines) =>\n"
+            + "            lines[lineIndex].entries.map((entry) => entry.symbol.text));",
+        to: "        const variantTexts = variants.map((lines) =>\n"
+            + "            lines[lineIndex].entries.map((entry) => entry.symbol.text));\n"
+            + "        const variantLengths = variantTexts.map((chars) => chars.length)\n"
+            + "            .sort((a, b) => a - b);\n"
+            + "        const votedCount = variantLengths[Math.floor((variantLengths.length - 1) / 2)];\n"
+            + "        const physicalCount = Math.max(\n"
+            + "            Math.round(baseLine.span / nominalPitch), votedCount);\n"
+            + "        const deleteCount = baseLength - physicalCount;\n"
+            + "        if (deleteCount < 1 || deleteCount > 3) return;",
+        label: "votecount"
+    }]),
+    "head-pitchmed-vote": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.75)];",
+        to: "    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.5)];",
+        label: "pitch=median"
+    }, {
+        from: "        const physicalCount = Math.round(baseLine.span / nominalPitch);\n"
+            + "        const deleteCount = baseLength - physicalCount;\n"
+            + "        if (deleteCount < 1 || deleteCount > 3) return;\n"
+            + "\n"
+            + "        const variantTexts = variants.map((lines) =>\n"
+            + "            lines[lineIndex].entries.map((entry) => entry.symbol.text));",
+        to: "        const variantTexts = variants.map((lines) =>\n"
+            + "            lines[lineIndex].entries.map((entry) => entry.symbol.text));\n"
+            + "        const variantLengths = variantTexts.map((chars) => chars.length)\n"
+            + "            .sort((a, b) => a - b);\n"
+            + "        const votedCount = variantLengths[Math.floor((variantLengths.length - 1) / 2)];\n"
+            + "        const physicalCount = Math.max(\n"
+            + "            Math.round(baseLine.span / nominalPitch), votedCount);\n"
+            + "        const deleteCount = baseLength - physicalCount;\n"
+            + "        if (deleteCount < 1 || deleteCount > 3) return;",
+        label: "votecount"
+    }]),
     "head-budget12": () => loadSources(repo, [BUDGET_PATCH(12000)]),
     "head-budget9": () => loadSources(repo, [BUDGET_PATCH(9000)]),
     "head-prod": () => loadSources(repo, []),

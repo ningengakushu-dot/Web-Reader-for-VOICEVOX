@@ -98,7 +98,29 @@ npm install
    いずれも 2026-08-18 の実測では悪化ゼロにならず不採用（docs/OCR-ACCURACY.md 参照）だが、
    再測できるよう残してある。
 
+   `head-pitchmed`（列ピッチの基準を上位四分位→中央値）は 2026-08-18 に**採用**した変更の
+   A/B 用。採用後の HEAD では `head` と同じ挙動になる。併せて測って不採用にした
+   `head-votecount` / `head-pitchmed-vote`（物理セル数を候補の文字数と max で採る）も残してある。
+
    結果は `work/results_plan-*.json`（全文テキスト付き）。
+
+### 誤りの「位置」と削除段の内訳を見る道具（work/、git管理外）
+
+追加の認識をせずに既存の結果を読み直すもの:
+
+- `probe-linepos.mjs <plan.json> <results.json> [--variant head]`
+  誤りを「行内の相対位置」「行末からの距離」で集計し、帰無分布（全文字）と並べる。
+  2026-08-18 はこれで「欠落の42.3%が行の切れ目」を見つけた。
+- `dump-linegaps.mjs`（同じ引数）: 欠落の実例を前後の文脈つきで一覧する。
+
+認識をやり直すもの（1入力あたり 10〜30 秒）:
+
+- `probe-stage-text.mjs <plan.json> <input名>...` 主経路（精錬前）と最終テキストを並べ、
+  消えた文字が認識由来か精錬段由来かを切り分ける。→ `work/stage-text.json`
+- `probe-prune.mjs <plan.json> <input名>...` `pruneOcrLineInsertions` の判断
+  （列の span・ピッチ・物理セル数・候補の文字列・削除案）を dump する。→ `work/prune-detail.json`
+- `eval-pitch.mjs <prune-detail.json>...` その dump から、ピッチ推定方式
+  （上位四分位／中央値／shorth）ごとの「削除対象になる列」を比べる。
 
 ## 測定の規律（過去の失敗から）
 

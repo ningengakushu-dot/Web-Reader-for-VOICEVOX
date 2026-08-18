@@ -79,18 +79,40 @@ function blocksFor(text, confidences = []) {
     const bloatB = insertAt(correct, [12, 32, 52], 'ち');
     const shiftedA = insertAt(correct, [0, 20, 40], 'ち');
     const shiftedB = insertAt(correct, [2, 22, 42], 'ち');
-    const spans = [1200, 1200, 1200, 1200];
-    const base = blocksForLines([correct, bloatA, bloatB, correct], spans);
+    // 基準ピッチは中央値なので、正しい列が過半数を占める並びにする（実文書と同じ条件）。
+    const spans = [1200, 1200, 1200, 1200, 1200, 1200];
+    const base = blocksForLines([correct, bloatA, bloatB, correct, correct, correct], spans);
     const removed = api.pruneOcrLineInsertions(base, [
-        blocksForLines([correct, correct, correct, correct], spans),
-        blocksForLines([correct, shiftedA, shiftedB, correct], spans)
+        blocksForLines([correct, correct, correct, correct, correct, correct], spans),
+        blocksForLines([correct, shiftedA, shiftedB, correct, correct, correct], spans)
     ], 'vertical', 20);
     assert.equal(removed, 3,
         '候補総数が予算内に収まる列だけを補正する');
     // 列は幾何順（cross座標順）に処理され、先に列挙した列が予算を消費する。
     assert.equal(api.buildTextFromBlocks(base),
-        [correct, bloatA, correct, correct].join('\n'),
+        [correct, bloatA, correct, correct, correct, correct].join('\n'),
         '予算を超過した列は列挙せず無変更のまま残す');
+}
+
+{
+    // 文字を落とした列は span/文字数 が真の送りより大きくなる。基準ピッチを上位四分位で
+    // 採ると（2026-08-18以前）その欠落列を掴み、正しい列まで「1文字余分」と判定して
+    // 実在する文字を削除していた（実測: 「犯人と探偵」→「犯人と探」）。中央値は掴まない。
+    const spans = [618, 618, 618, 618, 618, 618];
+    const full = 'ら机に並べられたモニターと向かい合う男たちがいる。彼らはこ';
+    const dropped = full.replace('モニター', 'モニタ');
+    assert.equal([...full].length, 29);
+    assert.equal([...dropped].length, 28);
+    const layout = () => blocksForLines(
+        [full, dropped, full, dropped, full, dropped], spans);
+    assert.equal(api.hasLikelyOcrLineInsertions(layout(), 'vertical', 20), false,
+        '欠落した列に引っ張られて正しい列を「1文字余分」と判定しない');
+    const base = layout();
+    assert.equal(api.pruneOcrLineInsertions(
+        base, [layout(), layout(), layout()], 'vertical', 20), 0,
+    '欠落した列があっても正しい列から文字を削除しない');
+    assert.equal(api.buildTextFromBlocks(base),
+        [full, dropped, full, dropped, full, dropped].join('\n'));
 }
 
 function blocksForLines(texts, spans) {
@@ -195,7 +217,8 @@ function blocksForLines(texts, spans) {
 }
 
 {
-    const spans = [596, 618, 618, 618];
+    // 基準ピッチは中央値なので、挿入のない列が過半数を占める並びにする（実文書と同じ条件）。
+    const spans = [596, 618, 618, 618, 618, 618];
     const expectedSecond = 'ら机に並べられたモニターと向かい合う男たちがいる。彼らはこ';
     const expectedFourth = 'らして普段から何かしら忙しく働く彼らであるが、今日はその度';
     const stableFirst = '冷房の効いたフロア内には、黙々と異様な雰囲気をまといなが';
@@ -204,32 +227,41 @@ function blocksForLines(texts, spans) {
         stableFirst,
         expectedSecond.replace('彼らは', '彼らちは'),
         stableThird,
-        expectedFourth.replace('から何', 'かちら何')
+        expectedFourth.replace('から何', 'かちら何'),
+        expectedSecond,
+        expectedFourth
     ], spans);
     const variants = [
         blocksForLines([
             stableFirst,
             expectedSecond.replace('ら机', 'らち机'),
             stableThird,
-            expectedFourth.replace('から何', 'からち何')
+            expectedFourth.replace('から何', 'からち何'),
+            expectedSecond,
+            expectedFourth
         ], spans),
         blocksForLines([
             stableFirst,
             expectedSecond.replace('彼らは', '彼ちらは'),
             stableThird,
-            expectedFourth.replace('しら忙', 'しらち忙')
+            expectedFourth.replace('しら忙', 'しらち忙'),
+            expectedSecond,
+            expectedFourth
         ], spans),
         blocksForLines([
             stableFirst,
             expectedSecond.replace('彼らは', '彼らちは'),
             stableThird,
-            expectedFourth.replace('彼らで', '彼ちらで')
+            expectedFourth.replace('彼らで', '彼ちらで'),
+            expectedSecond,
+            expectedFourth
         ], spans)
     ];
     assert.equal(api.pruneOcrLineInsertions(base, variants, 'vertical', 20), 2,
         '物理セル数と異なる位置の挿入証拠が揃う長い縦書き列だけを修正する');
     assert.equal(api.buildTextFromBlocks(base),
-        [stableFirst, expectedSecond, stableThird, expectedFourth].join('\n'));
+        [stableFirst, expectedSecond, stableThird, expectedFourth,
+            expectedSecond, expectedFourth].join('\n'));
 }
 
 {

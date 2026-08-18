@@ -206,6 +206,24 @@ function forEachDeletedOcrSequence(entries, deleteCount, callback) {
 
 const OCR_INSERTION_PRUNE_MAX_LINE_LENGTH = 64;
 
+// 列（縦書きなら1本の列）の1文字ぶんの送りを、長い列の「span / 文字数」の何分位で
+// 代表するか。この値は「正しい列」の比＝そのページの真の送りに一致させたい。
+//   ・余分な文字を出した列: 比が真値より小さくなる
+//   ・文字を落とした列    : 比が真値より大きくなる
+// 当初は「余分な文字を出した列だけが下振れする」と考えて上位四分位(0.75)にしていたが、
+// 実測では欠落した列も同程度あり、上位四分位はその欠落列を掴んで**真値より大きい**
+// ピッチを返していた。ピッチが大きいと物理セル数 round(span/pitch) が1つ少なく出て、
+// **正しい列まで一律に「1文字余分」と判定**され、実在する文字が削除される。
+// 実測（2026-08-18、4ページ・20字以上の列50本）: 上位四分位では「1〜3文字余分」と
+// 判定される列が 4〜7本／ページに達し、`犯人と探偵`→`犯人と探`、`「霧子さん`→`子さん`
+// のように本文が消えていた。中央値では 1〜5本に減り、52入力A/Bで誤り 517→512
+// （改善6・悪化1、悪化の中身は無音の記号2つ）。
+// 中央値は安全側でもある: ピッチを小さく見積もる誤りは「セル数が多く見える＝削除しない」
+// に倒れ、大きく見積もる誤り（＝削除しすぎ）には倒れない。
+// 棄却した代案: 半数を含む最狭窓の中央値(shorth)は列数5〜8で不安定（上位四分位と同値に
+// 戻る入力あり）、候補の文字数の中央値との max は改善5・悪化4でこれより劣る。
+const OCR_LINE_PITCH_QUANTILE = 0.5;
+
 // 1列の削除候補は最大 C(64,3)=41,664 通りで、列挙は同期処理として約340msかかる（実測）。
 // 列数には上限がないため、水増し列を多数含む画像（細工された入力を含む）では
 // 列数×候補数がそのままメインスレッド（音声再生も担うoffscreen）のブロック時間になる。
@@ -230,7 +248,7 @@ function hasLikelyOcrLineInsertions(blocks, orientation, glyphSize) {
         .map((item) => item.span / item.entries.length)
         .sort((a, b) => a - b);
     if (ratios.length < 2) return false;
-    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.75)];
+    const nominalPitch = ratios[Math.floor((ratios.length - 1) * OCR_LINE_PITCH_QUANTILE)];
     if (!(nominalPitch >= glyphSize * 0.8 && nominalPitch <= glyphSize * 1.5)) return false;
     return lines.some((item) => {
         if (item.entries.length < 20
@@ -266,15 +284,15 @@ function pruneOcrLineInsertions(baseBlocks, otherBlocksList, orientation, glyphS
     }
     if (variants.length < 2) return 0;
 
-    // 正しい列では span / 文字数 がほぼ一定。重複挿入がある列だけ比が小さくなるため、
-    // 長い列の上位四分位を基準ピッチにして物理セル数を復元する。
+    // 正しい列では span / 文字数 がほぼ一定＝そのページの1文字ぶんの送り。
+    // 基準ピッチは中央値で採る（詳細は OCR_LINE_PITCH_QUANTILE のコメント）。
     const ratios = baseLines
         .filter((item) => item.entries.length >= 20
             && item.entries.length <= OCR_INSERTION_PRUNE_MAX_LINE_LENGTH)
         .map((item) => item.span / item.entries.length)
         .sort((a, b) => a - b);
     if (ratios.length < 2) return 0;
-    const nominalPitch = ratios[Math.floor((ratios.length - 1) * 0.75)];
+    const nominalPitch = ratios[Math.floor((ratios.length - 1) * OCR_LINE_PITCH_QUANTILE)];
     if (!(nominalPitch >= glyphSize * 0.8 && nominalPitch <= glyphSize * 1.5)) return 0;
 
     const removals = new Set();
