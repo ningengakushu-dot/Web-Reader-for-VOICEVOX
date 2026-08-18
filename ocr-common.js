@@ -926,11 +926,21 @@ function normalizeOcrText(rawText) {
     return result.trim();
 }
 
+// 崩れたダッシュの内側に紛れ込む字（l・I・1・スラッシュ）。これらは本文の文字でもあるため、
+// 「両側を棒に挟まれている」ときだけダッシュの一部として畳み込む（cleanForSpeech のコメント参照）。
+const SPEECH_BAR_RUN_RE = /[ー―—–−|｜](?:[ー―—–−|｜lI1/\\]*[ー―—–−|｜])+/g;
+
 /**
  * 読み上げ用の整形（content.js の cleanMessage と同等: URLの読み飛ばし・改行の空白化）。
  * 加えて、ダッシュ（――）の連続がOCRで縦棒・数字混じりに崩れたもの
  * （例: 「うわー|ー|1||っ」）を長音1つに正規化する。ダッシュ/長音を含む
  * 混合連続のみを対象とし、縦棒だけの並び（コード内の || 等）には触れない。
+ *
+ * 畳み込むのは「棒に見える字で始まり、棒に見える字で終わる」連続だけに限る。
+ * 以前は l・I・1・スラッシュも連続の一部として無条件に飲み込んでいたため、ダッシュに
+ * 隣接しただけの本文が読み上げから黙って消えていた（実測: 「―1972年」→「ー972年」、
+ * 「1―2の関係」→「ー2の関係」、「第―1章」→「第ー章」、
+ * 「サーバー/クライアント」→「サーバークライアント」）。
  * @param {string} text
  * @returns {string}
  */
@@ -938,9 +948,9 @@ function cleanForSpeech(text) {
     if (!text) return "";
     return text
         .replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略")
-        .replace(/[ー―—–−|｜lI1\/\\]{2,}/g, (run) => {
+        .replace(SPEECH_BAR_RUN_RE, (run) => {
             const hasDash = /[―—–]/.test(run);
-            const hasChoonAndBar = /ー/.test(run) && /[|｜\/\\]/.test(run);
+            const hasChoonAndBar = /ー/.test(run) && /[|｜]/.test(run);
             // ダッシュを含む連続、または長音と縦棒が混在する連続はOCR崩れとみなす。
             // 「サーバー1台」（ー1）やコードの「||」等はどちらの条件も満たさず変化しない。
             return (hasDash || hasChoonAndBar) ? "ー" : run;

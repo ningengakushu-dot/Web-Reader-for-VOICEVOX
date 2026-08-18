@@ -11,6 +11,8 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'offscreen.js'), 'utf8
 let listener;
 const notifications = [];
 let synthesisAttempts = 0;
+// 合成へ渡ったテキスト（分割して読み直す挙動の検査に使う）
+const synthesizedTexts = [];
 let ocrResult = { text: '認識結果', confidence: 90 };
 // 合成の振る舞い: 呼び出し回数(1始まり)ごとに 'ok' | 'unreachable' | 'http' を返す
 let synthesisPlan = () => 'unreachable';
@@ -40,6 +42,7 @@ const context = vm.createContext({
         // 1回の合成 = audio_query + synthesis の2リクエスト。audio_query 側で振る舞いを決める。
         if (url.includes('/audio_query')) {
             synthesisAttempts++;
+            synthesizedTexts.push(decodeURIComponent(String(url).split('&text=')[1] || ''));
             const mode = synthesisPlan(synthesisAttempts);
             if (mode === 'unreachable') throw new TypeError('Failed to fetch');
             if (mode === 'http') return { ok: false, status: 500 };
@@ -117,6 +120,47 @@ const settings = { speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 
         assert.equal(synthesisAttempts, 3, 'HTTP エラーの文を飛ばして残りを合成する');
         assert.equal(notifications.filter((m) => m.type === 'PLAYBACK_ERROR').length, 1);
         assert.ok(notifications.some((m) => m.type === 'PLAYBACK_ENDED'));
+    }
+
+    // --- HTTP エラーで拒否された長い文は、半分に割って読み直す（黙って消さない） ---
+    // エンジンは1要求のアクセント句が49を超えると 500 を返す。従来はその1文が音声から
+    // 消え、前後がつながって聞こえていた（利用者から見た「読み飛ばし」）。
+    {
+        notifications.length = 0;
+        synthesisAttempts = 0;
+        synthesizedTexts.length = 0;
+        synthesisPlan = (n) => (n === 1 ? 'http' : 'ok');
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: ['前半の文です、後半の文です。'], settings });
+        await wait(200);
+        assert.equal(synthesisAttempts, 3, '拒否された文を2つに割って合成し直す');
+        assert.deepEqual(synthesizedTexts.slice(1), ['前半の文です、', '後半の文です。'],
+            '句読点で割った断片を元の順序どおりに合成する');
+        assert.equal(notifications.filter((m) => m.type === 'PLAYBACK_ERROR').length, 0,
+            '割って読めたならエラーは通知しない');
+    }
+
+    // --- 割っても読めない文は有限回で諦め、通知は元の1文につき1回だけ ---
+    {
+        notifications.length = 0;
+        synthesisAttempts = 0;
+        synthesizedTexts.length = 0;
+        synthesisPlan = () => 'http';
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: ['前半の文です、後半の文です。'], settings });
+        await wait(300);
+        assert.equal(synthesisAttempts, 3, '断片が分割下限より短くなればそこで打ち切る');
+        assert.equal(notifications.filter((m) => m.type === 'PLAYBACK_ERROR').length, 1,
+            '断片ごとにエラーを連発しない');
+    }
+
+    // --- 短い文は長さが原因ではないので割らない（従来どおり次の文へ進む） ---
+    {
+        notifications.length = 0;
+        synthesisAttempts = 0;
+        synthesizedTexts.length = 0;
+        synthesisPlan = (n) => (n === 1 ? 'http' : 'ok');
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: ['短い。', '次の文。'], settings });
+        await wait(200);
+        assert.deepEqual(synthesizedTexts, ['短い。', '次の文。'], '短い文は分割しない');
     }
     synthesisPlan = () => 'unreachable';
 

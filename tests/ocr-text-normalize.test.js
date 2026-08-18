@@ -38,6 +38,29 @@ const spoken = (raw) => cleanForSpeech(normalizeOcrText(raw));
     assert.equal(spoken('詳細は https://example.com/a?b=1 を参照'), '詳細はURL省略を参照');
 }
 
+// --- ダッシュ崩れの畳み込みが、隣接する本文を巻き込まないこと ---
+// 従来は l・I・1・スラッシュを連続の一部として無条件に飲み込んでいたため、ダッシュの
+// 隣にあるだけの数字・英字・記号が読み上げから黙って消えていた（読み飛ばしの一因）。
+{
+    // ダッシュ1つ＋数字: 何も畳み込まない
+    assert.equal(cleanForSpeech('―1972年'), '―1972年');
+    assert.equal(cleanForSpeech('1―2の関係'), '1―2の関係');
+    assert.equal(cleanForSpeech('第―1章'), '第―1章');
+    assert.equal(cleanForSpeech('A―1型'), 'A―1型');
+    assert.equal(cleanForSpeech('範囲は1―10です'), '範囲は1―10です');
+    assert.equal(cleanForSpeech('電話03―1234―5678'), '電話03―1234―5678');
+    // 長音＋スラッシュ: スラッシュの後ろの語を消さない
+    assert.equal(cleanForSpeech('サーバー/クライアント'), 'サーバー/クライアント');
+    assert.equal(cleanForSpeech('コーヒー/紅茶'), 'コーヒー/紅茶');
+    // ダッシュの連続そのものは従来どおり長音1つへ。直後の数字は残す
+    assert.equal(cleanForSpeech('――推理小説'), 'ー推理小説');
+    assert.equal(cleanForSpeech('「――12年前のことだ」'), '「ー12年前のことだ」');
+    // 縦棒だけの並び・長音だけの並びは従来どおり触らない
+    assert.equal(cleanForSpeech('||'), '||');
+    assert.equal(cleanForSpeech('あーー'), 'あーー');
+    assert.equal(cleanForSpeech('サーバー1台'), 'サーバー1台');
+}
+
 // --- 実 OCR で見つかった Web レイアウトの型 ---
 {
     // 英文の折り返し: Tesseract が行間に空行を出しても、小文字で終わり小文字で始まる行は同じ文

@@ -197,6 +197,37 @@ function enqueueTexts(texts, settings) {
     processSynthesis();
 }
 
+// エンジンが特定の文だけを HTTP エラーで拒否したとき、その文を捨てる前に何回まで
+// 半分に割って試すか（1文が最大8片になる）。
+// エンジンは1回の要求のアクセント句が49を超えると 500 を返し（実測:
+// tools/reading-corpus-check.mjs）、従来はその文が音声から黙って消え、前後の文が
+// つながって聞こえていた＝利用者から見た「読み飛ばし」。分割して出し直せば読める。
+const MAX_SYNTHESIS_SPLIT_DEPTH = 3;
+// これより短い文は、長さが原因ではないので割らずに従来どおり諦める。
+const MIN_SYNTHESIS_SPLIT_CHARS = 8;
+
+/**
+ * 合成に失敗した文を2つに割る。句読点・閉じ括弧の直後のうち中央にいちばん近い位置で
+ * 切り、区切りが無ければ中央で切る。割れないときは null。
+ * @param {string} text
+ * @returns {[string, string] | null}
+ */
+function splitSynthesisText(text) {
+    const chars = [...(text || "")];
+    if (chars.length < MIN_SYNTHESIS_SPLIT_CHARS) return null;
+    const middle = Math.floor(chars.length / 2);
+    let cut = -1;
+    for (let i = 1; i < chars.length; i++) {
+        if (!/[。．！？!?、，,」』）)]/.test(chars[i - 1])) continue;
+        if (cut < 0 || Math.abs(i - middle) < Math.abs(cut - middle)) cut = i;
+    }
+    if (cut <= 0 || cut >= chars.length) cut = middle;
+    const head = chars.slice(0, cut).join("").trim();
+    const tail = chars.slice(cut).join("").trim();
+    if (!head || !tail) return null;
+    return [head, tail];
+}
+
 /**
  * 合成待ちキューを処理し、音声を生成する
  */
@@ -227,10 +258,27 @@ async function processSynthesis() {
         // stale な世代のエラーは通知も状態変更もしない
         if (generation !== synthesisGeneration) return;
         console.error("Offscreen: 合成失敗:", err);
+        // エンジンが特定の文だけ拒否した場合（HTTP エラー）は、その文を捨てる前に
+        // 半分に割って積み直す（MAX_SYNTHESIS_SPLIT_DEPTH のコメント参照）。
+        // 割れるあいだは通知しない: まだ文は失われていない。
+        const splitDepth = item.splitDepth || 0;
+        // 割った断片が結局どれも読めなかった場合でも、通知は元の1文につき1回に保つ
+        // （最大8片ぶんのエラー表示を出さない）。
+        const notice = item.notice || { notified: false };
+        if (!isVoicevoxUnreachableError(err) && splitDepth < MAX_SYNTHESIS_SPLIT_DEPTH) {
+            const parts = splitSynthesisText(item.text);
+            if (parts) {
+                textQueue.unshift(
+                    { text: parts[0], settings: item.settings, splitDepth: splitDepth + 1, notice },
+                    { text: parts[1], settings: item.settings, splitDepth: splitDepth + 1, notice });
+                return;
+            }
+        }
+        if (notice.notified && !isVoicevoxUnreachableError(err)) return;
+        notice.notified = true;
         // エンジンに届かない・応答が無い失敗では残りの文を合成しない。続けても文の数だけ
         // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
-        // エンジンが特定の文だけ拒否した場合（HTTP エラー）は従来どおり次の文へ進む。
-        // 既に合成済みの音声はそのまま再生を終える。
+        // 割っても駄目だった文はここで諦め、次の文へ進む（既に合成済みの音声は再生を終える）。
         if (isVoicevoxUnreachableError(err)) textQueue = [];
         notifyBackground("PLAYBACK_ERROR", { error: `合成失敗: ${err.message}` });
     } finally {

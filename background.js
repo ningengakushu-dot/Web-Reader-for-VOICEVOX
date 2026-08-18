@@ -941,6 +941,13 @@ const SPEECH_SOFT_COST = 120;
 const SPEECH_LEAD_COSTS = [40, 60, 90];
 // offscreen-security.js の MAX_TEXT_ITEMS と揃える（超えると受理されない）。
 const SPEECH_MAX_CHUNKS = 5000;
+// 1件の文字数の上限。記号・空白の読み上げコストは0なので、コスト上限だけでは1件の
+// 文字数が青天井になる（実測: 「あ」＋「=-」×20000 は splitText で1件40,001文字・
+// コスト1）。audio_query はテキストをURLのクエリ文字列に載せるため、長すぎる1件は
+// エンジンに拒否され、その1件だけが黙って音声から消える。罫線・アスキーアートを
+// 含むOCR結果で到達しうるので、コストとは別に文字数でも切る。
+// 通常の日本語はコスト120＝約120文字、英文でも約80文字なので、この値では切れない。
+const SPEECH_MAX_CHUNK_CHARS = 600;
 
 /**
  * 読み上げに使う文字列へ整形する（分割の前段）。
@@ -1144,7 +1151,14 @@ function splitText(text) {
     const result = [];
     const push = (piece) => {
         const chunk = piece.trim();
-        if (chunk && SPEECH_READABLE_RE.test(chunk)) result.push(chunk);
+        if (!chunk || !SPEECH_READABLE_RE.test(chunk)) return;
+        const chars = [...chunk];
+        // コスト0の記号だけが続く塊は文字数で切る（SPEECH_MAX_CHUNK_CHARS のコメント参照）
+        if (chars.length <= SPEECH_MAX_CHUNK_CHARS) { result.push(chunk); return; }
+        for (let i = 0; i < chars.length; i += SPEECH_MAX_CHUNK_CHARS) {
+            const part = chars.slice(i, i + SPEECH_MAX_CHUNK_CHARS).join("").trim();
+            if (part && SPEECH_READABLE_RE.test(part)) result.push(part);
+        }
     };
     for (const sentence of sentences) {
         let rest = sentence.trim();
