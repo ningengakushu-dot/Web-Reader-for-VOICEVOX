@@ -444,7 +444,10 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
     // （理由と実測は OCR_INPUT_PAD_PX のコメント参照。既に余白がある画像は無変更）。
     // 組版方向の判定と面積によるしきい値は、余白の無い元画像（unpaddedGrayCanvas /
     // sourceCanvas）で行い、余白の有無で判定が変わらないようにする。
-    const unpaddedGrayCanvas = toGrayscale(sourceCanvas);
+    // 表の罫線・ボタンの枠・下線のような「文字の画よりずっと長い直線」は、認識に渡す前に
+    // 消す。横書きworkerの行分割を壊して語が丸ごと落ちるため（詳細と実測は
+    // removeOcrRuleLines のコメント参照）。長い直線が無ければ画像は1画素も変わらない。
+    const unpaddedGrayCanvas = removeOcrRuleLines(toGrayscale(sourceCanvas));
     const paddedInput = padOcrCanvasToMargin(unpaddedGrayCanvas, OCR_INPUT_PAD_PX);
     let grayCanvas = paddedInput.canvas;
     // 認識入力の座標系で「元の画像端」がどこにあるか（各辺に足した余白。局所再確認で

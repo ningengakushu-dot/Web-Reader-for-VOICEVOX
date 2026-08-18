@@ -321,6 +321,163 @@ function fillOcrCanvasBands(source, bands, scale = 1, background = null) {
 
 // 小さい文字の再認識用: canvas を高品質補間で拡大する（二値化はしない。
 // 明朝体等では二値化が裏目に出るため、拡大のみの候補として確信度で競わせる）。
+// 罫線・枠線（表の罫線、ボタンやカードの枠、リンクの下線）を認識前に消すためのしきい値。
+//
+// 横書きの worker は「1ブロックの横書き」（PSM=SINGLE_BLOCK）を仮定するため、全高を貫く
+// 縦の罫線があると行分割そのものが破綻する。実測（2026-08-18、游ゴシック15pxの料金表
+// 538x201）: 原画では確信度43・出力が無意味な記号列で、表の行ラベル「標準」「上位」が
+// **丸ごと欠落**した。罫線を消すと確信度85、欠落なし。枠で囲んだボタンの中の
+// 「キャンセル」も、枠を消して初めて認識結果に現れる（原画ではどのPSMでも出ない）。
+//
+// 文字の画と罫線は**長さ**で区別できる。1文字ぶんを超えて伸びる画は無いので、その画像に
+// 実際に現れているインクの連なりの長さの分布から基準を作る（書体・文字寸・表示倍率に
+// 依存しない）。長い連なりが1本も無い画像では**1画素も変えない**ので、罫線の無い文書の
+// 出力は変わらない。
+const OCR_RULE_LENGTH_RATIO = 3;
+// 分布のどこを「その画像でいちばん長い普通の画」とみなすか。
+// 上位10%（0.9）では短い画やアンチエイリアスの端点に引きずられて基準が小さくなりすぎ、
+// 見出しのような大きい文字の横画まで罫線と誤判定した（実測: 26pxの見出しで
+// 「機」→「北」、「方」が欠落）。1文字ぶんの画の長さを拾うため上位1%を見る。
+const OCR_RULE_LENGTH_QUANTILE = 0.99;
+// これより短い連なりは、分布がどうであれ罫線とみなさない（小さい画像での誤爆防止）
+const OCR_RULE_MIN_LENGTH_PX = 24;
+// 罫線の太さの上限。CSSの罫線は1〜2px、表示倍率1.5〜2でも3px程度に収まる。
+// 太い画（大きな文字の横棒）を巻き込まないための上限でもある。
+const OCR_RULE_MAX_THICKNESS_PX = 3;
+// 長さの分布を数えるときの上限（これ以上は同じ階級にまとめる）
+const OCR_RULE_LENGTH_HISTOGRAM_MAX = 512;
+// 太さを測る点の数（連なりに沿って等間隔）。交点で太く見える場所を避けるため複数点で測る。
+const OCR_RULE_THICKNESS_SAMPLES = 9;
+
+/**
+ * インクの有無を画素単位で表すマスクを作る。
+ * @returns {{mask: Uint8Array, background: number}} background は塗り戻しに使う輝度
+ */
+function buildOcrInkMask(pixels, width, height) {
+    const { mean, darkInk } = measureOcrInkPolarity(pixels);
+    const mask = new Uint8Array(width * height);
+    for (let p = 0, i = 0; p < mask.length; p++, i += 4) {
+        if (pixels[i + 3] < 255) continue;
+        const l = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+        const ink = darkInk
+            ? l < mean - OCR_INPUT_INK_CONTRAST : l > mean + OCR_INPUT_INK_CONTRAST;
+        if (ink) mask[p] = 1;
+    }
+    return { mask, background: darkInk ? 255 : 0 };
+}
+
+/**
+ * インクの連なり（run）を走査する。horizontal なら行方向、そうでなければ列方向。
+ * @param {(start: number, end: number, line: number) => void} onRun end は非包含
+ */
+function forEachOcrInkRun(mask, width, height, horizontal, onRun) {
+    const outer = horizontal ? height : width;
+    const inner = horizontal ? width : height;
+    for (let a = 0; a < outer; a++) {
+        let start = -1;
+        for (let b = 0; b <= inner; b++) {
+            const ink = b < inner && mask[horizontal ? a * width + b : b * width + a];
+            if (ink) {
+                if (start < 0) start = b;
+                continue;
+            }
+            if (start >= 0) {
+                onRun(start, b, a);
+                start = -1;
+            }
+        }
+    }
+}
+
+/**
+ * 表の罫線・枠線・下線を背景色で塗って消した canvas を返す。
+ * 消す対象が1つも無ければ元の canvas をそのまま返す（無変更を保証する）。
+ * @param {HTMLCanvasElement} canvas グレースケール化済みの認識入力
+ * @returns {HTMLCanvasElement}
+ */
+function removeOcrRuleLines(canvas) {
+    const width = canvas.width;
+    const height = canvas.height;
+    if (!(width > 1) || !(height > 1)) return canvas;
+    const pixels = readOcrCanvasPixels(canvas);
+    const { mask, background } = buildOcrInkMask(pixels, width, height);
+
+    // 連なりの長さの分布（縦横をまとめて1つの分布として扱う。文字の画は縦横どちらも
+    // 1文字ぶんを超えない）。
+    const histogram = new Int32Array(OCR_RULE_LENGTH_HISTOGRAM_MAX + 1);
+    let runCount = 0;
+    const count = (start, end) => {
+        histogram[Math.min(end - start, OCR_RULE_LENGTH_HISTOGRAM_MAX)]++;
+        runCount++;
+    };
+    forEachOcrInkRun(mask, width, height, true, count);
+    forEachOcrInkRun(mask, width, height, false, count);
+    if (!runCount) return canvas;
+    let seen = 0;
+    let quantileLength = 1;
+    const target = runCount * OCR_RULE_LENGTH_QUANTILE;
+    for (let length = 0; length < histogram.length; length++) {
+        seen += histogram[length];
+        if (seen >= target) { quantileLength = Math.max(1, length); break; }
+    }
+    const minLength = Math.max(OCR_RULE_MIN_LENGTH_PX, quantileLength * OCR_RULE_LENGTH_RATIO);
+
+    // 連なりの各所で直交方向にインクが何画素続くか＝その位置での太さ。
+    const thicknessAt = (position, line, horizontal) => {
+        let thickness = 1;
+        if (horizontal) {
+            for (let d = 1; line - d >= 0 && mask[(line - d) * width + position]; d++) thickness++;
+            for (let d = 1; line + d < height && mask[(line + d) * width + position]; d++) thickness++;
+        } else {
+            for (let d = 1; line - d >= 0 && mask[position * width + (line - d)]; d++) thickness++;
+            for (let d = 1; line + d < width && mask[position * width + (line + d)]; d++) thickness++;
+        }
+        return thickness;
+    };
+    // 太さは連なりに沿って何点か測り、その**最小**を使う。1点（中央）だけで測ると、
+    // 罫線の交点や、罫線に文字が接している場所を引いたときに「太い」と誤判定して
+    // その罫線が消え残る。消し残りの断片は縦棒 | として認識され、読み上げに混ざる
+    // （実測: 中央1点だけの版では表の各セル区切りに | が出て誤りが増えた）。
+    // 文字の画は全長にわたって太いので、最小をとっても細いと判定されることはない。
+    const minThickness = (start, end, line, horizontal) => {
+        let min = Infinity;
+        for (let i = 1; i <= OCR_RULE_THICKNESS_SAMPLES; i++) {
+            const position = start + Math.floor(((end - start) * i) / (OCR_RULE_THICKNESS_SAMPLES + 1));
+            min = Math.min(min, thicknessAt(position, line, horizontal));
+            if (min <= 1) break;
+        }
+        return min;
+    };
+    const doomed = new Uint8Array(width * height);
+    let removed = 0;
+    const mark = (horizontal) => (start, end, line) => {
+        if (end - start < minLength) return;
+        if (minThickness(start, end, line, horizontal) > OCR_RULE_MAX_THICKNESS_PX) return;
+        for (let b = start; b < end; b++) {
+            doomed[horizontal ? line * width + b : b * width + line] = 1;
+            removed++;
+        }
+    };
+    forEachOcrInkRun(mask, width, height, true, mark(true));
+    forEachOcrInkRun(mask, width, height, false, mark(false));
+    if (!removed) return canvas;
+
+    const out = createOcrCanvas(width, height);
+    const context = out.getContext("2d", { willReadFrequently: true });
+    context.drawImage(canvas, 0, 0);
+    const imageData = context.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    for (let p = 0, i = 0; p < doomed.length; p++, i += 4) {
+        if (!doomed[p]) continue;
+        data[i] = background;
+        data[i + 1] = background;
+        data[i + 2] = background;
+        data[i + 3] = 255;
+    }
+    context.putImageData(imageData, 0, 0);
+    return out;
+}
+
 function upscaleOcrCanvas(source, scale) {
     const { canvas, ctx } = createSmoothOcrCanvas(source.width * scale, source.height * scale);
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);

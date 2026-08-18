@@ -73,8 +73,8 @@ assert.match(common, /const OCR_REFINE_MAX_AREA = 1200000;/,
 assert.match(image, /const OCR_ORIENTATION_PATCH_PX = 480;/,
     '全画面級の方向確認パッチは 480px（240px は 20px 明朝で縦横の差が付かない）');
 // 認識入力の余白付与（2026-08-17）: 余白は認識に渡す画像にだけ付け、判定は無余白で行う
-assert.match(common, /const unpaddedGrayCanvas = toGrayscale\(sourceCanvas\);\s*\n\s*const paddedInput = padOcrCanvasToMargin\(unpaddedGrayCanvas, OCR_INPUT_PAD_PX\);/,
-    '認識入力（gray）は文字が端に接する辺にだけ背景色の余白を足し、最低余白を確保する（余白がある画像は無変更）');
+assert.match(common, /const unpaddedGrayCanvas = removeOcrRuleLines\(toGrayscale\(sourceCanvas\)\);\s*\n\s*const paddedInput = padOcrCanvasToMargin\(unpaddedGrayCanvas, OCR_INPUT_PAD_PX\);/,
+    '認識入力（gray）は罫線・枠線を消してから、文字が端に接する辺にだけ背景色の余白を足す（どちらも該当が無ければ無変更）');
 assert.match(common, /const sourceArea = sourceCanvas\.width \* sourceCanvas\.height;/,
     '面積によるしきい値は余白の無い元画像で計算する');
 assert.doesNotMatch(common, /grayCanvas\.width \* grayCanvas\.height|grayCanvas\.width \* scale/,

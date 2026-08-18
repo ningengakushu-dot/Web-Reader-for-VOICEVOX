@@ -92,6 +92,8 @@ function createScenario({ ambiguous, horizontalConfidence, withLogger }) {
         }),
         // 柱・ページ番号の帯の塗りつぶし（進捗の検査には無関係なので何も塗らない）
         findOcrOutlierInkBands: () => [],
+        // 罫線・枠線の除去（長い直線が無ければ無変更）。この検査では常に無変更にする
+        removeOcrRuleLines: (canvas) => canvas,
         fillOcrCanvasBands: (canvas) => canvas,
         padOcrCanvas: (canvas, insets) => ({
             kind: canvas.kind,
