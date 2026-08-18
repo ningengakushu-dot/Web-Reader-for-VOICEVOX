@@ -199,6 +199,14 @@ const VARIANTS = {
         to: "const OCR_PREPROCESS_SKIP_CONFIDENCE = 85;",
         label: "binarize-skip>=85"
     }]),
+    // 拡大後の面積が大きくなりすぎる倍率を融合から外す案（待ち時間の短縮）。
+    // 実測: 344k px の入力で3倍＝3247k px の認識に3.67秒かかり、確信度は主経路より低い。
+    "head-fusecap": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const others = await collectUpscaledVariants(OCR_FUSION_SCALES);",
+        to: "const others = await collectUpscaledVariants(OCR_FUSION_SCALES.filter("
+            + "(scale) => grayCanvas.width * grayCanvas.height * scale * scale <= 2000000));",
+        label: "fusion-area-cap=2M"
+    }]),
     "head-nofuse": () => loadSources(repo, [BUDGET_PATCH(60000), {
         from: CONSENSUS_CURRENT,
         to: "(void 0)",
