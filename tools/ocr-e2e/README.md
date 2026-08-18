@@ -102,11 +102,44 @@ npm install
    A/B 用。採用後の HEAD では `head` と同じ挙動になる。併せて測って不採用にした
    `head-votecount` / `head-pitchmed-vote`（物理セル数を候補の文字数と max で採る）も残してある。
 
+   `head-norule`（罫線・枠線の除去だけを外す）は 2026-08-18 に**採用**した変更の A/B 用。
+   `head-nofuse`（複数倍率の融合を丸ごと外す）は段の寄与を切り分けるための対照。
+
    **公開版との比較**は `baseline-main/`（`for f in constants.js ocr-image.js ocr-refine.js
    ocr-common.js; do git show "main:$f" > baseline-main/$f; done`）を
    `OCR_E2E_BASELINE` に指定して `baseline` バリアントで回す。
+   公開版は**同梱の語彙辞書 `ocr-words.txt` を使う**ので、辞書を消したブランチで測るときは
+   `git show main:ocr-words.txt > work/ocr-words.txt` を置いてから回すこと
+   （harness の `fetch` shim が work/ → リポジトリ直下の順で読む）。置き忘れると
+   ベースラインだけ辞書が無効になり、公開版を不当に低く見積もる。
+   辞書そのものの寄与は `baseline-nodict`（辞書リランクだけを外した公開版）との差で測る
+   （計画 `dict-ab`）。
 
    結果は `work/results_plan-*.json`（全文テキスト付き）。
+
+### Web媒体コーパス（gen-corpus-web.mjs）
+
+既存コーパスは**青空文庫の文学作品・縦書き明朝**にほぼ偏っており、この拡張の主用途である
+「画面に映っているWeb文書」を一度も代表していなかった（2026-08-18まで）。
+
+```powershell
+$env:OCR_CHROMIUM = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+node gen-corpus-web.mjs        # → work/corpus_web_*.png（24枚）+ work/corpus-web.json
+node make-plan.mjs web-ab      # 公開版 → 本ブランチ
+node harness.mjs work/plan-web-ab.json
+node make-plan.mjs web-stage   # head / head-nofuse / head-noprune（段の寄与）
+```
+
+内訳は 記事本文 / 技術文書（URL・半角英数字）/ 箇条書き / 表 / UI小文字12px / 数値と単位が
+密な文 / 見出しと本文のサイズ混在 / 日英混在 × 游ゴシック・既定サンセリフ・ＭＳ Ｐゴシック・
+BIZ UDP・Noto Sans × 表示倍率 1/1.25/1.5 × 明暗・低コントラスト・狭い段。
+本文はすべて自作なので著作物を含まない（画像は work/ なので git 管理外）。
+
+GT には**CSSが描く箇条書きマーカー（`•` `1.`）も含める**。textContent には入らないが
+画面には見えており、OCRは読むため、GTに入れないと正しい認識が「余剰」と数えられる。
+
+「メイリオ」はブラウザ既定のサンセリフと画素まで一致して区別できないため、書体名を
+指定しない「既定のサンセリフ」として測る（実利用で最も多い条件そのもの）。
 
 ### 誤りの「位置」と削除段の内訳を見る道具（work/、git管理外）
 
@@ -125,6 +158,10 @@ npm install
   （列の span・ピッチ・物理セル数・候補の文字列・削除案）を dump する。→ `work/prune-detail.json`
 - `eval-pitch.mjs <prune-detail.json>...` その dump から、ピッチ推定方式
   （上位四分位／中央値／shorth）ごとの「削除対象になる列」を比べる。
+- `probe-psm-web.mjs <画像>...` 素の Tesseract に同じ画像を PSM だけ変えて渡す。
+  2026-08-18 はこれで「罫線表は SINGLE_BLOCK で確信度43・AUTOで83」を確かめた。
+- `probe-derule.mjs <画像>...` 「文字の画より長い直線」を消した画像と原画を並べて認識する。
+  罫線・枠線の除去を出荷コードへ入れる前の検証に使った。
 
 ## 測定の規律（過去の失敗から）
 
