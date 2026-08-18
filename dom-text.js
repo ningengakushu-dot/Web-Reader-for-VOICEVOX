@@ -305,11 +305,34 @@ function rubyRoleOf(node) {
     return null;
 }
 
+// 文中の一部として横に並ぶ表示値。これ以外（block / flex / grid / list-item /
+// table-cell など）は視覚的に独立した箱なので、段落の切れ目として扱う。
+// inline-block は「文の途中に置かれた小さな箱」（強調のバッジ等）にも使われるため、
+// 文を割らない側に倒して従来どおりインライン扱いにする。
+const DOM_TEXT_INLINE_DISPLAYS = new Set([
+    "inline", "inline-block", "inline-flex", "inline-grid", "inline-table",
+    "contents", "ruby", "ruby-base", "ruby-text",
+    "ruby-base-container", "ruby-text-container"
+]);
+
 // 直近のブロック要素。ここが変わったら段落の切れ目とみなす。
-function blockAncestorOf(node) {
+//
+// タグ名だけで判定すると、SPAN や A を横並びにしたナビゲーション（display:flex の子）で
+// 全項目の祖先が同じ NAV になり、「会社概要サービス一覧お問い合わせ採用情報」のように
+// 区切り無しで読み上げられていた。同じHTMLを素のテキスト選択で取ると項目ごとに改行が
+// 入るので、この経路だけがブラウザ既定より劣っていたことになる。
+// flex / grid の子要素は CSS 側で表示値が block へ変わる（blockification）ため、
+// **実際の表示値**で見ればタグ名の一覧に頼らずに視覚的な箱の切れ目を拾える。
+function blockAncestorOf(node, context) {
     let el = node.parentElement;
     while (el) {
-        if (DOM_TEXT_BLOCK_TAGS.has(el.tagName)) return el;
+        const display = context ? cachedStyle(el, context)?.display : null;
+        if (display) {
+            if (display !== "none" && !DOM_TEXT_INLINE_DISPLAYS.has(display)) return el;
+        } else if (DOM_TEXT_BLOCK_TAGS.has(el.tagName)) {
+            // 表示値が取れない（切り離された文書・window が無い等）ときはタグ名で判定する
+            return el;
+        }
         el = el.parentElement;
     }
     return null;
@@ -613,7 +636,10 @@ async function collectFromDocument(root, doc, sel, offset, out, context) {
                 text: clipped.text,
                 rect: clipped.lineRects[0],
                 kind: "text",
-                block: blockAncestorOf(node)
+                // <pre> のように空白と改行が有意な要素かどうか。整形済みテキストの表や
+                // ログでは、改行と桁揃えの空白が唯一の区切りなので潰してはいけない。
+                pre: /^pre/.test(cachedStyle(parent, context)?.whiteSpace || ""),
+                block: blockAncestorOf(node, context)
             });
         }
         node = walker.nextNode();
@@ -668,7 +694,12 @@ function joinTextUnits(units) {
         const unit = units[i];
         // HTMLの字下げによる改行や連続空白は文章としての意味を持たないので潰す。
         // 段落の「間」はブロック要素の境界だけで表す。
-        const text = unit.text.replace(/\s+/g, " ");
+        // ただし <pre>（white-space: pre*）では改行と桁揃えの空白が唯一の区切りで、
+        // 潰すと「氏名 部署 内線 佐藤 営業部 101 鈴木…」のように行も列も融合し、
+        // どの数値が誰のものか分からなくなる。改行と2つ以上の空白は切れ目として残す。
+        const text = unit.pre
+            ? unit.text.replace(/[^\S\n]{2,}/g, "\n").replace(/[^\S\n]+/g, " ")
+            : unit.text.replace(/\s+/g, " ");
         if (!text.trim()) continue;
         // 同じ文言が連続する場合は1回だけ読む。
         // 画像の代替テキストとリンクの文字列が同一のカード（ニュース一覧で頻出）や、
