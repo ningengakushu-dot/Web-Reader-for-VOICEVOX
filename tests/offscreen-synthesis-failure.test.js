@@ -46,11 +46,20 @@ const context = vm.createContext({
             const mode = synthesisPlan(synthesisAttempts);
             if (mode === 'unreachable') throw new TypeError('Failed to fetch');
             if (mode === 'http') return { ok: false, status: 500 };
+            // 話者がこのエンジンに存在しない等、要求そのものが拒否される場合
+            if (mode === 'reject') return { ok: false, status: 404 };
+            // VOICEVOX ではない何かが同じポートで応答した場合
+            if (mode === 'garbage') return { ok: true, __garbage: true };
             return { ok: true };
         }
         return { ok: true };
     },
-    readJsonResponseWithLimit: async () => ({ accent_phrases: [] }), readBlobResponseWithLimit: async () => ({}),
+    readJsonResponseWithLimit: async (response) => {
+        // 本文が JSON でない応答は JSON.parse と同じ SyntaxError を投げる
+        if (response?.__garbage) throw new SyntaxError('Unexpected token \'<\'');
+        return { accent_phrases: [] };
+    },
+    readBlobResponseWithLimit: async () => ({}),
     createOcrWorkerPool: () => ({ get: async () => ({}), terminate() {} }),
     createPrimaryOcrProgressTracker: () => ({ reset() {}, update: () => null }),
     recognizeWithOrientation: async () => ocrResult,
@@ -195,6 +204,52 @@ const settings = { speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 
         await wait();
         complete = notifications.find((m) => m.type === 'OCR_COMPLETE');
         assert.ok(!('requestId' in complete));
+    }
+
+    // --- 話者がエンジンに無い等（404）は割り直さない。同じ理由で続けて失敗したら打ち切る ---
+    // 従来は非2xx全般を「その文だけの拒否」とみなして最大15回の要求を投げ、
+    // 文の数だけエラー通知が飛んでいた。
+    {
+        await send({ type: 'STOP_AUDIO', target: 'offscreen' });
+        notifications.length = 0;
+        synthesisAttempts = 0;
+        synthesisPlan = () => 'reject';
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen',
+            texts: ['前半の文です、後半の文です。', '二。', '三。', '四。', '五。'], settings });
+        await wait(300);
+        assert.equal(synthesisAttempts, 3, '404 の文は割り直さず、連続3回で打ち切る');
+        assert.equal(notifications.filter((m) => m.type === 'PLAYBACK_ERROR').length, 3,
+            '文の数だけではなく打ち切りまでの回数で止まる');
+        const error = notifications.find((m) => m.type === 'PLAYBACK_ERROR').error;
+        assert.match(error, /VOICEVOXエンジンが要求を受け付けませんでした（応答コード404）/,
+            '利用者に見せる日本語の文言をそのまま伝える');
+    }
+
+    // --- VOICEVOX ではない応答（JSONでない）は内部の英語メッセージを出さない ---
+    {
+        await send({ type: 'STOP_AUDIO', target: 'offscreen' });
+        notifications.length = 0;
+        synthesisAttempts = 0;
+        synthesisPlan = () => 'garbage';
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: ['一。', '二。'], settings });
+        await wait(200);
+        const error = notifications.find((m) => m.type === 'PLAYBACK_ERROR').error;
+        assert.match(error, /VOICEVOXエンジンから予期しない応答が返りました/);
+        assert.doesNotMatch(error, /Unexpected token|Cannot set properties/,
+            '内部の英語メッセージを利用者へ出さない');
+    }
+
+    // --- 成功が挟まれば連続失敗の数え上げは戻る（1文だけ読めなかった場合に打ち切らない） ---
+    {
+        await send({ type: 'STOP_AUDIO', target: 'offscreen' });
+        notifications.length = 0;
+        synthesisAttempts = 0;
+        // 短い文なので割らない。1件おきに拒否される並び
+        synthesisPlan = (n) => (n % 2 === 1 ? 'reject' : 'ok');
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen',
+            texts: ['一。', '二。', '三。', '四。', '五。', '六。'], settings });
+        await wait(300);
+        assert.equal(synthesisAttempts, 6, '成功を挟むかぎり最後の文まで試す');
     }
 
     console.log('offscreen synthesis failure / stop notification / requestId echo: PASSED');
