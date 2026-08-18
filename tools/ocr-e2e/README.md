@@ -102,6 +102,10 @@ npm install
    A/B 用。採用後の HEAD では `head` と同じ挙動になる。併せて測って不採用にした
    `head-votecount` / `head-pitchmed-vote`（物理セル数を候補の文字数と max で採る）も残してある。
 
+   **公開版との比較**は `baseline-main/`（`for f in constants.js ocr-image.js ocr-refine.js
+   ocr-common.js; do git show "main:$f" > baseline-main/$f; done`）を
+   `OCR_E2E_BASELINE` に指定して `baseline` バリアントで回す。
+
    結果は `work/results_plan-*.json`（全文テキスト付き）。
 
 ### 誤りの「位置」と削除段の内訳を見る道具（work/、git管理外）
