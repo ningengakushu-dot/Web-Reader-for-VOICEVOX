@@ -315,6 +315,15 @@ const OCR_CONFIDENCE_ACCEPT = 55;
 // （十分に鮮明な文字。再試行しても改善余地が小さく、時間だけ倍増するため）。
 const OCR_PREPROCESS_SKIP_CONFIDENCE = 92;
 
+// 同じ理由で、複数倍率の認識と融合（この段が待ち時間の大半を占める）も省く確信度。
+// 実測（2026-08-18、確信度90以上の32入力を逐次A/B）:
+//   ・92以上で省く: 誤り 83 → 83 で**全入力の出力がバイト一致**。つまりこの領域では
+//     融合は1文字も変えておらず、時間だけを使っていた。実運用予算での待ち時間は
+//     6.8→2.1秒 / 5.5→1.8秒 / 7.0→2.5秒 / 5.5→1.6秒（およそ1/3）。
+//   ・90以上で省くと 83 → 88 と悪化する（暗い配色の記事 0→4、横書き見出しのページ 11→12）。
+//     90〜91 の帯では融合が実際に効いているので、しきい値は 92 から下げない。
+const OCR_FUSION_SKIP_CONFIDENCE = 92;
+
 // 前処理版を採用するために必要な確信度の上積み。
 // 確信度が拮抗している場合（差1〜2）、前処理版は実際には悪化していることがある
 // （実測: MS明朝縦書きスクリーンショットで元画像 CER 11.3%/確信度84 に対し
@@ -760,7 +769,8 @@ async function recognizeWithOrientation(sourceCanvas, workerProvider) {
 
     // 文字単位アンサンブル融合。元寸grayが採用され、かつ文字がLSTM最適域を下回るときだけ、
     // 複数倍率の認識結果で低確信度の漢字を精錬する（詳細は OCR_FUSION_* のコメント参照）。
-    if (best === primary.data && glyphSize != null && glyphSize < OCR_FUSION_TRIGGER_GLYPH_PX) {
+    if (best === primary.data && glyphSize != null && glyphSize < OCR_FUSION_TRIGGER_GLYPH_PX
+        && best.confidence < OCR_FUSION_SKIP_CONFIDENCE) {
         const others = await collectUpscaledVariants(OCR_FUSION_SCALES);
         if (others.length) {
             const pruned = pruneOcrLineInsertions(
