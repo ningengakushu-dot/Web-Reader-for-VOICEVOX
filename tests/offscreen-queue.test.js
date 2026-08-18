@@ -17,7 +17,7 @@ const context = vm.createContext({
     URL: { createObjectURL: () => '', revokeObjectURL() {} },
     VOICEVOX_BASE_URL: '', VOICEVOX_FETCH_TIMEOUT_MS: 100, VOICEVOX_SYNTHESIS_TIMEOUT_MS: 100,
     OCR_WORKER_IDLE_RELEASE_MS: 1000, OCR_RECOGNIZE_TIMEOUT_MS: 1000,
-    fetchWithTimeout: async () => ({ ok: true }), readJsonResponseWithLimit: async () => ({}),
+    fetchWithTimeout: async () => ({ ok: true }), readJsonResponseWithLimit: async () => ({ accent_phrases: [] }),
     readBlobResponseWithLimit: async () => ({}),
     createOcrWorkerPool: () => ({ get: async () => ({}), terminate() {} }),
     createPrimaryOcrProgressTracker: () => ({ reset() {}, update: () => null }),

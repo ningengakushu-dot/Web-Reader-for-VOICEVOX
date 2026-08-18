@@ -36,7 +36,7 @@ const context = vm.createContext({
     VOICEVOX_SYNTHESIS_TIMEOUT_MS: 100, OCR_WORKER_IDLE_RELEASE_MS: 1000,
     OCR_RECOGNIZE_TIMEOUT_MS: 1000,
     fetchWithTimeout: async (url) => ({ ok: true, status: 200, marker: url.includes('audio_query') ? 'json' : 'blob' }),
-    readJsonResponseWithLimit: async () => ({}), readBlobResponseWithLimit: async () => ({}),
+    readJsonResponseWithLimit: async () => ({ accent_phrases: [] }), readBlobResponseWithLimit: async () => ({}),
     createOcrWorkerPool: () => ({ get: async () => ({}), terminate() {} }),
     createPrimaryOcrProgressTracker: () => ({ reset() {}, update: () => null }),
     recognizeWithOrientation: async () => ({ text: '', confidence: 0 }),

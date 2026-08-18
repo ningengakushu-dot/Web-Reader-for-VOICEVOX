@@ -50,7 +50,7 @@ const context = vm.createContext({
         }
         return { ok: true };
     },
-    readJsonResponseWithLimit: async () => ({}), readBlobResponseWithLimit: async () => ({}),
+    readJsonResponseWithLimit: async () => ({ accent_phrases: [] }), readBlobResponseWithLimit: async () => ({}),
     createOcrWorkerPool: () => ({ get: async () => ({}), terminate() {} }),
     createPrimaryOcrProgressTracker: () => ({ reset() {}, update: () => null }),
     recognizeWithOrientation: async () => ocrResult,

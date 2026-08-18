@@ -564,7 +564,15 @@ class VVRadioReader {
         if (text) {
             this.speakText(text);
         } else {
+            // 何も選ばずに実行したとき、従来はアイコンの色が3秒変わるだけだった。
+            // ショートカット（Alt+Shift+U）ではアイコンを見ていないので「押しても何も
+            // 起きない」ように見える。記号だけを選んだ場合は背景から
+            // 「読み上げられる文字がありません」が返ってトーストが出るので、案内の有無をそろえる。
             this.updateUIState('error');
+            if (this.isTopFrame) {
+                this.showOcrToast("読み上げるテキストを選択してください。");
+                this.scheduleOcrToastDismiss(4000);
+            }
         }
     }
 
@@ -1147,7 +1155,9 @@ class VVRadioReader {
     // 合成・再生の失敗をトーストで明示する。アイコンの状態変化だけでは
     // 「何も起きない」ように見えるため（VOICEVOX未起動が典型例）。
     showPlaybackErrorToast(error) {
-        const message = /Failed to fetch|NetworkError|ERR_CONNECTION/i.test(error || "")
+        // タイムアウト時の文言（constants.js の「…応答しません」）も同じ案内にする。
+        // 従来はここに当たらず「音声の再生に失敗しました: 合成失敗: …」と内部表現が出ていた。
+        const message = /Failed to fetch|NetworkError|ERR_CONNECTION|応答しません/i.test(error || "")
             ? "VOICEVOXエンジンに接続できません。VOICEVOXを起動してから再度お試しください。"
             : `音声の再生に失敗しました: ${error || "不明なエラー"}`;
         this.showOcrToast(message);

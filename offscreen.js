@@ -205,6 +205,13 @@ function enqueueTexts(texts, settings) {
 const MAX_SYNTHESIS_SPLIT_DEPTH = 3;
 // これより短い文は、長さが原因ではないので割らずに従来どおり諦める。
 const MIN_SYNTHESIS_SPLIT_CHARS = 8;
+// 続けてこの回数だけ文の合成に失敗したら、残りのキューを捨てて通知を打ち切る。
+// 話者IDが今のエンジンに存在しない（VOICEVOXの入れ替え・キャラ構成の変更）、同じポートを
+// 別のプロセスが使っている、といった原因はどの文でも同じように失敗するため、続けても
+// 利用者は無音のまま待たされ、文の数だけエラー表示が上書きされ続けるだけになる。
+// 1〜2件なら「その文だけ読めなかった」可能性があるので続行する。
+const MAX_CONSECUTIVE_SYNTHESIS_FAILURES = 3;
+let consecutiveSynthesisFailures = 0;
 
 /**
  * 合成に失敗した文を2つに割る。句読点・閉じ括弧の直後のうち中央にいちばん近い位置で
@@ -252,6 +259,7 @@ async function processSynthesis() {
             URL.revokeObjectURL(blobUrl);
             return;
         }
+        consecutiveSynthesisFailures = 0;
         audioQueue.push({ url: blobUrl, text: item.text, durationSec });
         processPlayback();
     } catch (err) {
@@ -265,7 +273,7 @@ async function processSynthesis() {
         // 割った断片が結局どれも読めなかった場合でも、通知は元の1文につき1回に保つ
         // （最大8片ぶんのエラー表示を出さない）。
         const notice = item.notice || { notified: false };
-        if (!isVoicevoxUnreachableError(err) && splitDepth < MAX_SYNTHESIS_SPLIT_DEPTH) {
+        if (isVoicevoxRetryableError(err) && splitDepth < MAX_SYNTHESIS_SPLIT_DEPTH) {
             const parts = splitSynthesisText(item.text);
             if (parts) {
                 textQueue.unshift(
@@ -276,11 +284,19 @@ async function processSynthesis() {
         }
         if (notice.notified && !isVoicevoxUnreachableError(err)) return;
         notice.notified = true;
+        consecutiveSynthesisFailures++;
         // エンジンに届かない・応答が無い失敗では残りの文を合成しない。続けても文の数だけ
         // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
+        // 到達はできるが毎回同じ理由で拒否される場合も同じなので、連続失敗が続いたら諦める。
         // 割っても駄目だった文はここで諦め、次の文へ進む（既に合成済みの音声は再生を終える）。
-        if (isVoicevoxUnreachableError(err)) textQueue = [];
-        notifyBackground("PLAYBACK_ERROR", { error: `合成失敗: ${err.message}` });
+        if (isVoicevoxUnreachableError(err)
+            || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
+            textQueue = [];
+        }
+        // 利用者へ見せる文言を持つエラー（HTTPステータス・応答形式）はそのまま伝える。
+        // 内部由来の英語メッセージだけ「合成失敗:」を付けて区別できるようにする。
+        notifyBackground("PLAYBACK_ERROR",
+            { error: err?.userFacing ? err.message : `合成失敗: ${err.message}` });
     } finally {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
         // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。
@@ -289,6 +305,14 @@ async function processSynthesis() {
             processSynthesis();
         }
     }
+}
+
+// 文を割って読み直す価値のある失敗か。エンジンは1要求のアクセント句が49を超えると
+// 500 を返すので、5xx のときだけ割り直す意味がある。404/422（話者がこのエンジンに無い等）や
+// 応答形式の異常はどう割っても同じ結果で、1文あたり最大15回の無駄な要求になるだけ。
+function isVoicevoxRetryableError(err) {
+    const status = Number(err?.httpStatus);
+    return Number.isFinite(status) && status >= 500 && status < 600;
 }
 
 // エンジンに接続できない／応答が無い種類の失敗か（fetch の TypeError・タイムアウト）。
@@ -318,6 +342,33 @@ function estimateQueryDurationSec(query, speedScale) {
 }
 
 /**
+ * VOICEVOX が非2xxを返したときのエラー。HTTPステータスを err.httpStatus に残し、
+ * 「割って読み直すか」の判断をメッセージの文字列一致に頼らずに行えるようにする。
+ * userFacing を立てた文言はそのまま利用者へ表示される。
+ */
+function voicevoxHttpError(status) {
+    const message = status >= 500
+        ? `VOICEVOXエンジンがこの文を処理できませんでした（応答コード${status}）`
+        : `VOICEVOXエンジンが要求を受け付けませんでした（応答コード${status}）。`
+            + "オプション画面で話者を選び直すと直ることがあります";
+    const error = new Error(message);
+    error.httpStatus = status;
+    error.userFacing = true;
+    return error;
+}
+
+/**
+ * VOICEVOX ではない応答（JSONでない・音声合成用クエリの形をしていない）に対するエラー。
+ */
+function voicevoxUnexpectedResponseError() {
+    const error = new Error(
+        "VOICEVOXエンジンから予期しない応答が返りました。"
+        + "ポート50021を別のアプリが使っていないか確認してください");
+    error.userFacing = true;
+    return error;
+}
+
+/**
  * VOICEVOX APIを使用して音声を合成し、Blob URL と音声長の見積もりを返す。
  * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
  * @returns {Promise<{url: string, durationSec: number}>}
@@ -330,9 +381,23 @@ async function generateVoiceBlob(text, settings) {
     const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
     const queryResponse = await fetchWithTimeout(
         queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
-    if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
+    if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
 
-    const queryJson = await readJsonResponseWithLimit(queryResponse);
+    let queryJson;
+    try {
+        queryJson = await readJsonResponseWithLimit(queryResponse);
+    } catch (error) {
+        // 本文がJSONでない（同じポートを別のプロセスが使っている、エラーページが返る等）。
+        // ここで置き換えないと JSON.parse の英語の内部メッセージがそのまま通知へ出る。
+        // realm をまたいで投げられるので instanceof ではなく name で判定する。
+        if (error?.name === "SyntaxError") throw voicevoxUnexpectedResponseError();
+        throw error;
+    }
+    // 応答の形を確かめてから書き込む。null や配列以外が返ったとき、この後の代入が
+    // TypeError になり「Cannot set properties of null」がそのまま利用者へ出ていた。
+    if (!queryJson || typeof queryJson !== "object" || !Array.isArray(queryJson.accent_phrases)) {
+        throw voicevoxUnexpectedResponseError();
+    }
 
     queryJson.prePhonemeLength = 0.1 * speedScale;
     queryJson.postPhonemeLength = 0.1 * speedScale;
@@ -348,7 +413,7 @@ async function generateVoiceBlob(text, settings) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(queryJson)
     }, VOICEVOX_SYNTHESIS_TIMEOUT_MS);
-    if (!synthResponse.ok) throw new Error(`Synthesis失敗(${synthResponse.status})`);
+    if (!synthResponse.ok) throw voicevoxHttpError(synthResponse.status);
 
     const audioBlob = await readBlobResponseWithLimit(synthResponse);
     return {
@@ -426,6 +491,9 @@ function stopAll() {
         || currentAudio != null;
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
+    // 連続失敗の数え上げは1回の読み上げの中だけで意味を持つ。エンジンを起動し直して
+    // やり直したときに、前回の失敗数のせいで1文目で打ち切られないようにする。
+    consecutiveSynthesisFailures = 0;
     // in-flight の再生開始処理を無効化（停止後の AbortError 等を通知しない）
     playbackGeneration++;
 
