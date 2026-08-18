@@ -319,8 +319,11 @@ function pruneOcrLineInsertions(baseBlocks, otherBlocksList, orientation, glyphS
             // 同じ誤挿入を繰り返す1候補だけではbaseの実在文字を削除しない。
             const hasMovedInsertion = [...variantSignatures]
                 .some((signature) => signature !== baseSignature);
-            const independentPositionEvidence = variantSignatures.size >= 2
-                || (exactSupport > 0 && hasMovedInsertion);
+            // 位置が原寸から動いた証拠を必須にする。2種類の署名があっても、どちらも
+            // 原寸と同じ位置を指しているだけなら「実在する文字」の可能性が残るため
+            // 削除しない（実測: 正しい「て」の誤削除1件が解消、他は不変）。
+            const independentPositionEvidence = hasMovedInsertion
+                && (variantSignatures.size >= 2 || exactSupport > 0);
             if (support < minimumSupport || !independentPositionEvidence) return;
             const deletedConfidence = candidate.deletedIndices.reduce((sum, index) => {
                 const confidence = Number(baseLine.entries[index].symbol.confidence);
@@ -799,6 +802,9 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
 // ことがあるため、明らかに自信のない文字だけを削除対象にする。
 const OCR_PRUNE_INSERTION_MAX_CONFIDENCE = 95;
 
+// 確信度の上限を外してよい「全欠落の証言」の数。候補3件が独立に同じ証言をする場合に限る。
+const OCR_PRUNE_INSERTION_STRONG_ANCHORS = 3;
+
 /**
  * 既存の整列（alignOcrVariants / alignOcrSymbols）の結果だけを使い、
  * base にしか存在しない余剰文字を削除する。追加のOCRは行わない。
@@ -866,8 +872,12 @@ function pruneOcrConsensusInsertions(baseBlocks, otherBlocksList, options = {}) 
             if (anchored < minVariants || missing !== anchored) return;
             // 確信度が数値で得られない文字は削除しない（安全側）。
             const confidence = entry.symbol.confidence;
-            if (typeof confidence !== "number" || !Number.isFinite(confidence)
-                || confidence >= maxConfidence) return;
+            if (typeof confidence !== "number" || !Number.isFinite(confidence)) return;
+            // 独立した候補が3件以上そろって「両隣は同じ、この位置には文字が無い」と
+            // 証言する場合だけ、確信度の上限を外す。LSTM は重複出力した文字にも高い
+            // 確信度を付けることがあり、上限95では「ら」「ぬ」等の余剰が残っていた。
+            // 実測（2026-08-17、33入力）: 123→121（改善2・悪化0）。
+            if (anchored < OCR_PRUNE_INSERTION_STRONG_ANCHORS && confidence >= maxConfidence) return;
             removals.push({ entry, index });
         });
     } catch (error) {

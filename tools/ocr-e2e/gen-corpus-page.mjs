@@ -58,7 +58,16 @@ const SAMPLES = [
     // 表示倍率を上げた場合（実効30px相当）。20px は Tesseract の最適域(20-30px)の下端で、
     // 拡大すると誤りが大きく減るかを測るための対照。
     { id: "yumin_20_dsf15_ruby", font: "yumin", px: 20, dsf: 1.5, ruby: true, lh: 1.55 },
-    { id: "yumin_28_ruby", font: "yumin", px: 28, dsf: 1, ruby: true, lh: 1.55 }
+    { id: "yumin_28_ruby", font: "yumin", px: 28, dsf: 1, ruby: true, lh: 1.55 },
+    // 書籍の体裁（柱＝ページ上部の書名／ノンブル＝ページ番号）を足した対照。
+    // 縦書き本文の上や下を横切る帯が、列ごとに刻まれて読み上げへ混ざる条件の回帰確認用
+    // （認識前の帯の塗りつぶし: findOcrOutlierInkBands）。GT は本文だけ（柱は読み上げ対象外）。
+    { id: "yumin_20_header", font: "yumin", px: 20, dsf: 1, ruby: true, lh: 1.55, header: "top" },
+    { id: "yumin_20_footer", font: "yumin", px: 20, dsf: 1, ruby: true, lh: 1.55, header: "bottom" },
+    { id: "noto_20_header", font: "noto", px: 20, dsf: 1, ruby: true, lh: 1.55, header: "top" },
+    // 横書きの見出し行＋本文ブロック。帯の塗りつぶしが横書きの見出しを消さないことの確認用
+    // （GT に見出しを含めるので、消えたら誤りとして必ず出る）。
+    { id: "yumin_18_hheading", font: "yumin", px: 18, dsf: 1, ruby: false, lh: 1.7, horizontal: true, heading: true }
 ];
 
 const browser = await chromium.launch({ executablePath });
@@ -66,17 +75,40 @@ const manifest = [];
 for (const s of SAMPLES) {
     const page = await browser.newPage({ deviceScaleFactor: s.dsf, viewport: { width: 1600, height: 1200 } });
     const parts = PARAS.map((p) => paraHtml(p, s.ruby));
-    const html = `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#fff;">`
-        + `<div id="t" style="font-family:${FONTS[s.font].replace(/"/g, "&quot;")};font-size:${s.px}px;`
-        + `line-height:${s.lh};color:#111;background:#fff;padding:8px 10px;writing-mode:vertical-rl;`
-        + `height:${Math.round(s.px * 39)}px;width:max-content;">${parts.map((p) => p.html).join("")}</div>`;
+    const family = FONTS[s.font].replace(/"/g, "&quot;");
+    let html;
+    if (s.horizontal) {
+        // 横書き: 見出し行（本文ブロックとの間に1行ぶんの空き）＋本文
+        const heading = s.heading
+            ? `<p style="margin:0 0 ${Math.round(s.px * 1.8)}px 0">世界でいちばん透きとおった物語</p>` : "";
+        html = `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#fff;">`
+            + `<div id="t" style="font-family:${family};font-size:${s.px}px;line-height:${s.lh};`
+            + `color:#111;background:#fff;padding:10px;width:${Math.round(s.px * 34)}px;">`
+            + `${heading}${parts.map((p) => p.html).join("")}</div>`;
+    } else {
+        // 縦書き: 柱（書名）とノンブル（ページ番号）を本文ブロックと1文字ぶん以上空けて上下へ置く
+        const bar = s.header
+            ? `<div style="font-family:${family};font-size:${Math.round(s.px * 0.8)}px;color:#111;`
+            + `display:flex;justify-content:space-between;`
+            + `${s.header === "top" ? `margin-bottom:${Math.round(s.px * 1.4)}px` : `margin-top:${Math.round(s.px * 1.4)}px`}">`
+            + `<span>9</span><span>世界でいちばん透きとおった物語</span><span>&nbsp;</span></div>` : "";
+        const body = `<div style="font-family:${family};font-size:${s.px}px;`
+            + `line-height:${s.lh};color:#111;writing-mode:vertical-rl;`
+            + `height:${Math.round(s.px * 39)}px;width:max-content;">${parts.map((p) => p.html).join("")}</div>`;
+        html = `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#fff;">`
+            + `<div id="t" style="background:#fff;padding:8px 10px;width:max-content;">`
+            + `${s.header === "top" ? bar : ""}${body}${s.header === "bottom" ? bar : ""}</div>`;
+    }
     await page.setContent(html);
     await page.waitForTimeout(200);
     const el = page.locator("#t");
     const file = resolve(here, "work", `corpus_page_${s.id}.png`);
     await el.screenshot({ path: file });
     const box = await el.boundingBox();
-    manifest.push({ name: `page_${s.id}`, file, gt: parts.map((p) => p.gt).join("\n"),
+    // 柱・ノンブルは読み上げ対象外なので GT に含めない。横書きの見出しは読むので含める。
+    const gt = (s.heading ? "世界でいちばん透きとおった物語\n" : "")
+        + parts.map((p) => p.gt).join("\n");
+    manifest.push({ name: `page_${s.id}`, file, gt,
         px: s.px, dsf: s.dsf, ruby: s.ruby, width: Math.round(box.width * s.dsf), height: Math.round(box.height * s.dsf) });
     console.log(s.id, Math.round(box.width * s.dsf), "x", Math.round(box.height * s.dsf));
     await page.close();

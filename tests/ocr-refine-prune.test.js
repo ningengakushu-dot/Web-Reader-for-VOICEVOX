@@ -9,7 +9,7 @@ const vm = require('node:vm');
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'ocr-refine.js'), 'utf8')
     + '\n;globalThis.ocrTestApi = {pruneOcrConsensusInsertions, buildTextFromBlocks, '
-    + 'OCR_PRUNE_INSERTION_MAX_CONFIDENCE};';
+    + 'OCR_PRUNE_INSERTION_MAX_CONFIDENCE, OCR_PRUNE_INSERTION_STRONG_ANCHORS};';
 const context = vm.createContext({ console, Map, Set, Uint8Array, Int32Array, RegExp });
 vm.runInContext(source, context);
 const api = context.ocrTestApi;
@@ -124,6 +124,29 @@ assert.equal(api.OCR_PRUNE_INSERTION_MAX_CONFIDENCE, 95);
     assert.equal(api.pruneOcrConsensusInsertions(
         [{ paragraphs: [{ lines: [{ words: null }] }] }],
         [blocksForLine('あい'), blocksForLine('あい')]), 0);
+}
+
+{
+    // 独立した候補が3件そろって「その位置に文字が無い」と証言する場合だけ、
+    // 確信度の上限（95）を外す。2件では従来どおり残す。
+    const line = () => blocksForLine('あいうえお', [98, 98, 97, 98, 98]);
+    const witness = () => blocksForLine('あいえお');
+    const twoWitnesses = line();
+    assert.equal(api.pruneOcrConsensusInsertions(twoWitnesses, [witness(), witness()]), 0,
+        '証言2件では確信度97の文字を削除しない');
+    assert.equal(api.buildTextFromBlocks(twoWitnesses), 'あいうえお');
+    const threeWitnesses = line();
+    assert.equal(api.pruneOcrConsensusInsertions(threeWitnesses,
+        [witness(), witness(), witness()]), 1,
+    '証言3件なら確信度の上限を外して削除する');
+    assert.equal(api.buildTextFromBlocks(threeWitnesses), 'あいえお');
+    // 確信度が数値で得られない文字は、証言が何件あっても削除しない（安全側）
+    const noConfidence = line();
+    noConfidence[0].paragraphs[0].lines[0].words[0].symbols[2].confidence = null;
+    assert.equal(api.pruneOcrConsensusInsertions(noConfidence,
+        [witness(), witness(), witness()]), 0,
+    '確信度が取れない文字は証言3件でも削除しない');
+    assert.equal(api.OCR_PRUNE_INSERTION_STRONG_ANCHORS, 3);
 }
 
 console.log('OCR consensus insertion prune: PASSED');
