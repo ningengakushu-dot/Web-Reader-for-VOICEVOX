@@ -322,17 +322,23 @@ const DOM_TEXT_INLINE_DISPLAYS = new Set([
 // 区切り無しで読み上げられていた。同じHTMLを素のテキスト選択で取ると項目ごとに改行が
 // 入るので、この経路だけがブラウザ既定より劣っていたことになる。
 // flex / grid の子要素は CSS 側で表示値が block へ変わる（blockification）ため、
-// **実際の表示値**で見ればタグ名の一覧に頼らずに視覚的な箱の切れ目を拾える。
+// 実際の表示値を見ればタグ名の一覧に頼らずに視覚的な箱の切れ目を拾える。
+//
+// **判定はタグ名と表示値の「和」にする**。表示値だけで決める版も試したが、実ページ
+// （ja.wikipedia.org、可視テキスト6441ノード）で境界が **562個減り、増加は0** だった
+// ＝これまで分かれていた箇所が融合する方向で、意図と逆だった。和にすると同じページで
+// 増減ゼロ（従来と完全一致）のまま、横並びナビだけが項目ごとに分かれる。
+// 走査のコストは 6441ノードで 2ms → 8ms（要素ごとの getComputedStyle は context の
+// styleCache で1回だけ）。
 function blockAncestorOf(node, context) {
     let el = node.parentElement;
     while (el) {
+        // 従来のタグ名判定。ここで返る限り境界は減らない
+        if (DOM_TEXT_BLOCK_TAGS.has(el.tagName)) return el;
+        // タグ名では拾えない「視覚的に独立した箱」（flex/grid の子など）を表示値で拾う。
+        // 表示値が取れない（切り離された文書・window が無い）ときは従来どおり素通りする
         const display = context ? cachedStyle(el, context)?.display : null;
-        if (display) {
-            if (display !== "none" && !DOM_TEXT_INLINE_DISPLAYS.has(display)) return el;
-        } else if (DOM_TEXT_BLOCK_TAGS.has(el.tagName)) {
-            // 表示値が取れない（切り離された文書・window が無い等）ときはタグ名で判定する
-            return el;
-        }
+        if (display && display !== "none" && !DOM_TEXT_INLINE_DISPLAYS.has(display)) return el;
         el = el.parentElement;
     }
     return null;

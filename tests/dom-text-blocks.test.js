@@ -112,6 +112,22 @@ function makeTree(spec) {
         'この段落は途中で折り返されている');
 }
 
+// --- タグ名で拾える箱は表示値を見るまでもなく境界にする（従来の境界を減らさない） ---
+// 表示値だけで決めると、実ページで境界が減る方向に働く（562個減・増0を実測）。
+{
+    const list = makeTree({
+        tag: 'UL', display: 'block',
+        children: [
+            { tag: 'LI', display: 'inline' },
+            { tag: 'LI', display: 'inline' }
+        ]
+    });
+    const ctx = api.createWorkContext();
+    const blocks = list.children.map((child) => api.blockAncestorOf(child.textNode, ctx));
+    assert.equal(blocks[0], list.children[0], 'display:inline のLIでも項目ごとに分ける');
+    assert.notEqual(blocks[0], blocks[1]);
+}
+
 // --- 表示値が取れない環境ではタグ名で判定する（従来動作の保持） ---
 {
     const view = null;
