@@ -926,9 +926,27 @@ function normalizeOcrText(rawText) {
     return result.trim();
 }
 
-// 崩れたダッシュの内側に紛れ込む字（l・I・1・スラッシュ）。これらは本文の文字でもあるため、
-// 「両側を棒に挟まれている」ときだけダッシュの一部として畳み込む（cleanForSpeech のコメント参照）。
-const SPEECH_BAR_RUN_RE = /[ー―—–−|｜](?:[ー―—–−|｜lI1/\\]*[ー―—–−|｜])+/g;
+// 崩れたダッシュの内側に紛れ込む字（l・I・1・スラッシュ・漢数字の一）。これらは本文の
+// 文字でもあるため、「両側を棒に挟まれている」ときだけダッシュの一部として畳み込む
+// （cleanForSpeech のコメント参照）。
+const SPEECH_BAR_RUN_RE = /[ー―—–−|｜](?:[ー―—–−|｜lI1一/\\]*[ー―—–−|｜])+/g;
+
+// 数を表す文脈の目印（漢数字・算用数字・序数の「第」）。この前後にある「一一」は
+// 数（十一）とみなしてダッシュへ畳み込まない。
+const SPEECH_NUMERAL_NEIGHBOR = "0-9０-９〇一二三四五六七八九十百千万億兆";
+// 位取りの漢数字（二〇二六年 のような書き方）に続く助数詞。縦書きの本ではこの表記が
+// 使われるため、「一一月」「明治一一年」「一一時」を数として保護する。語彙ではなく
+// 「数の後ろに来る字」の並びなので、本文の語を判定に使っているわけではない。
+const SPEECH_NUMERAL_COUNTER = "年月日時分秒人回番号個名";
+// 横書きのダッシュ「――」は、OCRでは漢数字の「一」2つになりやすい（縦書きでは縦棒
+// 「||」になる）。VOICEVOX は「一一」を**ジュウイチ**と読むため（実測）、そのままだと
+// 本文に無い4モーラが挿入される。数を表す並び（第一一号・一一〇番・二〇一一年 など）
+// には触れず、それ以外の「一」の2連以上だけをダッシュとして畳み込む。
+// cleanForSpeech はOCR結果にしか適用されない（DOM本文は background の
+// sanitizeSpeechText を通る）ため、ここでの「一一」は数字よりダッシュの崩れが優勢。
+const SPEECH_KANJI_DASH_RUN_RE = new RegExp(
+    `(?<![${SPEECH_NUMERAL_NEIGHBOR}第])一{2,}`
+    + `(?![${SPEECH_NUMERAL_NEIGHBOR}${SPEECH_NUMERAL_COUNTER}])`, "gu");
 
 /**
  * 読み上げ用の整形（content.js の cleanMessage と同等: URLの読み飛ばし・改行の空白化）。
@@ -941,6 +959,9 @@ const SPEECH_BAR_RUN_RE = /[ー―—–−|｜](?:[ー―—–−|｜lI1/\\]*[
  * 隣接しただけの本文が読み上げから黙って消えていた（実測: 「―1972年」→「ー972年」、
  * 「1―2の関係」→「ー2の関係」、「第―1章」→「第ー章」、
  * 「サーバー/クライアント」→「サーバークライアント」）。
+ *
+ * 横書きのダッシュがまるごと漢数字になった「一一」も、数を表す並びでないときだけ
+ * 畳み込む（SPEECH_KANJI_DASH_RUN_RE のコメント参照）。
  * @param {string} text
  * @returns {string}
  */
@@ -955,6 +976,7 @@ function cleanForSpeech(text) {
             // 「サーバー1台」（ー1）やコードの「||」等はどちらの条件も満たさず変化しない。
             return (hasDash || hasChoonAndBar) ? "ー" : run;
         })
+        .replace(SPEECH_KANJI_DASH_RUN_RE, "ー")
         .replace(/\n+/g, " ")
         .trim();
 }

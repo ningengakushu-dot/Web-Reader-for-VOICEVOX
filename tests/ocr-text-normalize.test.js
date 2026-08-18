@@ -61,6 +61,31 @@ const spoken = (raw) => cleanForSpeech(normalizeOcrText(raw));
     assert.equal(cleanForSpeech('サーバー1台'), 'サーバー1台');
 }
 
+// --- 横書きのダッシュが漢数字「一一」になった場合（VOICEVOXは「ジュウイチ」と読む） ---
+// 実測（VOICEVOX 0.25.2）: 「――と、いつぞや」→ トイツゾヤ に対し
+// 「一一と、いつぞや」→ ジュウイチトイツゾヤ と、本文に無い4モーラが挿入される。
+{
+    // ダッシュとして畳み込む（数を表す並びではない）
+    assert.equal(cleanForSpeech('「一一推理小説にたとえるなら'), '「ー推理小説にたとえるなら');
+    assert.equal(cleanForSpeech('でしょうか」一一と、いつぞや'), 'でしょうか」ーと、いつぞや');
+    assert.equal(cleanForSpeech('いるのだ一一と、最大限'), 'いるのだーと、最大限');
+    // ダッシュの内側に紛れ込んだ「一」も、両側を棒に挟まれていれば畳み込む
+    assert.equal(cleanForSpeech('―一―推理'), 'ー推理');
+    // 数を表す並びには触れない（前後が数字・漢数字・「第」・助数詞）
+    assert.equal(cleanForSpeech('第一一号の議案'), '第一一号の議案');
+    assert.equal(cleanForSpeech('一一〇番へ通報'), '一一〇番へ通報');
+    assert.equal(cleanForSpeech('二〇一一年の春'), '二〇一一年の春');
+    assert.equal(cleanForSpeech('明治一一年'), '明治一一年');
+    assert.equal(cleanForSpeech('一一月の予定'), '一一月の予定');
+    assert.equal(cleanForSpeech('一一時に集合'), '一一時に集合');
+    assert.equal(cleanForSpeech('一一人が参加'), '一一人が参加');
+    // 「一」が1つだけの本文は不変
+    assert.equal(cleanForSpeech('第一章'), '第一章');
+    assert.equal(cleanForSpeech('メンバー一覧'), 'メンバー一覧');
+    assert.equal(cleanForSpeech('コーヒー一杯'), 'コーヒー一杯');
+    assert.equal(cleanForSpeech('十一日'), '十一日');
+}
+
 // --- 実 OCR で見つかった Web レイアウトの型 ---
 {
     // 英文の折り返し: Tesseract が行間に空行を出しても、小文字で終わり小文字で始まる行は同じ文
