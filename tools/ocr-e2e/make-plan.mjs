@@ -287,6 +287,56 @@ if (mode === "gamma-ab") {
     }
 }
 
+// web / web-ab: Web媒体コーパス（gen-corpus-web.mjs）。横書きゴシックの記事本文・
+// 技術文書（URL・半角英数字）・箇条書き・表・UI小文字・低コントラスト・ダークモードで、
+// 既存コーパス（縦書き明朝の文学作品）が一度も代表していなかった条件。
+// web    : head で1周（現状把握）
+// web-ab : 入力ごとに baseline → head（公開版との比較 / 変更の悪化検出）
+if (mode === "web" || mode === "web-ab" || mode === "web-stage") {
+    const webFile = join(workDir, "corpus-web.json");
+    if (!existsSync(webFile)) {
+        throw new Error(`missing ${webFile}: run gen-corpus-web.mjs first`);
+    }
+    const webNames = [];
+    for (const item of JSON.parse(readFileSync(webFile, "utf8"))) {
+        if (!item?.name || !item.file || !item.gt) continue;
+        inputs[item.name] = { file: item.file, gt: item.gt };
+        webNames.push(item.name);
+    }
+    const variants = mode === "web" ? ["head"]
+        : (mode === "web-stage" ? ["head", "head-nofuse", "head-noprune"] : ["baseline", "head"]);
+    for (const name of webNames) {
+        for (const variant of variants) runs.push({ input: name, variant });
+    }
+}
+
+// dict-ab: 公開版(main)のコード上で「語彙辞書リランクの有無」だけを比べる。
+// 辞書を同梱しない判断（1MB超のデータ・Apache-2.0の帰属表示・語彙に依存した補正）が
+// 精度の損失を伴わないことを、同一コード上の差として示すための計画。
+// 既存コーパス（文学・縦書き明朝）とWeb媒体コーパスの両方を入力にする。
+if (mode === "dict-ab") {
+    for (const file of ["corpus-mincho.json", "corpus-page.json", "corpus-web.json"]) {
+        const path = join(workDir, file);
+        if (!existsSync(path)) continue;
+        for (const item of JSON.parse(readFileSync(path, "utf8"))) {
+            if (!item?.name || !item.file || !item.gt || inputs[item.name]) continue;
+            inputs[item.name] = { file: item.file, gt: item.gt };
+        }
+    }
+    const userPage = join(workDir, "user-page-180262.jpg");
+    const userGtFile = join(workDir, "user-page-gt.json");
+    if (existsSync(userPage) && existsSync(userGtFile)) {
+        const gts = JSON.parse(readFileSync(userGtFile, "utf8"));
+        inputs.userpage_body = { file: userPage, gt: gts.body };
+        inputs.userpage_cols9 = { file: userPage, gt: gts.cols9,
+            crop: { left: 402, top: 66, width: 356, height: 1036 } };
+    }
+    for (const name of Object.keys(inputs)) {
+        if (!inputs[name].gt) continue;
+        for (const variant of ["baseline", "baseline-nodict"]) runs.push({ input: name, variant });
+    }
+}
+
 // 1計画が100ランを超えるときは分割して書き出す（結果は最後にまとめて書かれるため、
 // 長い計画は途中で止まると全損する。README の注意も参照）。
 const MAX_RUNS_PER_PLAN = 100;

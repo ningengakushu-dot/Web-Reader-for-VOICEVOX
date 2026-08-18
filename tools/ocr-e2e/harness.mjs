@@ -4,7 +4,7 @@
 // （過去の教訓: 並行実行は時間依存分岐で測定を汚染する）。
 import { createWorker, PSM } from "tesseract.js";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
@@ -58,6 +58,23 @@ function makeApi(source) {
         Uint8Array, Uint8ClampedArray, Int32Array, Infinity, NaN, isFinite,
         document: { createElement: () => createCanvas(1, 1) },
         chrome: { runtime: { getURL: (path) => path } },
+        // 同梱リソースの取得。公開版(main)の ocr-refine.js は語彙辞書 ocr-words.txt を
+        // fetch(chrome.runtime.getURL(...)) で読み、失敗しても素通りする作りになっている。
+        // shim が無いと**ベースライン側だけ辞書が無効**になり、公開版を不当に低く見積もる。
+        // work/ を先に見るのは、辞書を消したブランチでも main のファイルを
+        // `git show main:ocr-words.txt > work/ocr-words.txt` で置いて測れるようにするため。
+        fetch: async (url) => {
+            const name = basename(String(url));
+            const candidates = [join(here, "work", name), join(repo, name)];
+            const found = candidates.find((path) => existsSync(path));
+            if (!found) return { ok: false, status: 404, headers: { get: () => null },
+                text: async () => "" };
+            const body = readFileSync(found, "utf8");
+            return { ok: true, status: 200,
+                headers: { get: (key) => (String(key).toLowerCase() === "content-length"
+                    ? String(Buffer.byteLength(body)) : null) },
+                text: async () => body };
+        },
         Tesseract: makeTesseractShim()
     };
     sandbox.globalThis = sandbox;
@@ -90,6 +107,16 @@ const VARIANTS = {
     baseline: () => loadSources(
         process.env.OCR_E2E_BASELINE || join(here, "baseline"), [BUDGET_PATCH(60000)]),
     head: () => loadSources(repo, [BUDGET_PATCH(60000)]),
+    // 公開版(main)から**語彙辞書リランクだけ**を外したもの。辞書ファイルの取得先を
+    // 存在しない名前にすると ocrWordSet が空集合になり、rerankOcrByDictionary が素通りする。
+    // baseline と baseline-nodict の差＝辞書がもたらしていた効果そのもの
+    // （他の変更が混じらない同一コード上での切り分け）。
+    "baseline-nodict": () => loadSources(
+        process.env.OCR_E2E_BASELINE || join(here, "baseline"), [BUDGET_PATCH(60000), {
+            from: 'chrome.runtime.getURL("ocr-words.txt")',
+            to: 'chrome.runtime.getURL("__ocr_words_absent__.txt")',
+            label: "dictionary=off"
+        }]),
     "head-consensus-off": () => loadSources(repo, [BUDGET_PATCH(60000), {
         from: CONSENSUS_CURRENT,
         to: "fuseOcrSymbols(best.blocks, others, { consensus: false })",
@@ -112,6 +139,20 @@ const VARIANTS = {
         label: "binarize=off"
     }]),
     "head-noprune": () => loadSources(repo, [BUDGET_PATCH(60000), CONSENSUS_PRUNE_OFF]),
+    // 融合そのものを一切走らせない（複数倍率の結果で symbol を書き換えない）。
+    // consensus-off は「全票一致による漢字の置換」だけを外すので、低確信度の置換は残る。
+    // 融合が正味で効いているのかを媒体別に測るために、段ごと外した対照を用意する。
+    // 罫線・枠線の除去だけを外す（最小長を無限大にすると1本も該当しない＝無変更）。
+    "head-norule": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: "const OCR_RULE_MIN_LENGTH_PX = 24;",
+        to: "const OCR_RULE_MIN_LENGTH_PX = Infinity;",
+        label: "rule-removal=off"
+    }]),
+    "head-nofuse": () => loadSources(repo, [BUDGET_PATCH(60000), {
+        from: CONSENSUS_CURRENT,
+        to: "(void 0)",
+        label: "fuse=off"
+    }]),
     // 認識入力の余白付与だけを外す（余白 0px = 付与しない）
     "head-nopad": () => loadSources(repo, [BUDGET_PATCH(60000), {
         from: "const OCR_INPUT_PAD_PX = 10;",
@@ -316,7 +357,9 @@ function tightCropCanvas(canvas, margin) {
 // ---- CER（読み上げに影響しない括弧の全角半角差は比較前に正規化する） ----
 function normalizeForCer(text) {
     return (text || "").replace(/\s+/g, "")
-        .replace(/\(/g, "（").replace(/\)/g, "）");
+        .replace(/\(/g, "（").replace(/\)/g, "）")
+        // 箇条書きの中黒（CSSの • と全角中黒 ・）の違いは読み上げに影響しない（どちらも無音）
+        .replace(/[•·‧･]/g, "・");
 }
 function levenshtein(a, b) {
     const s = [...a];
