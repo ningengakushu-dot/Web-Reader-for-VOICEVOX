@@ -1,12 +1,11 @@
 // 認識結果（Tesseract の blocks）の走査と精錬。
-// 複数倍率の認識結果を文字単位で突き合わせる融合と、語彙辞書によるリランキング、
-// および blocks からの読み上げテキスト組み立てを担当する。
+// 複数倍率の認識結果を文字単位で突き合わせる融合と、blocks からの
+// 読み上げテキスト組み立てを担当する。
 //
 // ocr-image.js と同じく offscreen.html / capture.html の両方から使う。
 
 // CJK統合漢字（U+4E00–U+9FFF）＋拡張A（U+3400–U+4DBF）の判定を1か所に集約する。
 const OCR_KANJI_CLASS = "㐀-䶿一-鿿";
-const OCR_KANJI_RE = new RegExp(`[${OCR_KANJI_CLASS}]`);       // 部分一致（漢字を含むか）
 const OCR_KANJI_ONE_RE = new RegExp(`^[${OCR_KANJI_CLASS}]$`);  // 単一文字が漢字か
 
 /**
@@ -34,45 +33,6 @@ function rebuildOcrWordTexts(words) {
     }
 }
 
-// ===== 語彙辞書（リランキング用） =====
-// SudachiDict(Apache-2.0) から抽出した高頻度の語（2-4字・漢字含む内容語）。
-// 融合候補が「非語」か「辞書語」かの判定に使い、OCRの誤字で意味の通らない
-// 熟語になった箇所を、複数倍率の認識結果の中の辞書語へ補正する（rerankOcrByDictionary）。
-// 「任意」。取得に失敗しても従来動作を完全に保つ（機能を素通りさせる）。
-let ocrWordSet = null;
-let ocrDictionaryPromise = null;
-
-// 拡張機能の同梱ファイルを一度だけ読み込む。offscreen/capture の拡張ページからは
-// chrome.runtime.getURL で自分の同梱リソースを fetch できる（web_accessible_resources 不要）。
-async function ensureOcrDictionaries() {
-    if (ocrWordSet) return;
-    if (ocrDictionaryPromise) return ocrDictionaryPromise;
-    ocrDictionaryPromise = (async () => {
-        try {
-            if (typeof fetch === "undefined" || typeof chrome === "undefined"
-                || !chrome.runtime || !chrome.runtime.getURL) return;
-            const response = await fetch(chrome.runtime.getURL("ocr-words.txt"));
-            if (!response.ok) throw new Error(`辞書の読み込みに失敗しました (${response.status})`);
-            const declared = Number(response.headers?.get?.("content-length"));
-            if (Number.isFinite(declared) && declared > 2 * 1024 * 1024) {
-                throw new Error("辞書ファイルが大きすぎます");
-            }
-            const wordsText = await response.text();
-            if (wordsText.length > 2 * 1024 * 1024) throw new Error("辞書ファイルが大きすぎます");
-            ocrWordSet = new Set(wordsText.split("\n").filter(Boolean));
-        } catch (error) {
-            // 辞書は任意機能。失敗しても以降は素通りする
-            ocrWordSet = ocrWordSet || new Set();
-        }
-    })();
-    return ocrDictionaryPromise;
-}
-
-// テスト用に辞書を直接注入する（Node ハーネスから利用）。
-function setOcrDictionaries(wordSet) {
-    if (wordSet) ocrWordSet = wordSet;
-}
-
 // ===== blocks からの読み上げテキスト組み立て =====
 
 /**
@@ -85,7 +45,7 @@ function collectOcrSymbols(blocks) {
     const out = [];
     forEachOcrLine(blocks, (line) => {
         for (const word of (line.words || [])) {
-            for (const symbol of (word.symbols || [])) out.push({ symbol, word });
+            for (const symbol of (word.symbols || [])) out.push({ symbol, word, line });
         }
     });
     return out;
@@ -139,14 +99,443 @@ function buildTextFromBlocks(blocks, orientation, glyphSize) {
 function estimateGlyphSizeFromBlocks(blocks, orientation) {
     const sizes = [];
     forEachOcrLine(blocks, (line) => {
-        const s = orientation === "vertical"
-            ? line.bbox.x1 - line.bbox.x0
-            : line.bbox.y1 - line.bbox.y0;
+        // 実機の Tesseract は行座標が得られないことがある（他の走査と同じく防御する）
+        const bbox = line.bbox;
+        if (!bbox) return;
+        const s = orientation === "vertical" ? bbox.x1 - bbox.x0 : bbox.y1 - bbox.y0;
         if (s > 0) sizes.push(s);
     });
     if (!sizes.length) return null;
     sizes.sort((a, b) => a - b);
     return sizes[Math.floor(sizes.length / 2)];
+}
+
+// ===== 行構造の融合（挿入誤りの除去） =====
+
+function collectComparableOcrLines(blocks, orientation) {
+    const lines = [];
+    forEachOcrLine(blocks, (line) => {
+        const entries = [];
+        for (const word of (line.words || [])) {
+            for (const symbol of (word.symbols || [])) entries.push({ symbol, word });
+        }
+        const crossSize = orientation === "vertical"
+            ? line.bbox?.x1 - line.bbox?.x0
+            : line.bbox?.y1 - line.bbox?.y0;
+        const span = orientation === "vertical"
+            ? line.bbox?.y1 - line.bbox?.y0
+            : line.bbox?.x1 - line.bbox?.x0;
+        if (entries.length && crossSize > 0 && span > 0) {
+            lines.push({ line, entries, crossSize, span });
+        }
+    });
+    if (!lines.length) return [];
+    const sizes = lines.map((item) => item.crossSize).sort((a, b) => a - b);
+    const median = sizes[Math.floor(sizes.length / 2)];
+    // 罫線・ルビ・倍率変換端の1pxノイズを本文列の対応付けへ混ぜない。
+    const filtered = lines.filter((item) => item.crossSize >= median * 0.6)
+        .sort((a, b) => {
+            const centerA = orientation === "vertical"
+                ? (a.line.bbox.x0 + a.line.bbox.x1) / 2
+                : (a.line.bbox.y0 + a.line.bbox.y1) / 2;
+            const centerB = orientation === "vertical"
+                ? (b.line.bbox.x0 + b.line.bbox.x1) / 2
+                : (b.line.bbox.y0 + b.line.bbox.y1) / 2;
+            return centerA - centerB;
+        });
+    if (!filtered.length) return [];
+    const centers = filtered.map((item) => orientation === "vertical"
+        ? (item.line.bbox.x0 + item.line.bbox.x1) / 2
+        : (item.line.bbox.y0 + item.line.bbox.y1) / 2);
+    const minCenter = Math.min(...centers);
+    const maxCenter = Math.max(...centers);
+    const spans = filtered.map((item) => item.span).sort((a, b) => a - b);
+    const medianSpan = spans[Math.floor(spans.length / 2)];
+    return filtered.map((item, index) => ({
+        ...item,
+        normalizedCross: maxCenter > minCenter
+            ? (centers[index] - minCenter) / (maxCenter - minCenter)
+            : 0.5,
+        normalizedSpan: item.span / medianSpan
+    }));
+}
+
+function findSubsequenceSkips(source, target) {
+    const skipped = [];
+    let targetIndex = 0;
+    for (let sourceIndex = 0; sourceIndex < source.length; sourceIndex++) {
+        if (targetIndex < target.length && source[sourceIndex] === target[targetIndex]) {
+            targetIndex++;
+        } else {
+            skipped.push(sourceIndex);
+        }
+    }
+    return targetIndex === target.length ? skipped : null;
+}
+
+function describeOcrSkips(source, skipped) {
+    if (!skipped.length) return "=";
+    // 誤認文字の内容ではなく物理的な位置だけを署名にする。同じセルで候補ごとに
+    // 「ち」「ら」と別字を余分出力しても、異位置の証拠として数えない。
+    return skipped.map((index) => Math.round((index / Math.max(1, source.length - 1)) * 20))
+        .join("|");
+}
+
+function forEachDeletedOcrSequence(entries, deleteCount, callback) {
+    const source = entries.map((entry) => entry.symbol.text);
+    const seenTexts = new Set();
+    const chosen = [];
+    const visit = (start) => {
+        if (chosen.length === deleteCount) {
+            const removed = new Set(chosen);
+            const text = source.filter((_, index) => !removed.has(index)).join("");
+            if (!seenTexts.has(text)) {
+                seenTexts.add(text);
+                callback({ text, deletedIndices: chosen.slice() });
+            }
+            return;
+        }
+        for (let index = start; index <= source.length - (deleteCount - chosen.length); index++) {
+            chosen.push(index);
+            visit(index + 1);
+            chosen.pop();
+        }
+    };
+    visit(0);
+}
+
+const OCR_INSERTION_PRUNE_MAX_LINE_LENGTH = 64;
+
+// 列（縦書きなら1本の列）の1文字ぶんの送りを、長い列の「span / 文字数」の何分位で
+// 代表するか。この値は「正しい列」の比＝そのページの真の送りに一致させたい。
+//   ・余分な文字を出した列: 比が真値より小さくなる
+//   ・文字を落とした列    : 比が真値より大きくなる
+// 当初は「余分な文字を出した列だけが下振れする」と考えて上位四分位(0.75)にしていたが、
+// 実測では欠落した列も同程度あり、上位四分位はその欠落列を掴んで**真値より大きい**
+// ピッチを返していた。ピッチが大きいと物理セル数 round(span/pitch) が1つ少なく出て、
+// **正しい列まで一律に「1文字余分」と判定**され、実在する文字が削除される。
+// 実測（2026-08-18、4ページ・20字以上の列50本）: 上位四分位では「1〜3文字余分」と
+// 判定される列が 4〜7本／ページに達し、`犯人と探偵`→`犯人と探`、`「霧子さん`→`子さん`
+// のように本文が消えていた。中央値では 1〜5本に減り、52入力A/Bで誤り 517→512
+// （改善6・悪化1、悪化の中身は無音の記号2つ）。
+// 中央値は安全側でもある: ピッチを小さく見積もる誤りは「セル数が多く見える＝削除しない」
+// に倒れ、大きく見積もる誤り（＝削除しすぎ）には倒れない。
+// 棄却した代案: 半数を含む最狭窓の中央値(shorth)は列数5〜8で不安定（上位四分位と同値に
+// 戻る入力あり）、候補の文字数の中央値との max は改善5・悪化4でこれより劣る。
+const OCR_LINE_PITCH_QUANTILE = 0.5;
+
+// 1列の削除候補は最大 C(64,3)=41,664 通りで、列挙は同期処理として約340msかかる（実測）。
+// 列数には上限がないため、水増し列を多数含む画像（細工された入力を含む）では
+// 列数×候補数がそのままメインスレッド（音声再生も担うoffscreen）のブロック時間になる。
+// 1回の呼び出しで列挙する候補の総数を制限し、超過する列は安全側（無変更）で飛ばす。
+// 実文書の列（20〜30字・削除1〜3）は列あたり数千候補で、この上限には掛からない。
+const OCR_INSERTION_PRUNE_MAX_TOTAL_CANDIDATES = 50000;
+
+// C(length, deleteCount)。deleteCount は1〜3に限られる。
+function countDeletedOcrSequenceCandidates(length, deleteCount) {
+    let result = 1;
+    for (let index = 0; index < deleteCount; index++) {
+        result = (result * (length - index)) / (index + 1);
+    }
+    return result;
+}
+
+function hasLikelyOcrLineInsertions(blocks, orientation, glyphSize) {
+    if (orientation !== "vertical" || !(glyphSize > 0)) return false;
+    const lines = collectComparableOcrLines(blocks, orientation);
+    const ratios = lines.filter((item) => item.entries.length >= 20
+        && item.entries.length <= OCR_INSERTION_PRUNE_MAX_LINE_LENGTH)
+        .map((item) => item.span / item.entries.length)
+        .sort((a, b) => a - b);
+    if (ratios.length < 2) return false;
+    const nominalPitch = ratios[Math.floor((ratios.length - 1) * OCR_LINE_PITCH_QUANTILE)];
+    if (!(nominalPitch >= glyphSize * 0.8 && nominalPitch <= glyphSize * 1.5)) return false;
+    return lines.some((item) => {
+        if (item.entries.length < 20
+            || item.entries.length > OCR_INSERTION_PRUNE_MAX_LINE_LENGTH) return false;
+        const excess = item.entries.length - Math.round(item.span / nominalPitch);
+        return excess >= 1 && excess <= 3;
+    });
+}
+
+/**
+ * 縦書きの長い本文列で、同じ物理文字から「らち」のように2文字を出すLSTM重複を除く。
+ * 語彙は使わず、(1) 列の幾何から求めた物理セル数、(2) 取得済み倍率候補の共通部分、
+ * (3) 候補ごとに余分な文字の位置が異なること、の3条件が揃う場合だけ削除する。
+ * 全候補が同じ文字列、置換で競合、短い列、追加文字の位置が同じ場合は変更しない。
+ * @returns {number} 除去したsymbol数
+ */
+function pruneOcrLineInsertions(baseBlocks, otherBlocksList, orientation, glyphSize) {
+    if (orientation !== "vertical" || !(glyphSize > 0)) return 0;
+    const baseLines = collectComparableOcrLines(baseBlocks, orientation);
+    if (baseLines.length < 2) return 0;
+
+    const variants = [];
+    for (const blocks of otherBlocksList) {
+        const lines = collectComparableOcrLines(blocks, orientation);
+        if (lines.length !== baseLines.length) continue;
+        const geometryMatches = lines.every((item, index) => {
+            const base = baseLines[index];
+            const spanRatio = item.normalizedSpan / base.normalizedSpan;
+            return Math.abs(item.normalizedCross - base.normalizedCross) <= 0.08
+                && spanRatio >= 0.8 && spanRatio <= 1.25;
+        });
+        if (geometryMatches) variants.push(lines);
+    }
+    if (variants.length < 2) return 0;
+
+    // 正しい列では span / 文字数 がほぼ一定＝そのページの1文字ぶんの送り。
+    // 基準ピッチは中央値で採る（詳細は OCR_LINE_PITCH_QUANTILE のコメント）。
+    const ratios = baseLines
+        .filter((item) => item.entries.length >= 20
+            && item.entries.length <= OCR_INSERTION_PRUNE_MAX_LINE_LENGTH)
+        .map((item) => item.span / item.entries.length)
+        .sort((a, b) => a - b);
+    if (ratios.length < 2) return 0;
+    const nominalPitch = ratios[Math.floor((ratios.length - 1) * OCR_LINE_PITCH_QUANTILE)];
+    if (!(nominalPitch >= glyphSize * 0.8 && nominalPitch <= glyphSize * 1.5)) return 0;
+
+    const removals = new Set();
+    let candidateBudget = OCR_INSERTION_PRUNE_MAX_TOTAL_CANDIDATES;
+    baseLines.forEach((baseLine, lineIndex) => {
+        const baseLength = baseLine.entries.length;
+        if (baseLength < 20 || baseLength > OCR_INSERTION_PRUNE_MAX_LINE_LENGTH) return;
+        const physicalCount = Math.round(baseLine.span / nominalPitch);
+        const deleteCount = baseLength - physicalCount;
+        if (deleteCount < 1 || deleteCount > 3) return;
+
+        const variantTexts = variants.map((lines) =>
+            lines[lineIndex].entries.map((entry) => entry.symbol.text));
+        const usable = variantTexts.filter((chars) =>
+            chars.length >= physicalCount && chars.length <= physicalCount + 3);
+        if (usable.length < 2) return;
+        // 呼び出し全体の候補総数を予算内に収める（入力順に消費するため決定的）。
+        const candidateCount = countDeletedOcrSequenceCandidates(baseLength, deleteCount);
+        if (candidateCount > candidateBudget) return;
+        candidateBudget -= candidateCount;
+
+        let best = null;
+        let bestSupport = -1;
+        let bestSupportCount = 0;
+        forEachDeletedOcrSequence(baseLine.entries, deleteCount, (candidate) => {
+            const target = [...candidate.text];
+            const variantSignatures = new Set();
+            let exactSupport = 0;
+            let support = 0;
+            for (const chars of usable) {
+                const skipped = findSubsequenceSkips(chars, target);
+                if (!skipped || skipped.length !== chars.length - physicalCount) continue;
+                support++;
+                if (skipped.length) variantSignatures.add(describeOcrSkips(chars, skipped));
+                else exactSupport++;
+            }
+            const minimumSupport = Math.max(2, Math.ceil(usable.length * 0.6));
+            const baseSignature = describeOcrSkips(
+                baseLine.entries, candidate.deletedIndices);
+            // 物理文字数に加え、(a) 加工候補が正しい長さで完全一致する、または
+            // (b) 加工によって余分文字の位置が原寸から移動する、のどちらかを必須にする。
+            // 同じ誤挿入を繰り返す1候補だけではbaseの実在文字を削除しない。
+            const hasMovedInsertion = [...variantSignatures]
+                .some((signature) => signature !== baseSignature);
+            // 位置が原寸から動いた証拠を必須にする。2種類の署名があっても、どちらも
+            // 原寸と同じ位置を指しているだけなら「実在する文字」の可能性が残るため
+            // 削除しない（実測: 正しい「て」の誤削除1件が解消、他は不変）。
+            const independentPositionEvidence = hasMovedInsertion
+                && (variantSignatures.size >= 2 || exactSupport > 0);
+            if (support < minimumSupport || !independentPositionEvidence) return;
+            const deletedConfidence = candidate.deletedIndices.reduce((sum, index) => {
+                const confidence = Number(baseLine.entries[index].symbol.confidence);
+                return sum + (Number.isFinite(confidence) ? confidence : 100);
+            }, 0) / candidate.deletedIndices.length;
+            if (support > bestSupport) {
+                best = { ...candidate, support, deletedConfidence };
+                bestSupport = support;
+                bestSupportCount = 1;
+            } else if (support === bestSupport) {
+                bestSupportCount++;
+                if (deletedConfidence < best.deletedConfidence) {
+                    best = { ...candidate, support, deletedConfidence };
+                }
+            }
+        });
+        if (!best) return;
+        // 支持数が同じ別文字列をconfidenceだけで決めない。曖昧なら無変更。
+        if (bestSupportCount > 1) return;
+        for (const index of best.deletedIndices) removals.add(baseLine.entries[index]);
+    });
+
+    if (!removals.size) return 0;
+    const touchedWords = new Set();
+    for (const entry of removals) touchedWords.add(entry.word);
+    for (const word of touchedWords) {
+        word.symbols = (word.symbols || []).filter((symbol) => {
+            for (const entry of removals) {
+                if (entry.word === word && entry.symbol === symbol) return false;
+            }
+            return true;
+        });
+    }
+    rebuildOcrWordTexts(touchedWords);
+    return removals.size;
+}
+
+// ===== 短い縦書き列の独立モデル再確認 =====
+
+const OCR_RESCAN_HAN_RE = /^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]$/u;
+
+/**
+ * 短い縦書き列から、横書きモデルで再確認する漢字セルを集める。
+ * 語彙は使わず、低確信度の列・本文相当の太さ・画像端で欠けていないことだけを見る。
+ */
+function collectVerticalGlyphRescanTargets(
+    blocks, blockScale, sourceWidth, sourceHeight, edgeInsets = null) {
+    if (!(blockScale > 0) || !(sourceWidth > 0) || !(sourceHeight > 0)) return [];
+    // 認識入力に余白が付いている場合、元の画像端は余白の内側（edgeInsets）にある。
+    // 端で欠けたセルの除外はその内側の矩形を基準に行う（余白の有無で対象が変わらない）。
+    // 数値なら4辺同じ幅、{left, top, right, bottom} なら辺ごとの幅。省略時は canvas の端。
+    const insetOf = (value) => (Number.isFinite(value) && value > 0 ? value : 0);
+    const uniform = typeof edgeInsets === "number" ? insetOf(edgeInsets) : null;
+    const innerLeft = uniform ?? insetOf(edgeInsets?.left);
+    const innerTop = uniform ?? insetOf(edgeInsets?.top);
+    const innerRight = sourceWidth - (uniform ?? insetOf(edgeInsets?.right));
+    const innerBottom = sourceHeight - (uniform ?? insetOf(edgeInsets?.bottom));
+    const lines = [];
+    forEachOcrLine(blocks, (line) => {
+        const entries = [];
+        for (const word of (line.words || [])) {
+            for (const symbol of (word.symbols || [])) entries.push({ word, symbol });
+        }
+        const width = line.bbox?.x1 - line.bbox?.x0;
+        const span = line.bbox?.y1 - line.bbox?.y0;
+        if (entries.length && width > 0 && span > 0) lines.push({ line, entries, width, span });
+    });
+    if (!lines.length) return [];
+    const widths = lines.map((item) => item.width).sort((a, b) => a - b);
+    const medianWidth = widths[Math.floor(widths.length / 2)];
+    const longPitches = lines.filter((item) => item.entries.length >= 20)
+        .map((item) => item.span / item.entries.length)
+        .sort((a, b) => a - b);
+    const nominalPitch = longPitches.length >= 2
+        ? longPitches[Math.floor((longPitches.length - 1) * OCR_LINE_PITCH_QUANTILE)]
+        : null;
+    const targets = [];
+    for (const item of lines) {
+        const length = item.entries.length;
+        const lineConfidence = Number(item.line.confidence);
+        if (length < 4 || length > 16 || !Number.isFinite(lineConfidence)
+            || lineConfidence >= 90) continue;
+        if (item.width < medianWidth * 0.6
+            || item.line.bbox.x0 <= innerLeft * blockScale
+            || item.line.bbox.x1 >= innerRight * blockScale) continue;
+        const pitch = item.span / length;
+        if (!(pitch > 0) || item.width > pitch * 2.2) continue;
+        const firstText = item.entries[0]?.symbol.text || "";
+        const lastText = item.entries[length - 1]?.symbol.text || "";
+        const startsWithPunctuation = /^[\p{P}]$/u.test(firstText);
+        const endsWithPunctuation = /^[\p{P}]$/u.test(lastText);
+        for (let index = 0; index < length; index++) {
+            const entry = item.entries[index];
+            const symbolConfidence = Number(entry.symbol.confidence);
+            const bbox = entry.symbol.bbox;
+            let symbolWidth = bbox?.x1 - bbox?.x0;
+            let symbolHeight = bbox?.y1 - bbox?.y0;
+            if (!OCR_RESCAN_HAN_RE.test(entry.symbol.text)
+                || !Number.isFinite(symbolConfidence)) continue;
+            let cellPitch = pitch;
+            let expectedCenterY = item.line.bbox.y0 + pitch * (index + 0.5);
+            let symbolCenterX;
+            let symbolCenterY;
+            if (symbolWidth > 0 && symbolHeight > 0
+                && symbolWidth <= pitch * 1.6 && symbolHeight <= pitch * 1.6) {
+                symbolCenterX = (bbox.x0 + bbox.x1) / 2;
+                symbolCenterY = (bbox.y0 + bbox.y1) / 2;
+                if (Math.abs(symbolCenterY - expectedCenterY) > pitch * 0.2) continue;
+            } else {
+                // jpn_vertは実画像でsymbol bboxを全て0幅にすることがある。その場合も
+                // 長い本文列から得た独立ピッチと短列の物理文字数が一致するときだけ、
+                // line bboxの本文側を基準に固定セルへフォールバックする。縦書きの末尾
+                // 句読点はセル下端までインクがなくline bboxが最大1セル弱短くなるため、
+                // その場合だけ不足幅を許容する。1文字挿入なら不足が1セル以上となり除外される。
+                const physicalSpan = nominalPitch > 0 ? item.span / nominalPitch : 0;
+                const minimumSpan = endsWithPunctuation && !startsWithPunctuation
+                    ? length - 0.95 : length - 0.35;
+                if (!(nominalPitch > 0)
+                    || physicalSpan <= minimumSpan || physicalSpan > length + 0.35
+                    || pitch / nominalPitch < 0.85 || pitch / nominalPitch > 1.15) continue;
+                cellPitch = nominalPitch;
+                expectedCenterY = item.line.bbox.y0 + cellPitch * (index + 0.5);
+                symbolWidth = cellPitch;
+                symbolHeight = cellPitch;
+                symbolCenterX = item.line.bbox.x0 + cellPitch * 0.55;
+                symbolCenterY = expectedCenterY;
+            }
+            // 隣セルの画素を証拠へ混ぜない。symbol中心を基準に物理1セルだけ切り出し、
+            // 横幅は句読点で広がるline bboxではなく標準ピッチから決める。
+            const scaledWidth = Math.max(cellPitch * 1.6, symbolWidth * 1.25);
+            const scaledHeight = cellPitch;
+            const scaledX = symbolCenterX - scaledWidth / 2;
+            const scaledY = symbolCenterY - scaledHeight / 2;
+            const x = scaledX / blockScale;
+            const y = scaledY / blockScale;
+            const width = scaledWidth / blockScale;
+            const height = scaledHeight / blockScale;
+            // 画像端に達したセルは文字の一部が選択範囲外の可能性が高い。見えていない
+            // 画を推測で補わず、局所補正の対象から外す。
+            if (x < innerLeft || y < innerTop
+                || x + width > innerRight || y + height > innerBottom) continue;
+            targets.push({ ...entry, x, y, width, height, lineConfidence });
+        }
+    }
+    return targets.sort((a, b) => (a.lineConfidence - b.lineConfidence)
+        || (Number(a.symbol.confidence) - Number(b.symbol.confidence))).slice(0, 2);
+}
+
+/** 単一文字画像から得た意味文字が漢字1字だけの場合に限り返す。 */
+function extractSingleHanEvidence(blocks, canvasWidth = null, canvasHeight = null) {
+    const evidence = [];
+    let invalidContent = false;
+    forEachOcrLine(blocks, (line) => {
+        for (const word of (line.words || [])) {
+            for (const symbol of (word.symbols || [])) {
+                if (OCR_RESCAN_HAN_RE.test(symbol.text)) {
+                    evidence.push({
+                        text: symbol.text,
+                        confidence: Number(symbol.confidence),
+                        bbox: symbol.bbox
+                    });
+                } else if (!/^[\p{P}\s]+$/u.test(symbol.text || "")) {
+                    invalidContent = true;
+                }
+            }
+        }
+    });
+    if (invalidContent || evidence.length !== 1 || !Number.isFinite(evidence[0].confidence)) {
+        return null;
+    }
+    if (canvasWidth > 0 && canvasHeight > 0) {
+        const bbox = evidence[0].bbox;
+        const centerX = (bbox?.x0 + bbox?.x1) / 2;
+        const centerY = (bbox?.y0 + bbox?.y1) / 2;
+        if (!Number.isFinite(centerX) || !Number.isFinite(centerY)
+            || centerX < canvasWidth * 0.1 || centerX > canvasWidth * 0.9
+            || centerY < canvasHeight * 0.1 || centerY > canvasHeight * 0.9) return null;
+    }
+    return { text: evidence[0].text, confidence: evidence[0].confidence };
+}
+
+/**
+ * 縦横モデルのconfidenceは直接比較せず、局所画像3種の強一致だけで置換を決める。
+ */
+function selectVerticalGlyphRescanReplacement(baseSymbol, gray, binary, third = null) {
+    if (!baseSymbol || !gray || !binary || gray.text !== binary.text) return null;
+    if (!OCR_RESCAN_HAN_RE.test(gray.text) || gray.text === baseSymbol.text) return null;
+    const confidences = [gray.confidence, binary.confidence];
+    if (confidences.some((value) => !(value >= 85))) return null;
+    if ((confidences[0] + confidences[1]) / 2 < 88 || Math.max(...confidences) < 89) return null;
+    // 同じ横書きモデルの加工違いは相関するため、元文字confidenceにかかわらず
+    // 第三のgray倍率まで同じ字形を支持することを必須とする。
+    if (!third || third.text !== gray.text || third.confidence < 80) return null;
+    return gray.text;
 }
 
 // ===== 文字単位アンサンブル融合 =====
@@ -169,21 +558,41 @@ const OCR_FUSION_MIN_CONFIDENCE = 88;
 // 融合に使う拡大倍率（2倍は上の再認識で得た結果を再利用する）
 const OCR_FUSION_SCALES = [1.5, 2, 3];
 
-// 融合ゲート（18px）より大きい文字でも、辞書リランクだけは走らせる。そのときの
+// 融合ゲート（18px）より大きい文字でも画像証拠による一致判定を行う。そのときの
 // 変換先の文字サイズ（Tesseract LSTM の最適域 20-30px を狙う）。
-// 実測では一般的なWebページの文字は 22〜39px で、従来はどの補正も発火していなかった
-// （24枚中5枚のみ発火）。融合と違い辞書リランクは「非辞書語」かつ「2つ以上の倍率が
-// 同じ辞書語で一致」のときしか置換しないため、この領域でも安全側に働く
-// （実測: 26枚で改善6・悪化0）。
-const OCR_RERANK_TARGET_GLYPH_PX = [20, 24, 30];
+const OCR_CONSENSUS_TARGET_GLYPH_PX = [20, 24, 30];
+
+// 3つ以上の倍率候補のうち複数が同じ文字を支持したとき、全文のconfidenceではなく
+// 文字単位の支持数とconfidence差で採否を決める。表示80%の実画像では元寸が誤った
+// 「巳」(91)、倍率候補が「巳」(90)×1 / 正しい「己」(98)×2となり、全文confidenceは
+// 全候補89-90で判別不能だった。語彙を参照せず、この画素由来の差だけを利用する。
+const OCR_CONSENSUS_MIN_CONFIDENCE = 90;
+const OCR_CONSENSUS_CONFIDENCE_MARGIN = 3;
+
+// 強い多数一致のもう一つの成立条件（漢字限定）: 平均のマージンでは元寸の高い確信度
+// （96〜98）が壁になって届かないが、「同じ文字を支持する各票（新規倍率の gray 候補で、
+// 前後どちらかの文字が元寸と一致して位置が裏付けられたもの）が全て この値以上、かつ
+// 全て元寸の確信度以上、かつ次点の平均以上」なら採る。実測（2026-08-17、tools/ocr-e2e
+// 33入力・HEAD比）: 除→際（票98/98 vs 元寸98）・間→問（98/98 vs 98）・暴→虹（98/96 vs 96）
+// の3件を改善し悪化0、他30入力は出力バイト一致。候補が誤っている側の26件（同じ別字を
+// 2票以上が支持したが不採用）で発火するものはゼロ。94 にすると仮名の い→し(95,94) が
+// 漢字限定でなければ発火するため 95 とし、文字種は漢字に限る。
+const OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE = 95;
 
 // 拡大後の画素数の上限（巨大な選択範囲で時間とメモリを浪費しないための保護）
 const OCR_FUSION_MAX_AREA = 8400000;
+
+// 編集距離の表（n×m セル、1セル4バイト）の上限。融合が発火するのは文字が小さい
+// ＝文字数が多い入力なので、密な全面選択では数千文字同士の整列になり得る。
+// 3000×3000（36MB・9M反復）までは許し、それを超える極端な入力では整列せず
+// 融合を見送る（無変更＝安全側）。実文書の1回の選択は千数百文字程度に収まる。
+const OCR_ALIGN_MAX_CELLS = 9000000;
 
 // 2つのシンボル列を編集距離で整列し、[baseIndex, otherSymbol] の対応を返す
 function alignOcrSymbols(baseEntries, otherEntries) {
     const n = baseEntries.length;
     const m = otherEntries.length;
+    if (n === 0 || m === 0 || n * m > OCR_ALIGN_MAX_CELLS) return [];
     const dp = [];
     for (let i = 0; i <= n; i++) {
         dp.push(new Int32Array(m + 1));
@@ -209,7 +618,7 @@ function alignOcrSymbols(baseEntries, otherEntries) {
 
 /**
  * 各倍率の認識結果を base のシンボル列へ整列し、倍率ごとの対応を返す。
- * 融合と辞書リランクで同じ整列を行っていたため共通化する。
+ * 全会一致・多数一致・低確信度融合で同じ整列結果を使うため共通化する。
  * @param {{symbol: object, word: object}[]} baseEntries
  * @param {object[][]} otherBlocksList
  * @returns {[number, object][][]} 倍率ごとの [baseIndex, symbol] の並び
@@ -218,10 +627,20 @@ function alignOcrVariants(baseEntries, otherBlocksList) {
     const aligned = [];
     for (const otherBlocks of otherBlocksList) {
         const otherEntries = collectOcrSymbols(otherBlocks);
-        if (!otherEntries.length) continue;
-        aligned.push(alignOcrSymbols(baseEntries, otherEntries));
+        // 空認識も空の対応表として残す。候補を落とすと、後段の
+        // unanimousVariantCount（新規倍率と補充候補の境界）がずれてしまう。
+        aligned.push(otherEntries.length ? alignOcrSymbols(baseEntries, otherEntries) : []);
     }
     return aligned;
+}
+
+function classifyOcrSymbol(text) {
+    if (OCR_KANJI_ONE_RE.test(text)) return "kanji";
+    if (/^[ぁ-ゖ]$/.test(text)) return "hiragana";
+    if (/^[ァ-ヺー]$/.test(text)) return "katakana";
+    if (/^[A-Za-zＡ-Ｚａ-ｚ]$/.test(text)) return "latin";
+    if (/^[0-9０-９]$/.test(text)) return "digit";
+    return null;
 }
 
 // 複数倍率の認識結果で元寸の文字を精錬する。判断の根拠は2つ。
@@ -231,34 +650,67 @@ function alignOcrVariants(baseEntries, otherBlocksList) {
 //      濁点・半濁点の取り違えは読み上げで別語になるため影響が大きい）。
 //     独立した複数倍率が全会一致した事実そのものを根拠にする。
 //     実ページ24枚の実測で 改善13・悪化0。
-// (2) 低確信度の漢字: 確信度の合計が上回る漢字へ置き換える（従来からの機能）。
-// options.kanji / options.unanimous で対象を切り替える（既定は両方）。
+// (2) 強い多数一致: 3候補以上のうち複数が同じ文字を支持し、その平均confidenceが
+//     元文字と次点候補をマージン以上上回る場合に置き換える。前後どちらかの文字が
+//     baseと一致する候補だけを数え、編集距離整列の位置ずれを誤って票にしない。
+// (3) 低確信度の漢字: 確信度の合計が上回る漢字へ置き換える（従来からの機能）。
+// options.kanji / options.unanimous / options.consensus で対象を切り替える。
+// options.unanimousVariantCount は補充前の候補だけで全会一致を評価し、
+// options.consensusClasses / options.consensusIncludesBase は候補不足時の強い多数一致を
+// 文字種限定・元寸を含む票決へ切り替える（いずれも指定なしなら従来動作）。
 // 置換した文字数を返す（0 なら呼び出し側は元のテキストをそのまま使う）。
 function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
     const useKanji = options.kanji !== false;
     const useUnanimous = options.unanimous !== false;
+    const useConsensus = options.consensus !== false;
+    const consensusClasses = options.consensusClasses
+        ? new Set(options.consensusClasses) : null;
+    const unanimousVariantCount = Number.isInteger(options.unanimousVariantCount)
+        ? Math.max(0, options.unanimousVariantCount) : null;
+    const consensusIncludesBase = options.consensusIncludesBase === true;
     const isKanji = (t) => OCR_KANJI_ONE_RE.test(t);
     const baseEntries = collectOcrSymbols(baseBlocks);
     if (!baseEntries.length) return 0;
+    // 同じforEach内の先行置換を、隣の文字の位置アンカーや元寸票に使わない。
+    // 判定開始時の文字とconfidenceを固定し、各文字を独立に評価する。
+    const baseSnapshot = baseEntries.map((entry) => ({
+        text: entry.symbol.text,
+        confidence: Number(entry.symbol.confidence),
+        line: entry.line
+    }));
 
-    const candidates = new Map();
+    const variantMaps = [];
     for (const pairs of alignOcrVariants(baseEntries, otherBlocksList)) {
+        const map = new Map();
         for (const [index, symbol] of pairs) {
-            if (!candidates.has(index)) candidates.set(index, []);
-            candidates.get(index).push(symbol);
+            if (!map.has(index)) map.set(index, symbol);
         }
+        variantMaps.push(map);
     }
+
+    const hasStableNeighbor = (map, index) => {
+        const entry = baseSnapshot[index];
+        for (const offset of [-1, 1]) {
+            const neighbor = baseSnapshot[index + offset];
+            if (neighbor && neighbor.line === entry.line
+                && map.get(index + offset)?.text === neighbor.text) return true;
+        }
+        return false;
+    };
 
     const touchedWords = new Set();
     let replaced = 0;
     baseEntries.forEach((entry, index) => {
         const symbol = entry.symbol;
-        const alts = candidates.get(index) || [];
+        const alts = variantMaps.map((map) => map.get(index)).filter(Boolean);
 
         // (1) 全会一致による置換。確信度ではゲートしない（上のコメント参照）。
-        if (useUnanimous && alts.length >= 2) {
-            const first = alts[0].text;
-            if (first !== symbol.text && alts.every((a) => a.text === first)) {
+        const unanimousAlts = (unanimousVariantCount == null
+            ? variantMaps : variantMaps.slice(0, unanimousVariantCount))
+            .map((map) => map.get(index)).filter(Boolean);
+        if (useUnanimous && unanimousAlts.length >= 2) {
+            const first = unanimousAlts[0].text;
+            if (first !== symbol.text && unanimousAlts.every((a) => a.text === first)) {
                 symbol.text = first;
                 touchedWords.add(entry.word);
                 replaced++;
@@ -266,7 +718,74 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
             }
         }
 
-        // (2) 低確信度の漢字。同じ文字を出したバリアントの確信度を合計し、最大の文字を選ぶ。
+        // (2) 同じ種類の文字について、位置が前後の文字で裏付けられた倍率候補だけを投票する。
+        const consensusEvidenceCount = alts.length + (consensusIncludesBase ? 1 : 0);
+        if (useConsensus && consensusEvidenceCount >= 3) {
+            const original = baseSnapshot[index];
+            const baseClass = classifyOcrSymbol(original.text);
+            const votes = new Map();
+            if (baseClass && (!consensusClasses || consensusClasses.has(baseClass))) {
+                if (consensusIncludesBase) {
+                    const confidence = original.confidence;
+                    if (Number.isFinite(confidence)) {
+                        votes.set(original.text, {
+                            text: original.text,
+                            count: 1,
+                            total: confidence,
+                            primaryCount: 0,
+                            primaryMin: Infinity
+                        });
+                    }
+                }
+                variantMaps.forEach((map, variantIndex) => {
+                    const candidate = map.get(index);
+                    if (!candidate || classifyOcrSymbol(candidate.text) !== baseClass
+                        || !hasStableNeighbor(map, index)) return;
+                    const confidence = Number(candidate.confidence);
+                    if (!Number.isFinite(confidence)) return;
+                    const vote = votes.get(candidate.text)
+                        || { text: candidate.text, count: 0, total: 0, primaryCount: 0, primaryMin: Infinity };
+                    vote.count++;
+                    vote.total += confidence;
+                    // 「全票が元寸以上」の判定には、新規倍率の候補（補充候補より前）だけを数える。
+                    if (unanimousVariantCount == null || variantIndex < unanimousVariantCount) {
+                        vote.primaryCount++;
+                        vote.primaryMin = Math.min(vote.primaryMin, confidence);
+                    }
+                    votes.set(candidate.text, vote);
+                });
+            }
+            const ranked = [...votes.values()].map((vote) => ({
+                ...vote,
+                average: vote.total / vote.count
+            })).sort((a, b) => (b.count - a.count) || (b.average - a.average));
+            const top = ranked[0];
+            const runnerUp = ranked[1];
+            const baseConfidence = Number.isFinite(original.confidence)
+                ? original.confidence : 0;
+            const comparison = Math.max(baseConfidence, runnerUp?.average || 0);
+            // 「全票が元寸以上」（OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE のコメント参照）:
+            // 漢字限定、元寸の確信度が数値で得られていること、新規倍率の票が2件以上あり、
+            // その最小値が しきい値・元寸・次点平均 のすべて以上であること。
+            const allVotesAtLeastBase = !!top && baseClass === "kanji"
+                && Number.isFinite(original.confidence)
+                && top.primaryCount >= 2
+                && top.primaryMin >= OCR_CONSENSUS_EQUAL_MIN_CONFIDENCE
+                && top.primaryMin >= baseConfidence
+                && (!runnerUp || top.primaryMin >= runnerUp.average);
+            if (top && top.text !== original.text && top.count >= 2
+                && (!runnerUp || top.count > runnerUp.count)
+                && top.average >= OCR_CONSENSUS_MIN_CONFIDENCE
+                && (top.average >= comparison + OCR_CONSENSUS_CONFIDENCE_MARGIN
+                    || allVotesAtLeastBase)) {
+                symbol.text = top.text;
+                touchedWords.add(entry.word);
+                replaced++;
+                return;
+            }
+        }
+
+        // (3) 低確信度の漢字。同じ文字を出したバリアントの確信度を合計し、最大の文字を選ぶ。
         if (!useKanji || symbol.confidence >= OCR_FUSION_MIN_CONFIDENCE || !isKanji(symbol.text)) return;
         const scores = new Map();
         const add = (text, confidence) => scores.set(text, (scores.get(text) || 0) + confidence);
@@ -289,82 +808,183 @@ function fuseOcrSymbols(baseBlocks, otherBlocksList, options = {}) {
     return replaced;
 }
 
-// 語彙辞書によるリランキング。
-// 融合の残存誤りは「非語」になることが多い（実測: 條恨は非語／悔恨は語）。しかも誤字が
-// 高確信度（實測: 誤り「條」94）だと融合の確信度ゲートに掛からず救えない。そこで、
-// 「元寸で非辞書語の漢字連続」を「複数の拡大版が揃って出す辞書語」へ置き換える。
-// Tesseract の語分割は縦書きで1字ずつに割れることがある（実測）ため語境界には依存せず、
-// 漢字連続の2-4字窓を辞書と照合する。安全のため:
-// - base が既に辞書語なら触れない（正解の保護）
-// - 各字が漢字で、2つ以上の拡大版が同一の辞書語で一致したときだけ置換（偶発誤りの排除）
-// - 長い窓・支持の多い順に貪欲適用し、文字の重複置換を避ける
-// 読みを捏造せず OCR 自身が出した候補から選ぶだけなので回帰リスクが低い
-// （実測: 條恨→悔恨を修正し、ルビなしコーパスで悪化ゼロ・複数ケースでCER改善）。
-function rerankOcrByDictionary(baseBlocks, otherBlocksList) {
-    if (!ocrWordSet || !ocrWordSet.size) return 0;
-    const isKanji = (t) => OCR_KANJI_ONE_RE.test(t);
+// ===== 整列一致による余剰文字の削除 =====
+
+// 削除してよい base symbol の確信度の上限。
+// 試作の実測（明朝合成コーパス6件・出荷経路へ注入）: 上限なし = 誤り 37→36
+// （改善2・悪化1）／95未満に限定 = 37→36（改善1・悪化0）。
+// 本採用時の実測（2026-08-16、tools/ocr-e2e 33入力: 既存9＋AAあり明朝・ゴシック24、
+// HEAD比・予算60秒固定・逐次）: 誤り 128→123、改善5・悪化0。削除された文字は
+// ぎ・は・人・和・ぬ の余剰挿入のみで、正しい文字の削除は0件。
+// 確信度の高い文字は実在する可能性が高く、候補側が整列の都合で対応を持たないだけの
+// ことがあるため、明らかに自信のない文字だけを削除対象にする。
+const OCR_PRUNE_INSERTION_MAX_CONFIDENCE = 95;
+
+// 確信度の上限を外してよい「全欠落の証言」の数。候補3件が独立に同じ証言をする場合に限る。
+const OCR_PRUNE_INSERTION_STRONG_ANCHORS = 3;
+
+/**
+ * 既存の整列（alignOcrVariants / alignOcrSymbols）の結果だけを使い、
+ * base にしか存在しない余剰文字を削除する。追加のOCRは行わない。
+ * 幾何・ピッチを使わないため縦書き・横書きの両方で使える
+ * （列の物理長を根拠にする pruneOcrLineInsertions は縦書き専用のまま）。
+ *
+ * 削除するのは次をすべて満たす symbol だけ:
+ *  - 同じ行に前後の symbol がある（行頭・行末は対象外）
+ *  - 「前後の symbol が同一文字として対応付いた候補」が minVariants 件以上ある
+ *  - その候補すべてが「その位置に対応する文字を持たない」＝全会一致で余剰と言う
+ *  - base symbol の確信度が maxConfidence 未満（確信度が取れない文字は削除しない）
+ *
+ * 判定は開始時のスナップショットに対して行うため決定的で、条件が成立しなければ
+ * blocks を一切変更しない（例外時も無変更）。symbol の同一性は後段（局所再確認の
+ * 置換適用）が参照するため、blocks は複製せずその場から余剰 symbol だけを取り除き、
+ * word.text を組み直す。呼び出し側は戻り値が正なら buildTextFromBlocks で組み直す。
+ *
+ * @param {object[]} baseBlocks 変更対象（採用中の認識結果）
+ * @param {object[][]} otherBlocksList 比較候補の blocks
+ * @param {{minVariants?: number, maxConfidence?: number}} [options]
+ * @returns {number} 削除した symbol 数（0 なら呼び出し側は無変更）
+ */
+function pruneOcrConsensusInsertions(baseBlocks, otherBlocksList, options = {}) {
+    const minVariants = Number.isInteger(options.minVariants)
+        ? Math.max(2, options.minVariants) : 2;
+    const maxConfidence = Number.isFinite(options.maxConfidence)
+        ? options.maxConfidence : OCR_PRUNE_INSERTION_MAX_CONFIDENCE;
+    let removals;
+    try {
+        // 候補が2件未満なら何もしない（1候補の欠落を根拠に実在文字を消さない）。
+        if (!otherBlocksList || otherBlocksList.length < minVariants) return 0;
+        const baseEntries = collectOcrSymbols(baseBlocks);
+        if (baseEntries.length < 3) return 0;
+        const maps = [];
+        for (const pairs of alignOcrVariants(baseEntries, otherBlocksList)) {
+            // 空認識（整列できない候補）は「その位置に文字なし」の証拠に数えない。
+            if (!pairs.length) continue;
+            const map = new Map();
+            for (const [index, symbol] of pairs) {
+                if (!map.has(index)) map.set(index, symbol);
+            }
+            maps.push(map);
+        }
+        if (maps.length < minVariants) return 0;
+        // 先行削除の影響を後続判定へ持ち込まないよう、開始時の文字と行を固定する。
+        const snapshot = baseEntries.map((entry) => ({
+            text: entry.symbol.text, line: entry.line
+        }));
+        removals = [];
+        baseEntries.forEach((entry, index) => {
+            const current = snapshot[index];
+            const previous = snapshot[index - 1];
+            const next = snapshot[index + 1];
+            if (!previous || !next
+                || previous.line !== current.line || next.line !== current.line) return;
+            let anchored = 0;
+            let missing = 0;
+            for (const map of maps) {
+                // 両隣が同一文字として対応付いた候補だけが、この位置について証言できる。
+                if (map.get(index - 1)?.text !== previous.text
+                    || map.get(index + 1)?.text !== next.text) continue;
+                anchored++;
+                if (!map.has(index)) missing++;
+            }
+            if (anchored < minVariants || missing !== anchored) return;
+            // 確信度が数値で得られない文字は削除しない（安全側）。
+            const confidence = entry.symbol.confidence;
+            if (typeof confidence !== "number" || !Number.isFinite(confidence)) return;
+            // 独立した候補が3件以上そろって「両隣は同じ、この位置には文字が無い」と
+            // 証言する場合だけ、確信度の上限を外す。LSTM は重複出力した文字にも高い
+            // 確信度を付けることがあり、上限95では「ら」「ぬ」等の余剰が残っていた。
+            // 実測（2026-08-17、33入力）: 123→121（改善2・悪化0）。
+            if (anchored < OCR_PRUNE_INSERTION_STRONG_ANCHORS && confidence >= maxConfidence) return;
+            removals.push({ entry, index });
+        });
+    } catch (error) {
+        // 整列・走査の失敗で認識結果を壊さない（安全側＝無変更）。
+        console.warn("OCR: 一致による余剰文字の削除に失敗:", error?.message || error);
+        return 0;
+    }
+    if (!removals.length) return 0;
+
+    const removedSymbols = new Set();
+    const touchedWords = new Set();
+    for (const removal of removals) {
+        removedSymbols.add(removal.entry.symbol);
+        touchedWords.add(removal.entry.word);
+    }
+    for (const word of touchedWords) {
+        word.symbols = (word.symbols || []).filter((symbol) => !removedSymbols.has(symbol));
+    }
+    rebuildOcrWordTexts(touchedWords);
+    // 削除した文字と base 内の位置を残す（既定では表示されない verbose レベル）。
+    console.debug("OCR: 一致により余剰文字を削除:", removals.slice(0, 20)
+        .map((removal) => `${removal.entry.symbol.text}@${removal.index}`).join(" "),
+    removals.length > 20 ? `ほか${removals.length - 20}件` : "");
+    return removals.length;
+}
+
+// 二値化版を全文採用した後、同じ位置の漢字についてだけ元寸grayと2倍grayを照合する。
+// 二つのgrayが同じ文字を二値化版以上のconfidenceで支持する場合、または元寸grayが
+// 二つの加工結果をマージン以上上回る場合だけ元寸文字を復元する。単語辞書は使わず、
+// 仮名・句読点・行分割・挿入欠落を含む二値化版のそれ以外の改善は変更しない。
+function protectOcrSymbolsFromWholeSwap(baseBlocks, referenceBlocks, corroboratingBlocks) {
     const baseEntries = collectOcrSymbols(baseBlocks);
     if (!baseEntries.length) return 0;
 
-    // 各拡大版について base シンボルへの対応表（baseIndex→文字）を作る
-    const variantMaps = [];
-    for (const pairs of alignOcrVariants(baseEntries, otherBlocksList)) {
+    const aligned = alignOcrVariants(baseEntries, [referenceBlocks, corroboratingBlocks]);
+    if (aligned.length !== 2 || !aligned[0].length || !aligned[1].length) return 0;
+
+    const maps = aligned.map((pairs) => {
         const map = new Map();
         for (const [index, symbol] of pairs) {
-            if (!map.has(index)) map.set(index, symbol.text);
+            if (!map.has(index)) map.set(index, symbol);
         }
-        variantMaps.push(map);
-    }
-    if (!variantMaps.length) return 0;
+        return map;
+    });
+    const [referenceMap, corroboratingMap] = maps;
+    const snapshot = baseEntries.map((entry) => ({ text: entry.symbol.text, line: entry.line }));
+    const hasStableNeighbor = (map, index) => {
+        const entry = snapshot[index];
+        for (const offset of [-1, 1]) {
+            const neighbor = snapshot[index + offset];
+            if (neighbor && neighbor.line === entry.line
+                && map.get(index + offset)?.text === neighbor.text) return true;
+        }
+        return false;
+    };
 
-    const kanji = baseEntries.map((e) => isKanji(e.symbol.text));
-    const candidates = [];
-    let i = 0;
-    while (i < baseEntries.length) {
-        if (!kanji[i]) { i++; continue; }
-        let j = i;
-        while (j < baseEntries.length && kanji[j]) j++;
-        // 漢字連続 [i, j) の中で 4→2字の窓を評価
-        for (let len = Math.min(4, j - i); len >= 2; len--) {
-            for (let start = i; start + len <= j; start++) {
-                const baseStr = baseEntries.slice(start, start + len).map((e) => e.symbol.text).join("");
-                if (ocrWordSet.has(baseStr)) continue; // 既に辞書語なら保護
-                const votes = new Map();
-                for (const map of variantMaps) {
-                    let str = "";
-                    let ok = true;
-                    for (let k = 0; k < len; k++) {
-                        const t = map.get(start + k);
-                        if (!t || t.length !== 1 || !isKanji(t)) { ok = false; break; }
-                        str += t;
-                    }
-                    if (ok) votes.set(str, (votes.get(str) || 0) + 1);
-                }
-                for (const [str, support] of votes) {
-                    if (str !== baseStr && support >= 2 && ocrWordSet.has(str)) {
-                        candidates.push({ start, len, str, support });
-                    }
-                }
-            }
-        }
-        i = j;
-    }
-    // 長い窓・支持の多い順に貪欲適用（文字の重複を避ける）
-    candidates.sort((a, b) => (b.len - a.len) || (b.support - a.support));
-    const used = new Uint8Array(baseEntries.length);
     const touchedWords = new Set();
     let replaced = 0;
-    for (const cand of candidates) {
-        let free = true;
-        for (let k = 0; k < cand.len; k++) if (used[cand.start + k]) { free = false; break; }
-        if (!free) continue;
-        for (let k = 0; k < cand.len; k++) {
-            baseEntries[cand.start + k].symbol.text = cand.str[k];
-            used[cand.start + k] = 1;
-            touchedWords.add(baseEntries[cand.start + k].word);
+    baseEntries.forEach((entry, index) => {
+        const proposed = entry.symbol;
+        const reference = referenceMap.get(index);
+        const corroborating = corroboratingMap.get(index);
+        if (!reference || !corroborating || reference.text === proposed.text
+            || classifyOcrSymbol(proposed.text) !== "kanji"
+            || classifyOcrSymbol(reference.text) !== "kanji"
+            || !hasStableNeighbor(referenceMap, index)
+            || !hasStableNeighbor(corroboratingMap, index)) return;
+
+        const proposedConfidence = Number(proposed.confidence);
+        const referenceConfidence = Number(reference.confidence);
+        const corroboratingConfidence = Number(corroborating.confidence);
+        if (![proposedConfidence, referenceConfidence, corroboratingConfidence].every(Number.isFinite)) return;
+
+        let shouldRestore = false;
+        if (corroborating.text === reference.text) {
+            shouldRestore = (referenceConfidence + corroboratingConfidence) / 2
+                >= proposedConfidence;
+        } else if (corroborating.text === proposed.text) {
+            const processedAverage = (proposedConfidence + corroboratingConfidence) / 2;
+            shouldRestore = referenceConfidence
+                >= processedAverage + OCR_CONSENSUS_CONFIDENCE_MARGIN;
         }
+        if (!shouldRestore) return;
+
+        proposed.text = reference.text;
+        touchedWords.add(entry.word);
         replaced++;
-    }
+    });
+
     rebuildOcrWordTexts(touchedWords);
     return replaced;
 }

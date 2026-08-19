@@ -25,6 +25,24 @@
 // だけの場合に誤って打ち切らないようにする。
 const OCR_STALL_TIMEOUT_MS = 90000;
 
+// ページ内アイコンのツールチップ・支援技術向けの説明。
+const INDICATOR_DEFAULT_TITLE = "Web Reader for VOICEVOX（左クリック: 読み上げ開始/停止、右クリック: 画面OCR読み上げ）";
+
+// 自前UI（インジケーター・OCRオーバーレイ・更新案内）の Shadow DOM ホストを作る。
+// ホスト要素自体は通常フローの箱としてページのレイアウトに参加してしまう
+// （body が flex/grid の場合に gap 1つ分ずれる、body > :last-child 等のセレクタに
+// 掛かる）ため、ページに影響しない 0×0 の絶対配置にし、ページから継承する
+// スタイル（縦書き・フォント等）も遮断する。中身は各自 position: fixed で置く。
+// position は fixed にしない: fixed は z-index auto でもスタッキングコンテキストを
+// 作るため、shadow 内の最前面 z-index がホスト内でしか効かなくなり、ページの固定
+// ヘッダー等の下に潜る。absolute（z-index auto）はコンテキストを作らない。
+function createVvRadioUiHost(id) {
+    const host = document.createElement("div");
+    host.id = id;
+    host.style.cssText = "all: initial; position: absolute; top: 0; left: 0; width: 0; height: 0;";
+    return host;
+}
+
 class VVRadioReader {
     constructor() {
         this.active = true;
@@ -32,10 +50,15 @@ class VVRadioReader {
         this.indicator = null;
         // OCRの進捗途絶を検知する見張りタイマー（armOcrStallWatchdog で設定）
         this.ocrStallWatchdog = null;
+        // エラートースト等の自動消去タイマー（scheduleOcrToastDismiss で設定）
+        this.ocrToastDismissTimer = null;
         // 登録したリスナー（deactivate でまとめて解除する）
         this.storageListeners = [];
         this.keyboardShortcutListener = null;
         this.messageListener = null;
+        this.pageShowListener = null;
+        // OCR範囲選択オーバーレイへフォーカスを移す前にフォーカスを持っていた要素
+        this.ocrPrevFocus = null;
         // 非同期のDOM抽出結果が、後から開始した範囲選択を上書きしないための世代番号。
         this.regionReadGeneration = 0;
         // DOM抽出が重なってもインジケーターの visibility を正しく復元するための参照数。
@@ -58,6 +81,21 @@ class VVRadioReader {
         }
         this.setupMessageListener();
         this.setupKeyboardShortcutFallback();
+        this.setupPageShowReset();
+    }
+
+    // 読み上げ中にページを離れると background が再生を止めるが、離れたページには
+    // 通知されない。bfcache から「戻る」で復帰すると「読み上げ中」の表示と
+    // isPlaying がそのまま蘇り、最初のクリックが停止扱いで空振りするため、
+    // 復帰時に待機状態へ戻す（実際の再生は遷移時に必ず止まっている）。
+    setupPageShowReset() {
+        this.pageShowListener = (event) => {
+            if (!this.active || !event.persisted) return;
+            this.isPlaying = false;
+            this.updateUIState('idle');
+            this.removeOcrToast();
+        };
+        window.addEventListener("pageshow", this.pageShowListener);
     }
 
     // storage の変更リスナーを登録し、deactivate で確実に解除できるよう控えておく。
@@ -94,6 +132,11 @@ class VVRadioReader {
             try { chrome.runtime.onMessage.removeListener(this.messageListener); } catch (e) { /* 無効化済み */ }
             this.messageListener = null;
         }
+        if (this.pageShowListener) {
+            window.removeEventListener("pageshow", this.pageShowListener);
+            this.pageShowListener = null;
+        }
+        this.clearOcrToastDismiss();
         // OCR選択オーバーレイの window リスナーと、OCRトースト/進捗ガードタイマーも解放する。
         // host を消すだけでは window に張った mousemove/mouseup/keydown と setTimeout が
         // 取り残され、detached ノードを参照し続けてリークする（OCR選択中の再注入で発生）。
@@ -166,7 +209,9 @@ class VVRadioReader {
         el.classList.remove('image', 'text');
         el.style.backgroundImage = '';
         el.textContent = '';
-        el.removeAttribute('title');
+        // 既定の円でも、ホバーで何のアイコンか分かるようにしておく（初回利用者向け）。
+        el.title = INDICATOR_DEFAULT_TITLE;
+        el.setAttribute("aria-label", INDICATOR_DEFAULT_TITLE);
 
         const style = ['dot', 'app', 'character', 'custom'].includes(res.iconStyle) ? res.iconStyle : 'dot';
         const safeRasterDataUrl = (url) => typeof url === 'string'
@@ -181,7 +226,6 @@ class VVRadioReader {
             try {
                 if (!chrome.runtime?.id) return;
                 asImage(chrome.runtime.getURL('images/icon128.png'));
-                el.title = 'Web Reader for VOICEVOX';
             } catch (error) {
                 // 更新直後の古いcontent scriptでは既定の円へフォールバックする。
             }
@@ -201,7 +245,8 @@ class VVRadioReader {
             const character = res.vv_character_icon;
             const name = typeof character?.name === 'string' ? character.name.trim().slice(0, 100) : '';
             if (!name) return;
-            el.title = name;
+            el.title = `${name} — ${INDICATOR_DEFAULT_TITLE}`;
+            el.setAttribute("aria-label", el.title);
             if (safeRasterDataUrl(character.dataUrl)) {
                 asImage(character.dataUrl);
             } else {
@@ -218,8 +263,7 @@ class VVRadioReader {
         const stale = document.getElementById("vvradio-host");
         if (stale) stale.remove();
 
-        const host = document.createElement("div");
-        host.id = "vvradio-host";
+        const host = createVvRadioUiHost("vvradio-host");
         const parent = document.body || document.documentElement;
         if (!parent || typeof host.attachShadow !== "function") {
             this.indicator = null;
@@ -233,6 +277,11 @@ class VVRadioReader {
 
         this.indicator = document.createElement("div");
         this.indicator.id = "vvradio-indicator";
+        // 支援技術向けに役割と説明を付ける（tabindex は付けず、全ページのタブ順に
+        // 余分な停止点を増やさない。キーボード操作はショートカットで行える）。
+        this.indicator.setAttribute("role", "button");
+        this.indicator.setAttribute("aria-label", INDICATOR_DEFAULT_TITLE);
+        this.indicator.title = INDICATOR_DEFAULT_TITLE;
 
         const isDragging = this.enableIndicatorDrag();
 
@@ -282,7 +331,7 @@ class VVRadioReader {
         style.textContent = `
             #vvradio-indicator {
                 position: fixed; bottom: 20px; right: 20px; width: 16px; height: 16px;
-                background-color: #3498db; border-radius: 50%; z-index: 999999;
+                background-color: #3498db; border-radius: 50%; z-index: 2147483647;
                 opacity: 0.4; transition: opacity 0.3s ease, transform 0.2s ease, box-shadow 0.3s ease;
                 cursor: grab; display: flex; align-items: center; justify-content: center;
                 box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
@@ -367,6 +416,7 @@ class VVRadioReader {
             isDragging = false;
             document.removeEventListener("mousemove", onMouseMove);
             document.removeEventListener("mouseup", onMouseUp);
+            window.removeEventListener("blur", onMouseUp);
 
             // 移動した場合、その位置を永続化（次回ロード時に復元するため）
             if (dragMoved) {
@@ -405,6 +455,9 @@ class VVRadioReader {
             // ドキュメント全体でマウスイベントを捕捉（高速にドラッグしても見失わないため）
             document.addEventListener("mousemove", onMouseMove);
             document.addEventListener("mouseup", onMouseUp);
+            // ドラッグ中にウィンドウが非アクティブになる（Alt+Tab 等）と mouseup が
+            // 届かず、アイコンがカーソルに貼り付いたままになるため、ここでも終了する。
+            window.addEventListener("blur", onMouseUp);
         });
 
         return () => dragMoved;
@@ -511,7 +564,15 @@ class VVRadioReader {
         if (text) {
             this.speakText(text);
         } else {
+            // 何も選ばずに実行したとき、従来はアイコンの色が3秒変わるだけだった。
+            // ショートカット（Alt+Shift+U）ではアイコンを見ていないので「押しても何も
+            // 起きない」ように見える。記号だけを選んだ場合は背景から
+            // 「読み上げられる文字がありません」が返ってトーストが出るので、案内の有無をそろえる。
             this.updateUIState('error');
+            if (this.isTopFrame) {
+                this.showOcrToast("読み上げるテキストを選択してください。");
+                this.scheduleOcrToastDismiss(4000);
+            }
         }
     }
 
@@ -521,7 +582,10 @@ class VVRadioReader {
     // 実際にフォーカスを持つフレームだけが読み上げを担当することで二重読み上げを防ぐ。
     shouldHandleToggleReading() {
         if (!document.hasFocus()) return false;
-        const active = document.activeElement;
+        // Shadow DOM 内の iframe にフォーカスがある場合、document.activeElement は
+        // ホスト要素を返す（retargeting）ため、shadow root をたどって実際の要素を見る。
+        let active = document.activeElement;
+        while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
         if (active && (active.tagName === "IFRAME" || active.tagName === "FRAME")) {
             return false;
         }
@@ -548,10 +612,14 @@ class VVRadioReader {
                     sendResponse({ success: true });
                     break;
                 case "OCR_PROGRESS":
+                    // トーストと見張りタイマーはトップフレームだけが持つ（全フレームへ
+                    // 配信されるため、サブフレームで無駄なタイマーを張り直さない）
+                    if (!this.isTopFrame) break;
                     this.updateOcrToast(`文字認識中... ${Math.round((request.progress || 0) * 100)}%`);
                     this.armOcrStallWatchdog();
                     break;
                 case "OCR_STATUS":
+                    if (!this.isTopFrame) break;
                     this.handleOcrStatus(request);
                     break;
                 case "TOGGLE_READING":
@@ -606,8 +674,7 @@ class VVRadioReader {
     showUpdateNoticeModal() {
         if (document.getElementById("vvradio-update-notice-host")) return;
 
-        const host = document.createElement("div");
-        host.id = "vvradio-update-notice-host";
+        const host = createVvRadioUiHost("vvradio-update-notice-host");
         const parent = document.body || document.documentElement;
         if (!parent || typeof host.attachShadow !== "function") return;
         parent.appendChild(host);
@@ -760,9 +827,15 @@ class VVRadioReader {
         // 旧インスタンスが残したオーバーレイがあれば除去する（再注入時の保険）
         const stale = document.getElementById("vvradio-ocr-host");
         if (stale) stale.remove();
+        // 更新案内カードが出ていれば隠す。画面右下に固定表示されるため、選択範囲に
+        // 入るとその文言までページ内テキスト抽出・キャプチャOCRで読み上げられてしまう。
+        // 一回限りの案内なので消さずに隠し、選択の取り消し・読み上げ開始・OCR終了で戻す。
+        this.setUpdateNoticeHidden(true);
+        // オーバーレイへフォーカスを移す前の要素を控え、除去時に戻す
+        // （入力中の欄からフォーカスを奪ったままにしない）。
+        this.ocrPrevFocus = document.activeElement;
 
-        const host = document.createElement("div");
-        host.id = "vvradio-ocr-host";
+        const host = createVvRadioUiHost("vvradio-ocr-host");
         const parent = document.body || document.documentElement;
         if (!parent || typeof host.attachShadow !== "function") return;
         parent.appendChild(host);
@@ -772,7 +845,7 @@ class VVRadioReader {
         style.textContent = `
             #vvradio-ocr-overlay {
                 position: fixed; inset: 0; z-index: 2147483647;
-                cursor: crosshair; user-select: none;
+                cursor: crosshair; user-select: none; outline: none;
                 background: rgba(29, 28, 29, 0.3);
             }
             #vvradio-ocr-overlay.dragging { background: transparent; }
@@ -840,7 +913,10 @@ class VVRadioReader {
             const rect = currentRect(e);
             this.removeOcrOverlay();
             // 微小ドラッグ（クリック）はキャンセル扱い
-            if (rect.width < 12 || rect.height < 12) return;
+            if (rect.width < 12 || rect.height < 12) {
+                this.setUpdateNoticeHidden(false);
+                return;
+            }
             void this.startRegionReading(rect);
         };
 
@@ -849,6 +925,7 @@ class VVRadioReader {
                 e.preventDefault();
                 e.stopPropagation();
                 this.removeOcrOverlay();
+                this.setUpdateNoticeHidden(false);
             }
         };
 
@@ -856,6 +933,11 @@ class VVRadioReader {
         window.addEventListener("mousemove", onMouseMove, true);
         window.addEventListener("mouseup", onMouseUp, true);
         window.addEventListener("keydown", onKeyDown, true);
+        // フォーカスがページ内の iframe（広告・埋め込み等）や入力欄にあると Esc は
+        // そちらへ届き、案内文どおりにキャンセルできない。オーバーレイ自身に
+        // フォーカスを移して受け取る（ページ側の入力欄へのキー入力も止まる）。
+        overlay.tabIndex = -1;
+        try { overlay.focus({ preventScroll: true }); } catch (e) { /* 対応外環境 */ }
 
         this.ocrOverlay = {
             host,
@@ -872,6 +954,18 @@ class VVRadioReader {
         this.ocrOverlay.cleanup();
         this.ocrOverlay.host.remove();
         this.ocrOverlay = null;
+        // オーバーレイに移していたフォーカスを元の要素へ戻す
+        const prev = this.ocrPrevFocus;
+        this.ocrPrevFocus = null;
+        if (prev && prev !== document.body && prev.isConnected && typeof prev.focus === "function") {
+            try { prev.focus({ preventScroll: true }); } catch (e) { /* 対応外の要素は無視 */ }
+        }
+    }
+
+    // 更新案内カードの一時的な非表示（範囲読み上げの対象・キャプチャに写さないため）
+    setUpdateNoticeHidden(hidden) {
+        const notice = document.getElementById("vvradio-update-notice-host");
+        if (notice) notice.style.visibility = hidden ? "hidden" : "";
     }
 
     // 選択範囲の読み上げ。まずページが持っている文字データを直接取り出し（Tier 0）、
@@ -913,7 +1007,8 @@ class VVRadioReader {
             if (result && result.ok && result.text) {
                 // 段落の切れ目はDOM構造から正確に分かっているので、改行のまま渡して
                 // 合成側で「間」にしてもらう（OCR経路と同じ扱い）。
-                this.speakText(result.text, { keepParagraphs: true });
+                this.setUpdateNoticeHidden(false);
+                this.speakText(result.text);
                 return;
             }
         }
@@ -932,6 +1027,7 @@ class VVRadioReader {
             setTimeout(() => {
                 if (!this.active) {
                     if (this.indicator) this.indicator.style.visibility = "";
+                    this.setUpdateNoticeHidden(false);
                     return;
                 }
                 // OCRが長引いた場合・応答が途絶えた場合にトーストが残り続けないための保険。
@@ -965,6 +1061,7 @@ class VVRadioReader {
                 } catch (error) {
                     if (this.indicator) this.indicator.style.visibility = "";
                     this.clearOcrToastGuard();
+                    this.setUpdateNoticeHidden(false);
                     // 更新直後の古いcontent scriptは静かに停止する。
                 }
             }, 60);
@@ -995,11 +1092,15 @@ class VVRadioReader {
     // OCRの進行状況・完了・エラーを示す小さなトースト表示
     showOcrToast(text) {
         if (!this.shadowRoot) return;
+        // 前のエラー表示に予約された自動消去が、今から出す表示（進行中のOCR等）を
+        // 途中で消してしまわないよう、新しい表示のたびに予約を取り消す。
+        this.clearOcrToastDismiss();
         if (!this.ocrToast) {
             const toast = document.createElement("div");
             toast.id = "vvradio-ocr-toast";
+            toast.setAttribute("role", "status");
             toast.style.cssText = `
-                position: fixed; bottom: 48px; right: 20px; z-index: 999999;
+                position: fixed; bottom: 48px; right: 20px; z-index: 2147483647;
                 background: rgba(29, 28, 29, 0.85); color: #fff;
                 font: 12px 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
                 padding: 6px 12px; border-radius: 6px; pointer-events: none;
@@ -1026,31 +1127,53 @@ class VVRadioReader {
     removeOcrToast() {
         this.clearOcrStallWatchdog();
         this.clearOcrToastGuard();
+        this.clearOcrToastDismiss();
         if (this.ocrToast) {
             this.ocrToast.remove();
             this.ocrToast = null;
         }
     }
 
+    // エラー等の表示を一定時間後に消す予約。追跡せずに setTimeout すると、
+    // その間に始まった次のOCRの進捗表示と見張りタイマーまで巻き添えで消し、
+    // 認識が途絶えても何も表示されないまま終わる（発火時点で何が表示中かを見ないため）。
+    scheduleOcrToastDismiss(delayMs) {
+        this.clearOcrToastDismiss();
+        this.ocrToastDismissTimer = setTimeout(() => {
+            this.ocrToastDismissTimer = null;
+            this.removeOcrToast();
+        }, delayMs);
+    }
+
+    clearOcrToastDismiss() {
+        if (this.ocrToastDismissTimer) {
+            clearTimeout(this.ocrToastDismissTimer);
+            this.ocrToastDismissTimer = null;
+        }
+    }
+
     // 合成・再生の失敗をトーストで明示する。アイコンの状態変化だけでは
     // 「何も起きない」ように見えるため（VOICEVOX未起動が典型例）。
     showPlaybackErrorToast(error) {
-        const message = /Failed to fetch|NetworkError|ERR_CONNECTION/i.test(error || "")
+        // タイムアウト時の文言（constants.js の「…応答しません」）も同じ案内にする。
+        // 従来はここに当たらず「音声の再生に失敗しました: 合成失敗: …」と内部表現が出ていた。
+        const message = /Failed to fetch|NetworkError|ERR_CONNECTION|応答しません/i.test(error || "")
             ? "VOICEVOXエンジンに接続できません。VOICEVOXを起動してから再度お試しください。"
             : `音声の再生に失敗しました: ${error || "不明なエラー"}`;
         this.showOcrToast(message);
-        setTimeout(() => this.removeOcrToast(), 6000);
+        this.scheduleOcrToastDismiss(6000);
     }
 
     handleOcrStatus(request) {
-        // 撮影のために隠したインジケーターを、どの終了経路でも確実に復帰させる。
+        // 撮影のために隠したインジケーター・更新案内を、どの終了経路でも確実に復帰させる。
         if (this.indicator) this.indicator.style.visibility = "";
+        this.setUpdateNoticeHidden(false);
         this.clearOcrStallWatchdog();
         this.clearOcrToastGuard();
         if (request.status === "error") {
             this.showOcrToast(request.message || "文字認識に失敗しました。");
             this.updateUIState('error');
-            setTimeout(() => this.removeOcrToast(), 4000);
+            this.scheduleOcrToastDismiss(4000);
         } else {
             // 完了: 読み上げが始まると PLAYBACK_STARTED でインジケーターが点灯する
             this.removeOcrToast();
@@ -1058,10 +1181,10 @@ class VVRadioReader {
     }
 
     // 音声再生リクエスト
-    speakText(text, options = {}) {
+    speakText(text) {
         if (!text) return;
 
-        const cleanText = this.cleanMessage(text, options.keepParagraphs === true);
+        const cleanText = this.cleanMessage(text);
         if (!cleanText) return;
 
         try {
@@ -1071,9 +1194,12 @@ class VVRadioReader {
             }, (response) => {
                 if (!this.active) return;
                 if (chrome.runtime.lastError || !response || !response.success) {
-                    console.error("Web Reader for VOICEVOX: 依頼失敗:",
-                        chrome.runtime.lastError?.message || response?.error || "応答なし");
+                    const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
+                    console.error("Web Reader for VOICEVOX: 依頼失敗:", reason);
                     this.updateUIState('error');
+                    // 「テキストが長すぎる」「Offscreenを用意できない」等の理由を利用者にも見せる
+                    // （アイコンが赤くなるだけでは原因不明の無反応に見える）。
+                    if (this.isTopFrame) this.showPlaybackErrorToast(reason);
                 }
             });
         } catch (error) {
@@ -1093,16 +1219,17 @@ class VVRadioReader {
     }
 
     // メッセージの整形（不要な情報の削除・置換）
-    // keepParagraphs=true のときは改行を残す。合成側が改行を文の区切りとして扱い、
-    // 段落の「間」になるため（ページ内テキスト経路で段落構造が分かる場合に使う）。
-    cleanMessage(text, keepParagraphs = false) {
+    // 改行は残す。合成側（background の splitText）が改行を文の区切りとして扱うため、
+    // 見出し・箇条書き・表のセルが1件ずつになり、段落の「間」も自然に入る。
+    // 以前はテキスト選択の経路だけ改行を空白にしていたが、見出しと本文が1つの長い
+    // 「文」につながって分割位置が不自然になるだけで、利点は無かった。
+    // 細かな整形（不可視文字・記号の連続・日付や単位の読み・URLの取りこぼし）は
+    // すべての経路が通る background 側で行う。
+    cleanMessage(text) {
         if (!text) return "";
-        const withoutUrls = text
-            .replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略");
-        if (keepParagraphs) {
-            return withoutUrls.replace(/[ \t]*\n[ \t]*/g, "\n").replace(/\n{2,}/g, "\n").trim();
-        }
-        return withoutUrls.replace(/\n+/g, " ").trim();
+        return text
+            .replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略")
+            .replace(/[ \t]*\n[ \t]*/g, "\n").replace(/\n{2,}/g, "\n").trim();
     }
 }
 

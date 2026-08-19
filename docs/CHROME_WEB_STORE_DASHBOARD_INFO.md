@@ -37,7 +37,7 @@ The single purpose of this extension is to read aloud the text on the page the u
 
 **使用していません（No, I am not using remote code）。**
 
-Tesseract.js本体・WASMコア・日本語学習データ（`jpn.traineddata` / `jpn_vert.traineddata`）・語彙辞書（`ocr-words.txt`）はすべて拡張機能パッケージに同梱しており、実行時に外部から取得するコードやデータはありません。`content_security_policy.extension_pages` の `'wasm-unsafe-eval'` は、同梱のWASMを `WebAssembly` で実行するためにのみ必要です。
+Tesseract.js本体・WASMコア・日本語学習データ（`jpn.traineddata` / `jpn_vert.traineddata`）はすべて拡張機能パッケージに同梱しており、実行時に外部から取得するコードやデータはありません。`content_security_policy.extension_pages` の `'wasm-unsafe-eval'` は、同梱のWASMを `WebAssembly` で実行するためにのみ必要です。
 
 ---
 
@@ -56,6 +56,22 @@ Tesseract.js本体・WASMコア・日本語学習データ（`jpn.traineddata` /
 
 ## 3. バージョン別 ストア更新テキスト (Version Update Text)
 ダッシュボードの「公開用メモ」やストア掲載の更新内容として使用できます。
+
+### v1.4.4
+
+#### 日本語
+表の罫線やボタンの枠がある画像をOCRすると、行の見出しやボタンの文字が丸ごと読み飛ばされる問題を修正しました。文字の画よりずっと長い直線だけを認識前に取り除くようにしています。罫線の無い文書は一切変更していません。あわせて、ニュース記事・技術文書・表・箇条書き・アプリのUIなど、縦書き小説以外の媒体でもOCR精度を確認・改善し、画面OCRの待ち時間を短縮しました（文字が十分に鮮明なときは複数倍率での再認識を省略し、実運用でおよそ1/3に短縮。認識結果は変更していません）。VOICEVOXエンジンが一時的でなく繰り返し応答を拒否する状況（話者IDの不一致、他アプリによるポート競合など）で、無意味な再試行を繰り返したり分かりにくいエラーが表示されたりしないよう修正しました。範囲ドラッグ読み上げでは、横に並んだメニュー項目が区切りなく続けて読まれる問題や、表形式のテキストで行・列が混ざって読まれる問題を修正し、「±」「≒」「〜」「°」など読み上げると意味が変わる記号を正しく読むようにしました。精度への寄与が小さいことを実測で確認できた語彙辞書（約1MB）を削除し、パッケージを軽量化しています。文字認識は引き続き同梱のTesseract.js（WASM）によりブラウザ内で完結し、画像が外部へ送信されることはありません。
+
+#### English (Recommended)
+Fixed an issue where OCR on images containing table borders or button outlines could drop entire words — row labels, button text — because only very long, thin lines (much longer than any character stroke) are now removed before recognition. Documents without such lines are completely unaffected. Also verified and improved OCR accuracy on media beyond vertical novels — news articles, technical documents, tables, bullet lists, and app UI. Reduced screen-OCR wait time: when text is already sharp, the extension now skips the multi-scale re-recognition pass, cutting real-world wait time by roughly two-thirds with no change to the recognized text. Fixed excessive retries and confusing error messages when the VOICEVOX engine persistently rejects requests rather than failing once (e.g. a mismatched speaker ID, or another process using the same port). Drag-to-select reading no longer runs horizontally laid-out menu items together without a pause, and no longer merges rows and columns of pre-formatted text (such as tables) into one another. Symbols that change meaning when silently dropped ("±", "≒", "〜", "°") are now read aloud correctly. Removed a roughly 1 MB word-vocabulary dictionary whose measured contribution to accuracy was negligible, shrinking the package. OCR still runs entirely inside the browser using the bundled Tesseract.js (WASM); captured images are never transmitted externally.
+
+### v1.4.3
+
+#### 日本語
+縦書きの文字認識（OCR）精度を改善しました。組版方向を断定できない範囲は縦横の両モデルで認識して比較し、余分に挿入された重複文字の除去と、短い列の低確信度漢字の局所再確認を追加しています。あわせて、精度を安定して保証できなかった「ルビ（ふりがな）優先読み」設定を削除し、OCRの進捗表示が開始直後にほぼ100%で止まって見える問題を修正しました。ページ内アイコンのサイズ上限を64pxから128pxへ拡張しています。読み上げでは、句点の無い長い箇条書きや短い見出しの直後の長い段落で文の間に無音が空く問題、記号だけの行や不可視文字による無音、日付・時刻・金額の読み、崩れたURLの読み飛ばしなど、多様な文章での途切れ・不自然さを見直しました。罫線付きの表の画像をOCRすると意味のない文字列になっていた問題も修正しています。文字認識は引き続き同梱のTesseract.js（WASM）によりブラウザ内で完結し、画像が外部へ送信されることはありません。
+
+#### English (Recommended)
+Improved OCR accuracy for vertical Japanese text. When the text direction cannot be determined reliably, the region is now recognized with both the horizontal and vertical models and compared; duplicated characters inserted by the recognizer are removed, and low-confidence kanji in short columns are re-checked locally. The "prefer furigana" OCR option, whose accuracy could not be guaranteed, has been removed, and the OCR progress bar no longer appears to stall near 100% right after starting. The maximum size of the on-page icon has been raised from 64 px to 128 px. Reading is smoother across varied content: long unpunctuated lists and long paragraphs after short headings no longer leave gaps of silence between sentences, symbol-only lines and invisible characters no longer cause silence or dropped text, dates, times and prices are read naturally, and broken URLs are skipped. OCR of images containing ruled tables, which previously produced garbage text, now reads the cell contents. OCR still runs entirely inside the browser using the bundled Tesseract.js (WASM); captured images are never transmitted externally.
 
 ### v1.4.0
 
@@ -103,7 +119,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 出力: `dist/web-reader-for-voicevox-<version>.zip`
 
-**含めるもの**: `manifest.json` / `background.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `offscreen.html` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `ocr-words.txt` / `ocr-dictionary-NOTICE.md` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
+**含めるもの**: `manifest.json` / `background-entry.js` / `background-security.js` / `background.js` / `content-guard.js` / `content.js` / `dom-text.js` / `constants.js` / `ocr-common.js` / `ocr-image.js` / `ocr-refine.js` / `offscreen.html` / `offscreen-security.js` / `offscreen.js` / `options.html` / `options.js` / `options.css` / `capture.html` / `capture.js` / `capture.css` / `LICENSE` / `LICENSE-APACHE-2.0` / `images/icon*.png` / `vendor/`
 
 **除外するもの**: `README.md`、`docs/`、`tools/`、`dist/`、ストア掲載用の素材（`images/Web-Reader-for-VOICEVOX_*.png`、`images/Web_Reader_for_VOICEVOX.mp4`）、`.claude/`、`AGENTS.md`、`CLAUDE.md`、`audio/`
 

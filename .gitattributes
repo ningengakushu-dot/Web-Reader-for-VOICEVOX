@@ -11,4 +11,3 @@
 
 # 同梱物は差分表示・言語統計から外す（レビューの妨げになるため）
 vendor/** linguist-vendored
-ocr-words.txt linguist-generated

@@ -72,6 +72,7 @@ document.addEventListener('DOMContentLoaded', () => {
             result = await chrome.storage.local.get(storageKeys);
         } catch (error) {
             console.error('Error reading settings:', error);
+            showStatus('保存済みの設定を読み込めませんでした。既定値を表示しています。', 'error');
         }
 
         try {

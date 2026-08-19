@@ -38,8 +38,38 @@ jobs:
       - name: 読み上げ精度と負荷制御の回帰検査
         run: node tools/test-reading-performance.mjs
 
+      - name: OCR画像証拠の多数一致融合検査
+        run: node tests/ocr-consensus-fusion.test.js
+
+      - name: OCR余剰文字削除段の検査
+        run: node tests/ocr-refine-prune.test.js
+
+      - name: OCR認識入力の余白付与と全票一致融合の検査
+        run: node tests/ocr-input-padding.test.js
+
+      - name: OCR標準経路の構造検査
+        run: node tests/ocr-standard-path.test.js
+
+      - name: OCR局所漢字再確認の配線検査
+        run: node tests/ocr-local-glyph-rescan.test.js
+
+      - name: OCR方向判定フォールバックの検査
+        run: node tests/ocr-orientation-fallback.test.js
+
+      - name: OCR進捗表示の主経路限定検査
+        run: node tests/ocr-progress-display.test.js
+
+      - name: OCRモデルとLSTM専用コアの互換性検査
+        run: node tests/tessdata-compatibility.test.js
+
       - name: アップデートお知らせ機能の単体・結合検査
         run: node tests/update-notice.test.js
+
+      - name: 想定内操作の扱いとストア評価導線の検査
+        run: node tests/expected-user-actions.test.js
+
+      - name: アイコンサイズ範囲の検査
+        run: node tests/icon-size-range.test.js
 
       - name: 拡張コンテキスト無効化の回帰検査
         run: node tests/context-invalidation.test.js
@@ -58,6 +88,21 @@ jobs:
 
       - name: 複数タブ音声要求の直列化検査
         run: node tests/background-concurrency.test.js
+
+      - name: タブ終了時の停止・古いOCR結果の破棄・長文分割の検査
+        run: node tests/background-lifecycle.test.js
+
+      - name: 読み上げテキストの整形・分割の検査
+        run: node tests/speech-text.test.js
+
+      - name: OCRテキスト整形（段落・見出し・英文折り返し）の検査
+        run: node tests/ocr-text-normalize.test.js
+
+      - name: 音声先読み（件数・秒数の上限）の検査
+        run: node tests/offscreen-prefetch.test.js
+
+      - name: 合成失敗時のキュー破棄と停止通知の検査
+        run: node tests/offscreen-synthesis-failure.test.js
 
       - name: 音声再生終了状態の回帰検査
         run: node tests/offscreen-playback.test.js

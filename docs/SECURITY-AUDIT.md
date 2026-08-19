@@ -1,4 +1,31 @@
-# Security and reliability audit — v1.4.2
+# Security and reliability audit — v1.4.2 baseline, addendum through v1.4.4
+
+## 2026-08-19 addendum (covers changes through v1.4.4)
+
+Reviewed the accumulated changes since v1.4.2 (OCR rule-line removal, fusion-skip
+performance change, VOICEVOX HTTP-error handling rewrite in `offscreen.js`, the
+`dom-text.js` block-boundary rule, and the removed word-dictionary payload).
+No high- or medium-confidence vulnerability was found. Notable checks:
+
+- New VOICEVOX error paths (`voicevoxHttpError`, `voicevoxUnexpectedResponseError`
+  in `offscreen.js`) embed only the numeric HTTP status and fixed Japanese text in
+  the message shown to the user; the engine's response body is never echoed back.
+- `JSON.parse` failures on the VOICEVOX response are caught by name (`SyntaxError`)
+  and replaced with a fixed message, so no fragment of the unparsed body reaches
+  the UI.
+- The toast shown for these errors (`content.js` `showOcrToast`) sets `textContent`,
+  not `innerHTML`, so there is no injection path through the new error text.
+- `dom-text.js`'s new `blockAncestorOf` only reads `getComputedStyle(el).display`;
+  no code execution surface from page-authored CSS.
+- `ocr-image.js`'s new `removeOcrRuleLines` only performs numeric operations on
+  canvas pixel data.
+
+The word-vocabulary dictionary (`ocr-words.txt`, SudachiDict-derived, ~1MB) and its
+loader (`ensureOcrDictionaries` / `rerankOcrByDictionary`) were removed; its
+measured contribution to accuracy was negligible relative to overall OCR error
+(see `docs/OCR-ACCURACY.md`). This shrinks the attack surface by removing a network
+fetch of a bundled resource, though that fetch was already same-origin and
+non-attacker-controlled.
 
 ## Scope
 

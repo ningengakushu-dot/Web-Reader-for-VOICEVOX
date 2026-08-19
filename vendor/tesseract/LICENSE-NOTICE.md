@@ -30,7 +30,10 @@
 - 同梱ファイル: `lang/jpn.traineddata`（横書き用）, `lang/jpn_vert.traineddata`（縦書き用）
   (いずれも直接ダウンロードしたもの。gzip圧縮はしていない生データ。
   高精度版。tessdata_fast は小さい文字の濁点・半濁点の誤認識が多かったため
-  best を採用)
+  best を採用。LSTM専用コアに存在せず実行時にも無視されるLegacy OCR向け設定9行は、
+  Chromeの拡張機能エラーページへ警告を残さないようコメント化している。
+  LSTMモデル本体およびその他の設定は変更していない。再現手順は
+  `tools/strip-tessdata-unsupported-config.mjs` を参照)
 
 ---
 

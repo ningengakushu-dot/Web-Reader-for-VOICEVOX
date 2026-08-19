@@ -1,0 +1,11 @@
+{
+  "name": "ocr-e2e-harness",
+  "private": true,
+  "type": "module",
+  "description": "出荷OCRコードをNodeで実行する実機相当の回帰測定ハーネス（配布物には含めない）",
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1",
+    "playwright-core": "^1",
+    "tesseract.js": "^6"
+  }
+}
