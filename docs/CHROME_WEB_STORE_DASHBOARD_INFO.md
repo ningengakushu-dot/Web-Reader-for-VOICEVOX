@@ -57,6 +57,14 @@ Tesseract.js本体・WASMコア・日本語学習データ（`jpn.traineddata` /
 ## 3. バージョン別 ストア更新テキスト (Version Update Text)
 ダッシュボードの「公開用メモ」やストア掲載の更新内容として使用できます。
 
+### v1.4.4
+
+#### 日本語
+表の罫線やボタンの枠がある画像をOCRすると、行の見出しやボタンの文字が丸ごと読み飛ばされる問題を修正しました。文字の画よりずっと長い直線だけを認識前に取り除くようにしています。罫線の無い文書は一切変更していません。あわせて、ニュース記事・技術文書・表・箇条書き・アプリのUIなど、縦書き小説以外の媒体でもOCR精度を確認・改善し、画面OCRの待ち時間を短縮しました（文字が十分に鮮明なときは複数倍率での再認識を省略し、実運用でおよそ1/3に短縮。認識結果は変更していません）。VOICEVOXエンジンが一時的でなく繰り返し応答を拒否する状況（話者IDの不一致、他アプリによるポート競合など）で、無意味な再試行を繰り返したり分かりにくいエラーが表示されたりしないよう修正しました。範囲ドラッグ読み上げでは、横に並んだメニュー項目が区切りなく続けて読まれる問題や、表形式のテキストで行・列が混ざって読まれる問題を修正し、「±」「≒」「〜」「°」など読み上げると意味が変わる記号を正しく読むようにしました。精度への寄与が小さいことを実測で確認できた語彙辞書（約1MB）を削除し、パッケージを軽量化しています。文字認識は引き続き同梱のTesseract.js（WASM）によりブラウザ内で完結し、画像が外部へ送信されることはありません。
+
+#### English (Recommended)
+Fixed an issue where OCR on images containing table borders or button outlines could drop entire words — row labels, button text — because only very long, thin lines (much longer than any character stroke) are now removed before recognition. Documents without such lines are completely unaffected. Also verified and improved OCR accuracy on media beyond vertical novels — news articles, technical documents, tables, bullet lists, and app UI. Reduced screen-OCR wait time: when text is already sharp, the extension now skips the multi-scale re-recognition pass, cutting real-world wait time by roughly two-thirds with no change to the recognized text. Fixed excessive retries and confusing error messages when the VOICEVOX engine persistently rejects requests rather than failing once (e.g. a mismatched speaker ID, or another process using the same port). Drag-to-select reading no longer runs horizontally laid-out menu items together without a pause, and no longer merges rows and columns of pre-formatted text (such as tables) into one another. Symbols that change meaning when silently dropped ("±", "≒", "〜", "°") are now read aloud correctly. Removed a roughly 1 MB word-vocabulary dictionary whose measured contribution to accuracy was negligible, shrinking the package. OCR still runs entirely inside the browser using the bundled Tesseract.js (WASM); captured images are never transmitted externally.
+
 ### v1.4.3
 
 #### 日本語

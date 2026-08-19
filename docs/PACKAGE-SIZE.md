@@ -1,8 +1,11 @@
 # Package size report
 
-- ZIP: `web-reader-for-voicevox-1.4.3.zip`
-- Compressed payload: **27.76 MiB**
-- Uncompressed payload: **35.38 MiB**
+- ZIP: `web-reader-for-voicevox-1.4.4.zip`
+- Compressed payload: **27.80 MiB**
+- Uncompressed payload: **35.52 MiB**
+
+(Re-measured 2026-08-19 after the OCR/speech-path changes on this branch;
+application JS grew slightly, OCR assets are unchanged.)
 
 ## Largest packaged files
 
@@ -14,27 +17,27 @@
 | `vendor/tesseract/core/tesseract-core-lstm.wasm.js` | 1.41 MiB | 3.77 MiB |
 | `vendor/tesseract/worker.min.js` | 0.03 MiB | 0.11 MiB |
 | `images/icon128.png` | 0.03 MiB | 0.03 MiB |
-| `content.js` | 0.01 MiB | 0.05 MiB |
-| `background.js` | 0.01 MiB | 0.04 MiB |
+| `background.js` | 0.02 MiB | 0.06 MiB |
+| `ocr-common.js` | 0.02 MiB | 0.06 MiB |
+| `content.js` | 0.02 MiB | 0.06 MiB |
+| `ocr-refine.js` | 0.02 MiB | 0.05 MiB |
 | `dom-text.js` | 0.01 MiB | 0.04 MiB |
-| `ocr-common.js` | 0.01 MiB | 0.03 MiB |
+| `ocr-image.js` | 0.01 MiB | 0.04 MiB |
 | `vendor/tesseract/tesseract.min.js` | 0.01 MiB | 0.06 MiB |
-| `ocr-refine.js` | 0.01 MiB | 0.02 MiB |
-| `ocr-image.js` | 0.01 MiB | 0.02 MiB |
 | `offscreen.js` | 0.01 MiB | 0.02 MiB |
 | `images/icon48.png` | 0.01 MiB | 0.01 MiB |
 | `options.js` | 0.01 MiB | 0.02 MiB |
-| `capture.js` | 0.00 MiB | 0.01 MiB |
-| `constants.js` | 0.00 MiB | 0.01 MiB |
+| `capture.js` | 0.00 MiB | 0.02 MiB |
 | `LICENSE-APACHE-2.0` | 0.00 MiB | 0.01 MiB |
 | `vendor/tesseract/LICENSE` | 0.00 MiB | 0.01 MiB |
+| `constants.js` | 0.00 MiB | 0.01 MiB |
 | `images/icon32.png` | 0.00 MiB | 0.00 MiB |
 | `options.css` | 0.00 MiB | 0.01 MiB |
 | `options.html` | 0.00 MiB | 0.01 MiB |
 | `background-security.js` | 0.00 MiB | 0.01 MiB |
 | `images/icon16.png` | 0.00 MiB | 0.00 MiB |
-| `capture.css` | 0.00 MiB | 0.00 MiB |
 | `offscreen-security.js` | 0.00 MiB | 0.00 MiB |
+| `capture.css` | 0.00 MiB | 0.00 MiB |
 
 ## Notes
 
