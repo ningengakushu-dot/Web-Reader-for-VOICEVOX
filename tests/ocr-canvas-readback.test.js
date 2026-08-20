@@ -5,7 +5,7 @@ const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'ocr-image.js'), 'utf8')
-    + '\n;globalThis.readbackTestApi = {readOcrCanvasPixels, padOcrCanvasToMargin, toGrayscale, prepareOcrCanvas, upscaleOcrCanvas};';
+    + '\n;globalThis.readbackTestApi = {readOcrCanvasPixels, cropToOcrCanvas, padOcrCanvasToMargin, toGrayscale, prepareOcrCanvas, upscaleOcrCanvas};';
 
 class FakeContext {
     constructor(canvas) {
@@ -101,6 +101,14 @@ function makeCanvas(width, height, fill = 255) {
         canvas.set(x, y, fill, fill, fill, 255);
     }
     return canvas;
+}
+
+{
+    created.length = 0;
+    const sourceCanvas = makeCanvas(12, 10, 255);
+    const output = api.cropToOcrCanvas(sourceCanvas, 1, 1, 8, 6);
+    assert.equal(output.firstContextOptions?.willReadFrequently, true,
+        'OCR切り出しCanvasは後段で画素を読むため、最初のcontext生成時からreadback向けにする');
 }
 
 {

@@ -69,7 +69,10 @@ function measureOcrInkPolarity(pixels) {
  */
 function cropToOcrCanvas(source, sx, sy, sw, sh) {
     const canvas = createOcrCanvas(sw, sh);
-    canvas.getContext("2d").drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+    // この出力は直後の組版方向判定で画素を読む。最初のcontext生成時から
+    // readback用途を明示し、後から指定しても反映されないCanvas実装を避ける。
+    canvas.getContext("2d", { willReadFrequently: true })
+        .drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
     return canvas;
 }
 
