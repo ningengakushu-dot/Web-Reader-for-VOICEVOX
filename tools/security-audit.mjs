@@ -13,9 +13,20 @@ const manifest = JSON.parse(read('manifest.json'));
 if (manifest.manifest_version !== 3) fail('Manifest V3 is required'); else ok('Manifest V3');
 if (manifest.externally_connectable) fail('externally_connectable must not be enabled'); else ok('no external messaging');
 if (manifest.background?.service_worker !== 'background-entry.js') fail('background security entry is not active');
-if (manifest.content_scripts?.[0]?.js?.join(',') !== 'content-guard.js,dom-text.js,content.js') {
+const expectedContentScripts = [
+    'content-guard.js',
+    'dom-text.js',
+    'content-common.js',
+    'content-indicator.js',
+    'content-reading.js',
+    'content-notice.js',
+    'content-ocr.js',
+    'content-entry.js'
+];
+const manifestContentScripts = manifest.content_scripts?.[0]?.js || [];
+if (JSON.stringify(manifestContentScripts) !== JSON.stringify(expectedContentScripts)) {
     fail('content scripts are not loaded in the reviewed order');
-}
+} else ok('content scripts use the reviewed order');
 const expectedPermissions = ['activeTab', 'scripting', 'storage', 'contextMenus', 'offscreen'].sort();
 if (JSON.stringify([...(manifest.permissions || [])].sort()) !== JSON.stringify(expectedPermissions)) {
     fail(`unexpected extension permissions: ${(manifest.permissions || []).join(', ')}`);
@@ -28,8 +39,15 @@ const csp = manifest.content_security_policy?.extension_pages || '';
 if (!/^script-src 'self' 'wasm-unsafe-eval'; object-src 'self'$/.test(csp)) fail(`unexpected extension CSP: ${csp}`); else ok('strict extension CSP');
 
 const firstPartyJs = fs.readdirSync(root).filter((f) => f.endsWith('.js'));
-const contentSource = read('content.js');
+const contentRuntimeFiles = manifestContentScripts.filter((file) =>
+    file !== 'content-guard.js' && file !== 'dom-text.js');
+if (contentRuntimeFiles.some((file) => !fs.existsSync(path.join(root, file)))) {
+    fail('manifest references a missing content runtime file');
+}
+const contentSource = contentRuntimeFiles.map(read).join('\n;\n');
 const backgroundSource = read('background.js');
+const backgroundContentScriptsSource = read('background-content-scripts.js');
+const backgroundEntrySource = read('background-entry.js');
 const offscreenSource = read('offscreen.js');
 const optionsSource = read('options.js');
 const constantsSource = read('constants.js');
@@ -38,7 +56,11 @@ if (!/chromewebstore\.google\.com\/detail\/web-reader-for-voicevox\/ilcfondcjhaa
 if (/高評価（★5）|高評価する/.test(contentSource)) fail('review UI must not demand a specific rating');
 const captureSource = read('capture.js');
 if (!/if \(ocrInProgress\) terminateWorkers\(\)/.test(captureSource)) fail('capture OCR concurrency guard is missing');
-if (!/CONTENT_SCRIPT_FILES = \["content-guard\.js", "dom-text\.js", "content\.js"\]/.test(backgroundSource)) fail('dynamic content injection omits the guard');
+if (!/importScripts\("background-content-scripts\.js"\)/.test(backgroundEntrySource)
+    || !/chrome\.runtime\.getManifest\?\.\(\)\.content_scripts\?\.\[0\]\?\.js/.test(backgroundContentScriptsSource)
+    || !/CONTENT_SCRIPT_FILES\.splice/.test(backgroundContentScriptsSource)) {
+    fail('dynamic content injection is not synchronized with the reviewed manifest order');
+}
 if (!/VVRadioBackgroundSecurity/.test(backgroundSource)) fail('background message validator is not integrated');
 if (!/VVRadioOffscreenSecurity/.test(offscreenSource)) fail('offscreen message validator is not integrated');
 if (!/voiceOperationQueue/.test(backgroundSource)) fail('voice operation serialization is missing');
@@ -87,9 +109,13 @@ for (const temporary of ['.github/workflows/audit-export.yml', '.github/workflow
 }
 
 const pack = read('tools/pack.ps1');
-for (const file of ['background-entry.js', 'background-security.js', 'content-guard.js', 'offscreen-security.js']) {
+for (const file of [
+    'background-entry.js', 'background-security.js', 'background-content-scripts.js',
+    ...expectedContentScripts, 'offscreen-security.js'
+]) {
     if (!pack.includes(`'${file}'`)) fail(`release package omits ${file}`);
 }
+if (pack.includes("'content.js'")) fail('obsolete content.js must not be shipped');
 
 const sumsFile = path.join(root, 'vendor/tesseract/SHA256SUMS');
 if (!fs.existsSync(sumsFile)) {
