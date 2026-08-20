@@ -1,10 +1,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { readContentSource } = require('./content-source');
 
 const root = path.join(__dirname, '..');
 const optionsHtml = fs.readFileSync(path.join(root, 'options.html'), 'utf8');
-const contentSource = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
+const contentSource = readContentSource();
 
 assert.match(optionsHtml, /id="iconSize-slider"[^>]*min="16"[^>]*max="128"/,
     '設定画面でアイコンサイズを16pxから128pxまで選択できる');

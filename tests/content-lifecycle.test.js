@@ -1,9 +1,8 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const vm = require('node:vm');
+const { readContentSource } = require('./content-source');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+const source = readContentSource();
 
 function listenerRegistry() {
     const byType = new Map();
@@ -69,7 +68,7 @@ const context = vm.createContext({
     setTimeout, clearTimeout, requestAnimationFrame: (fn) => fn()
 });
 
-vm.runInContext(source, context, { filename: 'content.js' });
+vm.runInContext(source, context, { filename: 'content-modules.js' });
 const first = context.window.__vvRadioReaderInstance;
 assert.ok(first);
 assert.equal(runtimeListeners.size, 1);
@@ -77,7 +76,7 @@ assert.equal(documentListeners.count('keydown'), 1);
 assert.equal(windowListeners.count('pageshow'), 1);
 
 // 生きている content script へ再注入しても、インスタンスやリスナーを増やさない。
-vm.runInContext(source, context, { filename: 'content.js#reinjected' });
+vm.runInContext(source, context, { filename: 'content-modules.js#reinjected' });
 assert.strictEqual(context.window.__vvRadioReaderInstance, first);
 assert.equal(runtimeListeners.size, 1);
 assert.equal(documentListeners.count('keydown'), 1);
@@ -85,7 +84,7 @@ assert.equal(windowListeners.count('pageshow'), 1);
 
 // stale インスタンスなら古いリスナーを外したうえで新しいインスタンスへ置き換える。
 first.active = false;
-vm.runInContext(source, context, { filename: 'content.js#stale-replaced' });
+vm.runInContext(source, context, { filename: 'content-modules.js#stale-replaced' });
 const second = context.window.__vvRadioReaderInstance;
 assert.notStrictEqual(second, first);
 assert.equal(runtimeListeners.size, 1);
