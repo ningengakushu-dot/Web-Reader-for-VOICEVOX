@@ -23,3 +23,6 @@ jobs:
 
       - name: バックグラウンド分割ソースと互換バンドルの一致確認
         run: node tools/sync-background-bundle.mjs --check
+
+      - name: Offscreen分割ソースと互換バンドルの一致確認
+        run: node tools/sync-offscreen-bundle.mjs --check
