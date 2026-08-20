@@ -1,8 +1,9 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { readContentSource } = require('./content-source');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+const source = readContentSource();
 const start = source.indexOf('    toggleReading() {');
 const end = source.indexOf('\n    // TOGGLE_READING', start);
 assert.ok(start >= 0 && end > start, 'toggleReading の実装が見つかる');

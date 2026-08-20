@@ -1,9 +1,8 @@
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const vm = require('vm');
+const { readContentSource } = require('./content-source');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+const source = readContentSource();
 const listeners = new Map();
 const createElement = () => ({
     id: '', style: {}, textContent: '', className: '', classList: { add() {}, remove() {} },
@@ -38,7 +37,7 @@ const context = vm.createContext({
     console, window: windowMock, document: documentMock, chrome: chromeMock,
     setTimeout, clearTimeout, requestAnimationFrame: (fn) => fn()
 });
-vm.runInContext(source, context, { filename: 'content.js' });
+vm.runInContext(source, context, { filename: 'content-modules.js' });
 const reader = context.window.__vvRadioReaderInstance;
 assert.ok(reader);
 

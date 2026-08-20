@@ -46,7 +46,16 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content-guard.js", "dom-text.js", "content.js"],
+      "js": [
+        "content-guard.js",
+        "dom-text.js",
+        "content-common.js",
+        "content-indicator.js",
+        "content-reading.js",
+        "content-notice.js",
+        "content-ocr.js",
+        "content-entry.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true,
       "match_origin_as_fallback": true

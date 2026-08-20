@@ -15,6 +15,27 @@ document.addEventListener('DOMContentLoaded', () => {
     // 「画像を指定する」で選ばれた画像。保存ボタンを押すまで storage には書かない。
     let pendingCustomIcon = null;
 
+    const runtimeMessaging = globalThis.VVRadioRuntimeMessaging || {
+        request(message) {
+            return new Promise((resolve, reject) => {
+                try {
+                    chrome.runtime.sendMessage(message, (response) => {
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                            return;
+                        }
+                        resolve(response);
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        },
+        requestOrNull(message) {
+            return this.request(message).catch(() => null);
+        }
+    };
+
     // スライダー設定定義: デフォルト値は constants.js の SETTING_DEFAULTS を単一の真実源とする
     const sliderConfigs = [
         { key: 'speedScale',       id: 'speed',      defaultVal: SETTING_DEFAULTS.speedScale,       decimals: 1 },
@@ -117,18 +138,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function getSpeakers() {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ type: "GET_SPEAKERS" }, (response) => {
-                if (chrome.runtime.lastError) {
-                    return reject(new Error(chrome.runtime.lastError.message));
-                }
-                if (response && response.success) {
-                    resolve(response.speakers);
-                } else {
-                    reject(new Error(response?.error || 'Failed to fetch speakers'));
-                }
-            });
-        });
+        const response = await runtimeMessaging.request({ type: "GET_SPEAKERS" });
+        if (response && response.success) return response.speakers;
+        throw new Error(response?.error || 'Failed to fetch speakers');
     }
 
     function renderSpeakers(speakers) {
@@ -313,12 +325,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function sendMessage(message) {
-        return new Promise((resolve) => {
-            chrome.runtime.sendMessage(message, (response) => {
-                if (chrome.runtime.lastError) return resolve(null);
-                resolve(response);
-            });
-        });
+        return runtimeMessaging.requestOrNull(message);
     }
 
     saveBtn.addEventListener('click', async () => {

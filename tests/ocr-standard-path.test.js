@@ -1,11 +1,12 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { CONTENT_MODULE_FILES } = require('./content-source');
 
 const root = path.join(__dirname, '..');
 const read = (name) => fs.readFileSync(path.join(root, name), 'utf8');
 const runtimeFiles = [
-    'capture.js', 'constants.js', 'content.js', 'dom-text.js',
+    'capture.js', 'constants.js', ...CONTENT_MODULE_FILES, 'dom-text.js',
     'ocr-common.js', 'offscreen-security.js', 'offscreen.js', 'options.js',
     'capture.html', 'offscreen.html', 'options.html'
 ];

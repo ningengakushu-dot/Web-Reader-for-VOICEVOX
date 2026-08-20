@@ -45,19 +45,36 @@ function invalidated() {
     assert.match(manifest.version, /^\d+\.\d+\.\d+$/,
         'release version must use the Chrome Web Store compatible x.y.z format');
     assert.strictEqual(manifest.background.service_worker, 'background-entry.js');
-    assert.deepStrictEqual(manifest.content_scripts[0].js.slice(0, 3),
-        ['content-guard.js', 'dom-text.js', 'content.js']);
+    const expectedContentScripts = [
+        'content-guard.js',
+        'dom-text.js',
+        'content-common.js',
+        'content-indicator.js',
+        'content-reading.js',
+        'content-notice.js',
+        'content-ocr.js',
+        'content-entry.js'
+    ];
+    assert.deepStrictEqual(manifest.content_scripts[0].js, expectedContentScripts,
+        'Content Script の責務別ファイルを依存順に読み込む');
 
     const entry = fs.readFileSync(path.join(root, 'background-entry.js'), 'utf8');
     assert.match(entry, /importScripts\("background-security\.js"\)/);
-    const background = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
-    assert.match(background, /CONTENT_SCRIPT_FILES = \["content-guard\.js", "dom-text\.js", "content\.js"\]/);
-    assert.match(background, /reinjectContentScriptsAfterUpdate/);
+    assert.match(entry, /importScripts\("background-content-scripts\.js"\)/,
+        '動的再注入の設定を production Service Worker で読み込む');
+    const contentInjection = fs.readFileSync(path.join(root, 'background-content-scripts.js'), 'utf8');
+    assert.match(contentInjection, /chrome\.runtime\.getManifest\?\.\(\)\.content_scripts\?\.\[0\]\?\.js/,
+        '動的再注入は manifest の Content Script 一覧を正本にする');
+    assert.match(contentInjection, /CONTENT_SCRIPT_FILES\.splice/);
 
     const pack = fs.readFileSync(path.join(root, 'tools', 'pack.ps1'), 'utf8');
-    for (const file of ['background-entry.js', 'background-security.js', 'content-guard.js', 'offscreen-security.js']) {
-        assert.match(pack, new RegExp(`'${file.replace('.', '\\.')}'`));
+    for (const file of [
+        'background-entry.js', 'background-security.js', 'background-content-scripts.js',
+        'content-guard.js', 'dom-text.js', ...expectedContentScripts.slice(2), 'offscreen-security.js'
+    ]) {
+        assert.match(pack, new RegExp(`'${file.replace('.', '\\.')}'`), `${file} を出荷物へ含める`);
     }
+    assert.doesNotMatch(pack, /'content\.js'/, '旧 content.js を出荷物へ含めない');
 
     console.log('context invalidation guard: PASSED');
 })().catch((error) => {

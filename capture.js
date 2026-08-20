@@ -26,7 +26,8 @@
     // OCRの世代トークン。実行中に新しい選択が行われた場合、古い結果を破棄する。
     let ocrGeneration = 0;
 
-    function sendRuntimeMessage(message, callback) {
+    const sendRuntimeMessage = globalThis.VVRadioRuntimeMessaging?.send || ((message, callback) => {
+        // 単体実行・更新直後など共有アダプターが無い場合も従来どおり安全に失敗させる。
         try {
             if (!chrome.runtime?.id) return false;
             chrome.runtime.sendMessage(message, callback);
@@ -34,7 +35,7 @@
         } catch (error) {
             return false;
         }
-    }
+    });
     let ocrInProgress = false;
 
     // 組版方向（横書き jpn / 縦書き jpn_vert）ごとのワーカーを使い回す。

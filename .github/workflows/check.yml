@@ -77,6 +77,12 @@ jobs:
       - name: メッセージ境界と入力検証の回帰検査
         run: node tests/security-boundary.test.js
 
+      - name: 共通入力検証の境界値回帰検査
+        run: node tests/security-validation-contract.test.js
+
+      - name: 拡張ページ通信アダプターの回帰検査
+        run: node tests/runtime-messaging.test.js
+
       - name: コンテンツのプライバシー境界検査
         run: node tests/content-privacy.test.js
 
