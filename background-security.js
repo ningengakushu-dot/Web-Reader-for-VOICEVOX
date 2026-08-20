@@ -5,7 +5,7 @@
     const MAX_TEXT_CHARS = 200000;
     const MAX_OCR_DATA_URL_CHARS = 64 * 1024 * 1024;
 
-    const isFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+    const { isFiniteNumber, isNonNegativeInteger, isRectWithinBounds, isNumberInRange } = globalThis.VVRadioValidation;
     const isTabSender = (sender) => Number.isInteger(sender?.tab?.id);
     const isExtensionPage = (sender, page) => {
         const expected = chrome.runtime.getURL(page);
@@ -21,17 +21,8 @@
     }
 
     function validateRect(request) {
-        const rect = request?.rect;
-        if (!rect || !isFiniteNumber(rect.x) || !isFiniteNumber(rect.y)
-            || !isFiniteNumber(rect.width) || !isFiniteNumber(rect.height)
-            || rect.x < 0 || rect.y < 0 || rect.width < 1 || rect.height < 1
-            || rect.width > 100000 || rect.height > 100000
-            || rect.width * rect.height > 100000000
-            || !isFiniteNumber(request.viewportWidth) || request.viewportWidth < 1
-            || request.viewportWidth > 100000) {
-            return false;
-        }
-        return true;
+        return isRectWithinBounds(request?.rect)
+            && isNumberInRange(request.viewportWidth, 1, 100000);
     }
 
     function validateRequest(request, sender) {
@@ -53,20 +44,20 @@
             if (!offscreenTypes.has(request.type)) {
                 return { ok: false, error: "不明な通知です" };
             }
-            if (request.tabId != null && (!Number.isInteger(request.tabId) || request.tabId < 0)) {
+            if (request.tabId != null && !isNonNegativeInteger(request.tabId)) {
                 return { ok: false, error: "tabId が不正です" };
             }
             if (request.type === "OCR_PROGRESS"
-                && (!isFiniteNumber(request.progress) || request.progress < 0 || request.progress > 1)) {
+                && !isNumberInRange(request.progress, 0, 1)) {
                 return { ok: false, error: "進捗値が不正です" };
             }
             if (["OCR_PROGRESS", "OCR_COMPLETE"].includes(request.type)
-                && (!Number.isInteger(request.tabId) || request.tabId < 0)) {
+                && !isNonNegativeInteger(request.tabId)) {
                 return { ok: false, error: "tabId が不正です" };
             }
             if (request.type === "OCR_COMPLETE") {
                 if (request.requestId != null
-                    && (!Number.isInteger(request.requestId) || request.requestId < 0)) {
+                    && !isNonNegativeInteger(request.requestId)) {
                     return { ok: false, error: "requestId が不正です" };
                 }
                 if (request.text != null && typeof request.text !== "string") {

@@ -3,9 +3,14 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
+const root = path.join(__dirname, '..');
 function load(file, chrome) {
     const context = vm.createContext({ chrome, console, Set, Number, Object, Array, Promise });
-    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), context, { filename: file });
+    const validationPath = path.join(root, 'validation-utils.js');
+    if (fs.existsSync(validationPath)) {
+        vm.runInContext(fs.readFileSync(validationPath, 'utf8'), context, { filename: 'validation-utils.js' });
+    }
+    vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
     return context;
 }
 
