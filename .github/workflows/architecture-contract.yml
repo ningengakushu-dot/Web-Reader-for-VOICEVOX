@@ -21,6 +21,9 @@ jobs:
       - name: バックグラウンド状態遷移の契約検査
         run: node tests/background-state-contract.test.js
 
+      - name: Content Scriptライフサイクルの契約検査
+        run: node tests/content-lifecycle.test.js
+
       - name: バックグラウンド分割ソースと互換バンドルの一致確認
         run: node tools/sync-background-bundle.mjs --check
 
