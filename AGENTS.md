@@ -8,7 +8,8 @@
 - OCR の閾値、処理順、候補融合、縦横判定、画像前処理を「単純化」のために変更しない。変更する場合は `docs/OCR-ACCURACY.md` と既存コーパスを読み、変更前後を実測する。
 - Manifest V3 の service worker / offscreen / content script の境界を崩さない。Web ページ由来の値は信頼しない。
 - `background-security.js` と `offscreen-security.js` より前に `validation-utils.js` を読み込む。検証を高コストな OCR・音声合成処理の後段へ移さない。
-- Service Worker の実行元は `background-bootstrap.js` / `background-playback.js` / `background-runtime.js` / `background-speech.js`。`background.js` は既存 VM テスト互換用の生成バンドルなので直接編集しない。変更後は `node tools/sync-background-bundle.mjs` で同期する。
+- Service Worker の主な実行元は `background-bootstrap.js` / `background-content-scripts.js` / `background-playback.js` / `background-runtime.js` / `background-speech.js`。`background-content-scripts.js` は manifest の Content Script 一覧を動的再注入にも反映する production 専用設定で、残る4ファイルの挙動互換バンドルが `background.js`。`background.js` は直接編集せず、4ファイルを変更した場合は `node tools/sync-background-bundle.mjs` で同期する。
+- Content Script の実行元は `content-common.js` / `content-indicator.js` / `content-reading.js` / `content-notice.js` / `content-ocr.js` / `content-entry.js`。manifest の順序が依存契約であり、`content-entry.js` だけが `VVRadioReader` を生成する。旧 `content.js` を復活させたり、再注入・bfcache・リスナー解放の状態を複数の寿命管理へ分散させない。
 - Offscreen の実行元は `offscreen-entry.js` / `offscreen-ocr.js` / `offscreen-audio.js`。`offscreen.js` は既存 VM テスト互換用の生成バンドルなので直接編集しない。変更後は `node tools/sync-offscreen-bundle.mjs` で同期する。
 - `options.js` と `capture.js` より前に `runtime-messaging.js` を読み込む。更新直後の無効コンテキストを例外としてページへ漏らさない。
 - 新しい実行時ファイルを追加した場合は、HTML / manifest / service worker の読み込み元だけでなく `tools/pack.ps1` の同梱一覧も更新する。
