@@ -23,11 +23,13 @@ function createOcrCanvas(width, height) {
  * 拡大・縮小に補間を効かせた canvas とその 2D コンテキストを作る。
  * @param {number} width
  * @param {number} height
+ * @param {boolean} [willReadFrequently] CPU側で画素を読む用途なら true
  * @returns {{canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D}}
  */
-function createSmoothOcrCanvas(width, height) {
+function createSmoothOcrCanvas(width, height, willReadFrequently = false) {
     const canvas = createOcrCanvas(width, height);
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d",
+        willReadFrequently ? { willReadFrequently: true } : undefined);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     return { canvas, ctx };
@@ -39,7 +41,8 @@ function createSmoothOcrCanvas(width, height) {
  * @returns {Uint8ClampedArray}
  */
 function readOcrCanvasPixels(canvas) {
-    return canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    return canvas.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, canvas.width, canvas.height).data;
 }
 
 /**
@@ -66,7 +69,10 @@ function measureOcrInkPolarity(pixels) {
  */
 function cropToOcrCanvas(source, sx, sy, sw, sh) {
     const canvas = createOcrCanvas(sw, sh);
-    canvas.getContext("2d").drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+    // この出力は直後の組版方向判定で画素を読む。最初のcontext生成時から
+    // readback用途を明示し、後から指定しても反映されないCanvas実装を避ける。
+    canvas.getContext("2d", { willReadFrequently: true })
+        .drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
     return canvas;
 }
 
@@ -98,18 +104,20 @@ const OCR_INPUT_INK_CONTRAST = 40;
  * （写真・グラデーション・2色背景でも端に段差を作りにくい）。暗背景の白抜き文字にも
  * そのまま追従する。透明な画素（alpha < 255）は集計から外す。
  * @param {HTMLCanvasElement} canvas
+ * @param {Uint8ClampedArray|null} [pixels] 同じcanvasから取得済みのRGBA画素
  * @returns {number} 0-255
  */
-function estimateOcrBackgroundLuminance(canvas) {
+function estimateOcrBackgroundLuminance(canvas, pixels = null) {
     const width = canvas.width;
     const height = canvas.height;
-    const pixels = readOcrCanvasPixels(canvas);
+    const sourcePixels = pixels || readOcrCanvasPixels(canvas);
     const hist = new Int32Array(256);
     const band = OCR_INPUT_PAD_SAMPLE_PX;
     const count = (x, y) => {
         const i = (y * width + x) * 4;
-        if (pixels[i + 3] < 255) return;
-        hist[(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]) | 0]++;
+        if (sourcePixels[i + 3] < 255) return;
+        hist[(0.299 * sourcePixels[i] + 0.587 * sourcePixels[i + 1]
+            + 0.114 * sourcePixels[i + 2]) | 0]++;
     };
     for (let y = 0; y < height; y++) {
         if (y < band || y >= height - band) {
@@ -129,18 +137,20 @@ function estimateOcrBackgroundLuminance(canvas) {
  * インクが無ければ各辺とも画像の幅/高さを返す。
  * @param {HTMLCanvasElement} canvas
  * @param {number} background 背景輝度（estimateOcrBackgroundLuminance）
+ * @param {Uint8ClampedArray|null} [pixels] 同じcanvasから取得済みのRGBA画素
  * @returns {{left: number, top: number, right: number, bottom: number}}
  */
-function measureOcrInkMargins(canvas, background) {
+function measureOcrInkMargins(canvas, background, pixels = null) {
     const width = canvas.width;
     const height = canvas.height;
-    const pixels = readOcrCanvasPixels(canvas);
+    const sourcePixels = pixels || readOcrCanvasPixels(canvas);
     let minX = width, minY = height, maxX = -1, maxY = -1;
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const i = (y * width + x) * 4;
-            if (pixels[i + 3] < 255) continue;
-            const l = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+            if (sourcePixels[i + 3] < 255) continue;
+            const l = 0.299 * sourcePixels[i] + 0.587 * sourcePixels[i + 1]
+                + 0.114 * sourcePixels[i + 2];
             if (Math.abs(l - background) < OCR_INPUT_INK_CONTRAST) continue;
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;
@@ -168,7 +178,7 @@ function padOcrCanvas(source, insets, background = null) {
     if (left + top + right + bottom === 0) return source;
     const fill = Number.isFinite(background) ? background : estimateOcrBackgroundLuminance(source);
     const canvas = createOcrCanvas(source.width + left + right, source.height + top + bottom);
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     ctx.fillStyle = `rgb(${fill},${fill},${fill})`;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(source, left, top);
@@ -186,8 +196,11 @@ function padOcrCanvas(source, insets, background = null) {
 function padOcrCanvasToMargin(source, minMargin) {
     const none = { left: 0, top: 0, right: 0, bottom: 0 };
     if (!(minMargin > 0)) return { canvas: source, insets: none };
-    const background = estimateOcrBackgroundLuminance(source);
-    const margins = measureOcrInkMargins(source, background);
+    // 背景推定と余白測定は同じ全画面画素を使う。別々にgetImageDataすると、
+    // 大きな選択範囲ほどCPU転送が重複し、Chromeのreadback警告も発生しやすい。
+    const pixels = readOcrCanvasPixels(source);
+    const background = estimateOcrBackgroundLuminance(source, pixels);
+    const margins = measureOcrInkMargins(source, background, pixels);
     const insets = {
         left: Math.max(0, minMargin - margins.left),
         top: Math.max(0, minMargin - margins.top),
@@ -502,7 +515,7 @@ function cropOcrCanvas(source, x, y, width, height, scale) {
 // 精度変化なし（劣化ケースなし）を確認。
 function toGrayscale(source) {
     const canvas = createOcrCanvas(source.width, source.height);
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     ctx.drawImage(source, 0, 0);
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const pixels = imageData.data;
@@ -547,7 +560,8 @@ const OCR_PREPROCESS_MAX_AREA = 8400000; // 2倍拡大を許す上限画素数�
 function prepareOcrCanvas(source) {
     // 巨大な選択範囲は拡大せず等倍で二値化のみ行う（処理時間・メモリの保護）
     const scale = source.width * source.height * 4 <= OCR_PREPROCESS_MAX_AREA ? 2 : 1;
-    const { canvas, ctx } = createSmoothOcrCanvas(source.width * scale, source.height * scale);
+    const { canvas, ctx } = createSmoothOcrCanvas(
+        source.width * scale, source.height * scale, true);
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);

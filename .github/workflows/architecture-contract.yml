@@ -30,6 +30,10 @@ jobs:
       - name: Content Script注入順と無効化境界の契約検査
         run: node tests/context-invalidation.test.js
 
+      # getImageData の警告再発と、余白計算の重複readbackを同時に固定する。
+      - name: OCR Canvas readbackの契約検査
+        run: node tests/ocr-canvas-readback.test.js
+
       - name: バックグラウンド分割ソースと互換バンドルの一致確認
         run: node tools/sync-background-bundle.mjs --check
 
