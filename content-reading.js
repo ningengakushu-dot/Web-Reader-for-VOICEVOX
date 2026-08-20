@@ -82,7 +82,7 @@ content.parts.reading = {
     },
 
     // TOGGLE_READING を自フレームで処理すべきか判定する。
-    // ショートカットは全フレームに配信されるため、フォーカスを持たないフレームや、
+    // ショートカットは全フレームに配信されるため、フォーカスを持つないフレームや、
     // フォーカスが子フレーム（IFRAME/FRAME）にあるフレームでは処理せず、
     // 実際にフォーカスを持つフレームだけが読み上げを担当することで二重読み上げを防ぐ。
     shouldHandleToggleReading() {
@@ -152,15 +152,21 @@ content.parts.reading = {
         chrome.runtime.onMessage.addListener(this.messageListener);
     },
 
-    // バックグラウンド経由でVOICEVOXエンジンの接続確認
+    // バックグラウンド経由でVOICEVOXエンジンの接続確認。
+    // VOICEVOX未起動は利用前には起こり得る通常状態なので、拡張機能の警告ログには残さず
+    // インジケーターだけで接続できていないことを知らせる。
     checkVoicevoxConnection() {
-        chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
-            if (!this.active) return;
-            if (chrome.runtime.lastError || !res || !res.success) {
-                console.warn("Web Reader for VOICEVOX: VOICEVOXに接続できません。");
-                this.updateUIState('error');
-            }
-        });
+        try {
+            chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
+                if (!this.active) return;
+                // 拡張機能の更新・再読み込み直後に古いcontent scriptから返るlastErrorも
+                // 初期接続確認では想定内。コールバック内で参照して未処理エラー化を防ぐ。
+                if (chrome.runtime.lastError) return;
+                if (!res || !res.success) this.updateUIState('error');
+            });
+        } catch (error) {
+            // 拡張機能の更新・再読み込み直後は接続確認を打ち切る。
+        }
     },
 
     // 音声再生リクエスト

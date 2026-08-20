@@ -13,6 +13,18 @@ assert.match(body, /this\.updateUIState\(['"]error['"]\)/,
 assert.doesNotMatch(body, /console\.(?:warn|error)\s*\(/,
   'テキスト未選択は想定内操作のため拡張機能エラーへ記録しない');
 
+const connectionStart = source.indexOf('    checkVoicevoxConnection() {');
+const connectionEnd = source.indexOf('\n    // 音声再生リクエスト', connectionStart);
+assert.ok(connectionStart >= 0 && connectionEnd > connectionStart,
+  'VOICEVOX接続確認の実装が見つかる');
+const connectionBody = source.slice(connectionStart, connectionEnd);
+assert.match(connectionBody, /this\.updateUIState\(['"]error['"]\)/,
+  'VOICEVOX未接続時のインジケーター表示は維持する');
+assert.doesNotMatch(connectionBody, /console\.(?:warn|error)\s*\(/,
+  'VOICEVOX未起動は想定内状態のため拡張機能エラーへ記録しない');
+assert.match(connectionBody, /if \(chrome\.runtime\.lastError\) return;/,
+  '更新直後などのruntime.lastErrorは初期接続確認で静かに処理する');
+
 const reviewUrl = 'https://chromewebstore.google.com/detail/web-reader-for-voicevox/ilcfondcjhaalpcghnhcejioopcbhhla/reviews';
 assert.ok(source.includes(reviewUrl), '公開済み拡張機能のレビューページを開く');
 assert.ok(!source.includes('detail/web-reader-for-voicevox/${chrome.runtime.id}'),
