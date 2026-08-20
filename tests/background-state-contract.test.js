@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
+const root = path.join(__dirname, '..');
 
 function createHarness(initialSession = {}) {
     let onMessage;
@@ -57,7 +57,7 @@ function createHarness(initialSession = {}) {
         offscreen: { createDocument: () => Promise.resolve() }
     };
     const context = vm.createContext({
-        console, chrome, importScripts() {}, setTimeout, clearTimeout, Promise, Date, Math,
+        console, chrome, setTimeout, clearTimeout, Promise, Date, Math,
         VOICEVOX_BASE_URL: 'http://127.0.0.1:50021', VOICEVOX_FETCH_TIMEOUT_MS: 15000,
         SETTING_DEFAULTS: {
             speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 1,
@@ -68,7 +68,13 @@ function createHarness(initialSession = {}) {
         fetch: async () => { throw new Error('unused'); },
         OffscreenCanvas: function() {}, createImageBitmap: async () => ({}), btoa: () => ''
     });
-    vm.runInContext(source, context, { filename: 'background.js' });
+    context.importScripts = (...files) => {
+        for (const file of files) {
+            vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
+        }
+    };
+    vm.runInContext(fs.readFileSync(path.join(root, 'background-entry.js'), 'utf8'), context,
+        { filename: 'background-entry.js' });
     assert.equal(typeof onMessage, 'function');
     const send = (message, sender) => new Promise((resolve) => {
         const keepOpen = onMessage(message, sender, resolve);
@@ -80,7 +86,7 @@ function createHarness(initialSession = {}) {
 (async () => {
     // Service Worker のメモリが消えていても、storage.session の再生宛先を復元して通知する。
     {
-        const h = createHarness({ playback: 42 });
+        const h = createHarness({ vv_playback_tab_id: 42 });
         await h.send({ type: 'PLAYBACK_ENDED', target: 'background' }, {
             id: 'ext-id', url: 'chrome-extension://ext-id/offscreen.html'
         });
@@ -92,10 +98,11 @@ function createHarness(initialSession = {}) {
 
     // 別タブへ読み上げを切り替えると、旧タブへ停止を通知してから宛先を保存する。
     {
-        const h = createHarness({ playback: 7 });
-        const response = await h.send({ type: 'GENERATE_VOICE', text: '次のタブ。' }, { tab: { id: 8 } });
+        const h = createHarness({ vv_playback_tab_id: 7 });
+        const response = await h.send({ type: 'GENERATE_VOICE', text: '次のタブ。' },
+            { id: 'ext-id', tab: { id: 8 } });
         assert.equal(response.success, true);
-        assert.equal(h.sessionData.playback, 8);
+        assert.equal(h.sessionData.vv_playback_tab_id, 8);
         assert.ok(h.tabMessages.some(({ tabId, message }) =>
             tabId === 7 && message.type === 'PLAYBACK_STOPPED'),
         '旧再生タブへ停止通知を送る');
