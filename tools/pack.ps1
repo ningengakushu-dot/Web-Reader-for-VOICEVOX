@@ -23,7 +23,7 @@ $files = @(
     'manifest.json',
     'background-entry.js', 'validation-utils.js', 'background-security.js', 'background.js',
     'content-guard.js', 'content.js', 'dom-text.js', 'offscreen-security.js', 'offscreen.js',
-    'options.js', 'capture.js', 'constants.js',
+    'options.js', 'capture.js', 'constants.js', 'runtime-messaging.js',
     'ocr-common.js', 'ocr-image.js', 'ocr-refine.js',
     'offscreen.html', 'options.html', 'capture.html',
     'options.css', 'capture.css',
