@@ -1,0 +1,75 @@
+name: refine-canvas-readback-fix
+
+on:
+  pull_request:
+    branches:
+      - develop
+
+permissions:
+  contents: write
+
+jobs:
+  refine:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/ocr-canvas-readback
+          fetch-depth: 0
+      - name: Refine source-canvas readback hint and test
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          image = Path('ocr-image.js')
+          src = image.read_text(encoding='utf-8')
+          old = '''function cropToOcrCanvas(source, sx, sy, sw, sh) {
+              const canvas = createOcrCanvas(sw, sh);
+              canvas.getContext("2d").drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+              return canvas;
+          }'''
+          new = '''function cropToOcrCanvas(source, sx, sy, sw, sh) {
+              const canvas = createOcrCanvas(sw, sh);
+              // この出力は直後の組版方向判定で画素を読む。最初のcontext生成時から
+              // readback用途を明示し、後から指定しても反映されないCanvas実装を避ける。
+              canvas.getContext("2d", { willReadFrequently: true })
+                  .drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+              return canvas;
+          }'''
+          if old not in src:
+              raise SystemExit('cropToOcrCanvas target not found')
+          image.write_text(src.replace(old, new, 1), encoding='utf-8')
+
+          test = Path('tests/ocr-canvas-readback.test.js')
+          src = test.read_text(encoding='utf-8')
+          old_api = 'globalThis.readbackTestApi = {readOcrCanvasPixels, padOcrCanvasToMargin, toGrayscale, prepareOcrCanvas, upscaleOcrCanvas};'
+          new_api = 'globalThis.readbackTestApi = {readOcrCanvasPixels, cropToOcrCanvas, padOcrCanvasToMargin, toGrayscale, prepareOcrCanvas, upscaleOcrCanvas};'
+          if old_api not in src:
+              raise SystemExit('test API target not found')
+          src = src.replace(old_api, new_api, 1)
+          anchor = '''{
+              const sourceCanvas = makeCanvas(30, 20, 255);'''
+          block = '''{
+              created.length = 0;
+              const sourceCanvas = makeCanvas(12, 10, 255);
+              const output = api.cropToOcrCanvas(sourceCanvas, 1, 1, 8, 6);
+              assert.equal(output.firstContextOptions?.willReadFrequently, true,
+                  'OCR切り出しCanvasは後段で画素を読むため、最初のcontext生成時からreadback向けにする');
+          }
+
+          '''
+          if anchor not in src:
+              raise SystemExit('test insertion anchor not found')
+          test.write_text(src.replace(anchor, block + anchor, 1), encoding='utf-8')
+          PY
+          node --check ocr-image.js
+          node --check tests/ocr-canvas-readback.test.js
+          node tests/ocr-canvas-readback.test.js
+          git rm .github/workflows/refine-canvas-readback-fix.yml
+          git add -- ocr-image.js tests/ocr-canvas-readback.test.js
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'OCR入力Canvasのreadback指定を補強'
+          git push origin HEAD:fix/ocr-canvas-readback
