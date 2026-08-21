@@ -4,7 +4,6 @@
     if (!content || content.reuseExisting) return;
     const INDICATOR_DEFAULT_TITLE = content.INDICATOR_DEFAULT_TITLE;
     const createVvRadioUiHost = content.createVvRadioUiHost;
-    const createVvRadioHtmlElement = content.createVvRadioHtmlElement;
 
 content.parts.indicator = {
     // アイコンのサイズと見た目をストレージから読み込んで適用し、変更をリアルタイムに反映する
@@ -131,7 +130,7 @@ content.parts.indicator = {
         this.shadowRoot = host.attachShadow({ mode: "closed" });
         this.shadowRoot.appendChild(this.createIndicatorStyle());
 
-        this.indicator = createVvRadioHtmlElement("div");
+        this.indicator = document.createElement("div");
         this.indicator.id = "vvradio-indicator";
         // 支援技術向けに役割と説明を付ける（tabindex は付けず、全ページのタブ順に
         // 余分な停止点を増やさない。キーボード操作はショートカットで行える）。
@@ -183,7 +182,7 @@ content.parts.indicator = {
     // インジケーターのスタイル定義を作る。
     // ページ側のCSSと干渉しないよう Shadow DOM の中だけで完結させる。
     createIndicatorStyle() {
-        const style = createVvRadioHtmlElement("style");
+        const style = document.createElement("style");
         style.textContent = `
             #vvradio-indicator {
                 position: fixed; bottom: 20px; right: 20px; width: 16px; height: 16px;

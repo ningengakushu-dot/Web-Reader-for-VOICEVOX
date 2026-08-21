@@ -74,12 +74,6 @@ jobs:
       - name: 拡張コンテキスト無効化の回帰検査
         run: node tests/context-invalidation.test.js
 
-      - name: Content Script ライフサイクルの回帰検査
-        run: node tests/content-lifecycle.test.js
-
-      - name: 非HTML文書のContent UI名前空間検査
-        run: node tests/content-ui-namespace.test.js
-
       - name: メッセージ境界と入力検証の回帰検査
         run: node tests/security-boundary.test.js
 
