@@ -141,22 +141,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 (result) => ({ success: true, ...result }));
             return true;
 
-        case "GENERATE_VOICE":
-            // 新しい読み上げの開始は、そのタブで進行中の範囲OCRを無効化する
-            // （古い認識結果が後から届いてこの読み上げを中断しないように）。
-            invalidatePendingOcr(sender.tab?.id);
-            // 宛先の保存を完了してから合成を開始し、直後の PLAYBACK_STARTED を取りこぼさない。
+        case "GENERATE_VOICE": {
+            // 新しい読み上げの開始は、そのタブで進行中の範囲OCRを無効化する。
+            // 取消状態の session 保存を同じ直列キュー内で待ち、直後に届く古いOCR結果が
+            // 新しい読み上げを追い越さないようにする。
+            const ocrInvalidated = invalidatePendingOcr(sender.tab?.id);
             enqueueVoiceOperation(async () => {
+                await ocrInvalidated;
                 await switchPlaybackTabTo(sender.tab?.id ?? null);
                 await handleGenerateVoice(request.text, sendResponse);
             }).catch((err) => sendResponse({ success: false, error: err.message }));
             return true;
+        }
 
-        case "STOP_ALL":
+        case "STOP_ALL": {
             // 停止はそのタブで進行中の範囲OCRも取り消す（完了後に勝手に読み上げを始めない）。
-            invalidatePendingOcr(sender.tab?.id);
-            respondWith(enqueueVoiceOperation(stopOffscreenAudioIfPresent), sendResponse);
+            const ocrInvalidated = invalidatePendingOcr(sender.tab?.id);
+            respondWith(enqueueVoiceOperation(async () => {
+                await ocrInvalidated;
+                await stopOffscreenAudioIfPresent();
+            }), sendResponse);
             return true;
+        }
 
         case "CAPTURE_OCR_REGION": {
             // ページ内オーバーレイで選択された範囲のキャプチャ→OCR開始要求
@@ -185,20 +191,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return false;
 
         case "OCR_COMPLETE": {
-            // offscreen でのOCR完了。認識テキストを既存の読み上げパイプラインへ流す。
+            // OCR完了も読み上げ開始・停止と同じ直列キューへ即座に積む。
+            // session の照合は非同期だが、キューへ入れる順序をメッセージ到着順に固定することで、
+            // 後から来た GENERATE_VOICE / STOP_ALL に古いOCRが追い越されるのを防ぐ。
             const tabId = request.tabId ?? null;
-            // 選び直し・停止・別の読み上げ開始で古くなった要求の結果は使わない。
-            if (consumeStaleOcrCompletion(tabId, request.requestId)) return false;
-            if (request.error || !request.text) {
-                notifyTab(tabId, {
-                    type: "OCR_STATUS",
-                    status: "error",
-                    message: request.error || "文字を認識できませんでした。"
-                }, "OCRエラー通知の送信失敗");
-                return false;
-            }
-            // 宛先の保存完了後に読み上げを始め、開始通知の転送先を確実にする。
             enqueueVoiceOperation(async () => {
+                if (await consumeStaleOcrCompletion(tabId, request.requestId)) return;
+                if (request.error || !request.text) {
+                    notifyTab(tabId, {
+                        type: "OCR_STATUS",
+                        status: "error",
+                        message: request.error || "文字を認識できませんでした。"
+                    }, "OCRエラー通知の送信失敗");
+                    return;
+                }
                 await switchPlaybackTabTo(tabId);
                 notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
                 await handleGenerateVoice(request.text, (res) => {

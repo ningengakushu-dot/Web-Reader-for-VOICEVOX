@@ -1,7 +1,9 @@
 // background.js の公開前監査で修正した挙動の回帰検査:
 // - 読み上げ中のタブを閉じたら offscreen の再生を止める（存在しない offscreen は作らない）
 // - 停止要求（STOP_ALL）は offscreen が無ければ生成しない
+// - キャプチャ前後に対象タブが切り替わったら、別タブの画像をOCRしない
 // - 古い範囲OCRの結果（選び直し・停止・別読み上げより前の要求）は読み上げない
+// - Service Worker のメモリが消えても storage.session からOCR状態を復元する
 // - 句点の無い長文は読点・空白で上限以内へ二次分割し、文字を落とさない
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -9,7 +11,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8')
-    + '\n;globalThis.__test = { splitText };';
+    + '\n;globalThis.__test = { splitText, resetOcrMemory: () => latestOcrRequestByTab.clear() };';
 
 let onMessage;
 let onRemoved;
@@ -130,6 +132,36 @@ const send = (message, sender) => new Promise((resolve) => {
         offscreenMessages.length = 0;
     }
 
+    // --- 対象タブが切り替わった場合は別タブをキャプチャしない ---
+    {
+        const region = { rect: { x: 0, y: 0, width: 100, height: 50 }, viewportWidth: 1000 };
+        const originalQuery = chrome.tabs.query;
+        try {
+            chrome.tabs.query = () => Promise.resolve([{ id: 10, windowId: 1 }]);
+            const before = await send({ type: 'CAPTURE_OCR_REGION', ...region },
+                { tab: { id: 9, windowId: 1 }, frameId: 0 });
+            assert.equal(before.success, false);
+            assert.match(before.error, /タブが切り替わりました/);
+            assert.ok(!offscreenMessages.some((m) => m.type === 'OCR_RECOGNIZE'),
+                'キャプチャ前に別タブへ切り替わったらOCR要求を送らない');
+
+            let queryCount = 0;
+            chrome.tabs.query = () => Promise.resolve([{
+                id: queryCount++ === 0 ? 9 : 10,
+                windowId: 1
+            }]);
+            const during = await send({ type: 'CAPTURE_OCR_REGION', ...region },
+                { tab: { id: 9, windowId: 1 }, frameId: 0 });
+            assert.equal(during.success, false);
+            assert.match(during.error, /タブが切り替わりました/);
+            assert.ok(!offscreenMessages.some((m) => m.type === 'OCR_RECOGNIZE'),
+                'キャプチャ中に別タブへ切り替わったら取得画像をOCRへ渡さない');
+        } finally {
+            chrome.tabs.query = originalQuery;
+            offscreenMessages.length = 0;
+        }
+    }
+
     // --- 古い範囲OCRの結果は読み上げない ---
     {
         const region = { rect: { x: 0, y: 0, width: 100, height: 50 }, viewportWidth: 1000 };
@@ -157,28 +189,48 @@ const send = (message, sender) => new Promise((resolve) => {
         await send({ type: 'OCR_COMPLETE', target: 'background', tabId: 9,
             requestId: second.requestId, text: '新しい結果' }, offscreenSender);
         await settle();
-        const enqueued = offscreenMessages.find((m) => m.type === 'ENQUEUE_TEXTS');
+        let enqueued = offscreenMessages.find((m) => m.type === 'ENQUEUE_TEXTS');
         assert.ok(enqueued && enqueued.texts.join('') === '新しい結果', '最新のOCR結果は読み上げる');
         offscreenMessages.length = 0;
         tabMessages.length = 0;
 
-        // 要求3の後に、そのタブが別の読み上げ（テキスト選択）を始めた場合
+        // 要求3の後にService Workerのメモリだけが消えても、sessionに残った最新要求を復元する。
         await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: { id: 9, windowId: 1 }, frameId: 0 });
         const third = offscreenMessages.find((m) => m.type === 'OCR_RECOGNIZE');
+        assert.equal(sessionData.vv_ocr_request_state.tabs['9'], third.requestId,
+            '最新OCR要求を storage.session に保存する');
+        offscreenMessages.length = 0;
+        context.__test.resetOcrMemory();
+        await send({ type: 'OCR_COMPLETE', target: 'background', tabId: 9,
+            requestId: third.requestId, text: 'SW復帰後の結果' }, offscreenSender);
+        await settle();
+        enqueued = offscreenMessages.find((m) => m.type === 'ENQUEUE_TEXTS');
+        assert.ok(enqueued && enqueued.texts.join('') === 'SW復帰後の結果',
+            'SW休止後もsessionから最新要求を復元して受け付ける');
+        offscreenMessages.length = 0;
+        tabMessages.length = 0;
+
+        // 要求4の後に別読み上げで取消し、さらにSWメモリが消えても古い完了を復活させない。
+        await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: { id: 9, windowId: 1 }, frameId: 0 });
+        const fourth = offscreenMessages.find((m) => m.type === 'OCR_RECOGNIZE');
+        assert.ok(fourth.requestId > third.requestId, '要求番号も storage.session 上で単調増加する');
         offscreenMessages.length = 0;
         await send({ type: 'GENERATE_VOICE', text: '選択テキスト。' }, { tab: { id: 9 } });
         await settle();
+        assert.equal(sessionData.vv_ocr_request_state.tabs['9'], null,
+            '別読み上げ開始時のOCR取消状態を storage.session に保存する');
         offscreenMessages.length = 0;
         tabMessages.length = 0;
+        context.__test.resetOcrMemory();
         await send({ type: 'OCR_COMPLETE', target: 'background', tabId: 9,
-            requestId: third.requestId, text: '遅れて届いた結果' }, offscreenSender);
+            requestId: fourth.requestId, text: '遅れて届いた結果' }, offscreenSender);
         await settle();
         assert.ok(!offscreenMessages.some((m) => m.type === 'STOP_AUDIO' || m.type === 'ENQUEUE_TEXTS'),
-            '別の読み上げを始めた後に届いた古いOCR結果で読み上げを中断しない');
+            'SW休止後でも取消済みOCR結果で読み上げを中断しない');
         assert.ok(tabMessages.some((m) => m.tabId === 9 && m.message.type === 'OCR_STATUS'
             && m.message.status === 'done'), '取り残された「文字認識中」表示は片付ける');
 
-        // 通し番号の無い完了（SW休止で照合できない場合の互換）は従来どおり受け付ける
+        // 通し番号の無い完了は、更新直後に旧offscreenが残る場合の互換として受け付ける。
         offscreenMessages.length = 0;
         await send({ type: 'OCR_COMPLETE', target: 'background', tabId: 9, text: '番号なし' }, offscreenSender);
         await settle();

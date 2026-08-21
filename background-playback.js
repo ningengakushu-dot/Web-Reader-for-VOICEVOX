@@ -92,14 +92,15 @@ async function stopPlaybackForTab(tabId) {
 // 手段が残らないため、鳴りっぱなしを防ぐ）。
 chrome.tabs.onRemoved.addListener((tabId) => {
     lastShortcut.delete(tabId);
-    latestOcrRequestByTab.delete(tabId);
+    void clearPendingOcrState(tabId);
     stopPlaybackForTab(tabId);
 });
 
-// 再生中のタブが別ページへ遷移／リロードされたら、音声が鳴りっぱなしになるのを防ぐため
-// 再生を停止する。
+// 再生中のタブが別ページへ遷移／リロードされたら、音声が鳴りっぱなしになるのを防ぐ。
+// 同時に、そのページで開始した範囲OCRも無効化し、遷移後に古い結果を読み上げない。
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status !== "loading") return;
+    void invalidatePendingOcr(tabId);
     stopPlaybackForTab(tabId);
 });
 

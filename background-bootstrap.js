@@ -136,6 +136,31 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // storage.session の既定クォータ（10MB）に収めるための dataURL 長の上限目安。
 // PNG がこれを超える高解像度画面では JPEG への再エンコード（必要なら縮小）を行う。
 const CAPTURE_MAX_DATAURL_LENGTH = 8 * 1024 * 1024;
+const CAPTURE_TAB_CHANGED_MESSAGE = "キャプチャ対象のタブが切り替わりました。元のタブに戻って、もう一度お試しください。";
+
+// captureVisibleTab は tabId を指定できず「そのウィンドウで現在アクティブなタブ」を撮る。
+// 範囲選択後の短い待ち時間に利用者が別タブへ移動すると、別ページを元タブの範囲座標で
+// OCRしてしまうため、キャプチャの直前・直後で対象タブがまだアクティブか確認する。
+async function assertCaptureTabIsStillActive(tab) {
+    if (!Number.isInteger(tab?.id) || !Number.isInteger(tab?.windowId)) {
+        throw new Error("キャプチャ対象のタブを特定できません。");
+    }
+    if (tab.active === false) throw new Error(CAPTURE_TAB_CHANGED_MESSAGE);
+    const activeTabs = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+    const activeTab = Array.isArray(activeTabs) ? activeTabs[0] : null;
+    // 実ブラウザでは通常1件返る。テスト用モック等で空配列の場合は captureVisibleTab
+    // 自身の成否に任せ、別タブが明示的に返った場合だけ確実に拒否する。
+    if (activeTab?.id != null && activeTab.id !== tab.id) {
+        throw new Error(CAPTURE_TAB_CHANGED_MESSAGE);
+    }
+}
+
+async function captureExpectedVisibleTab(tab) {
+    await assertCaptureTabIsStillActive(tab);
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    await assertCaptureTabIsStillActive(tab);
+    return dataUrl;
+}
 
 // ツールバーアイコンのクリックでもOCR読み上げを起動する（PDFビューア等、
 // コンテキストメニューやショートカットが使えない場合の確実な入口）。
@@ -182,7 +207,7 @@ async function startCaptureOcr(tab) {
 async function startCaptureOcrInTab(tab) {
     let captureStored = false;
     try {
-        let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+        let dataUrl = await captureExpectedVisibleTab(tab);
         if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
             // captureVisibleTab は毎秒の呼び出し回数制限があるため再キャプチャはせず、
             // 取得済みのPNGをJPEGへ再エンコードしてクォータに収める
@@ -214,63 +239,176 @@ async function startCaptureOcrInTab(tab) {
         // ページ内にUIを出せない場面もあるため、ツールバーバッジで簡易通知する。
         console.warn("Background: 画面キャプチャに失敗:", err.message);
         const isFileUrl = /^file:/i.test(String(tab.url ?? ""));
-        flashActionBadge(tab.id, "ERR", isFileUrl
-            ? "ローカルファイルをキャプチャできません。拡張機能の詳細で「ファイルの URL へのアクセスを許可する」を ON にしてください"
-            : "このページは画面をキャプチャできません（Chromeの設定画面・ウェブストア等）");
+        const message = err.message === CAPTURE_TAB_CHANGED_MESSAGE
+            ? CAPTURE_TAB_CHANGED_MESSAGE
+            : isFileUrl
+                ? "ローカルファイルをキャプチャできません。拡張機能の詳細で「ファイルの URL へのアクセスを許可する」を ON にしてください"
+                : "このページは画面をキャプチャできません（Chromeの設定画面・ウェブストア等）";
+        flashActionBadge(tab.id, "ERR", message);
     }
 }
 
-// タブごとの「最新の範囲OCR要求」。OCRは数十秒かかることがあり、その間に利用者が
-// 別の範囲を選び直したり、テキスト選択の読み上げを始めたり、停止したりできる。
-// 古い要求の結果が後から届いて新しい読み上げを中断・上書きしないよう、要求に通し番号を
-// 付けて offscreen に往復させ、完了時に最新の番号と一致するものだけを読み上げる。
-//   値が番号: その番号の要求だけ有効 / null: 停止・別読み上げで無効化済み（結果は捨てる）
-// SW休止で失われた場合は照合できないので、その要求の結果は従来どおり受け付ける。
-let ocrRequestSeq = 0;
+// タブごとの最新OCR要求を storage.session に保存する。
+// Service Worker は休止・再起動でメモリ上の Map を失うため、通し番号とタブ別の状態を
+// session にも保持し、復帰後に届いた OCR_COMPLETE も「最新か／取消済みか」を判定する。
+// tabs[tabId] が番号ならその要求だけ有効、null なら停止・別読み上げ・遷移で取消済み。
+const OCR_REQUEST_STATE_STORAGE_KEY = "vv_ocr_request_state";
 const latestOcrRequestByTab = new Map();
-function invalidatePendingOcr(tabId) {
-    if (Number.isInteger(tabId) && latestOcrRequestByTab.has(tabId)) {
-        latestOcrRequestByTab.set(tabId, null);
-    }
+let ocrRequestStateQueue = Promise.resolve();
+
+function enqueueOcrRequestStateOperation(operation) {
+    const next = ocrRequestStateQueue.then(operation);
+    ocrRequestStateQueue = next.catch(() => {});
+    return next;
 }
 
-// ページ内オーバーレイで選択された範囲をキャプチャし、offscreen にOCRを依頼する。
-// OCRの完了は offscreen からの OCR_COMPLETE メッセージで受け取り（イベント駆動）、
-// メッセージ応答チャネルを長時間保持しない（Service Worker の休止対策）。
-async function captureAndRecognizeRegion(request, tab) {
-    let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
-        dataUrl = await reencodeCaptureAsJpeg(dataUrl);
+function normalizeOcrRequestState(value) {
+    let sequence = Number.isSafeInteger(value?.sequence) && value.sequence >= 0 ? value.sequence : 0;
+    const tabs = {};
+    const storedTabs = value?.tabs;
+    if (storedTabs && typeof storedTabs === "object" && !Array.isArray(storedTabs)) {
+        for (const [key, storedValue] of Object.entries(storedTabs)) {
+            const tabId = Number(key);
+            if (!Number.isInteger(tabId) || tabId < 0) continue;
+            if (storedValue === null) {
+                tabs[String(tabId)] = null;
+                continue;
+            }
+            if (Number.isSafeInteger(storedValue) && storedValue > 0) {
+                tabs[String(tabId)] = storedValue;
+                sequence = Math.max(sequence, storedValue);
+            }
+        }
     }
-    if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
-        throw new Error("キャプチャ画像が大きすぎます。表示倍率を下げて再度お試しください。");
-    }
-    await setupOffscreen();
-    const requestId = ++ocrRequestSeq;
-    latestOcrRequestByTab.set(tab.id, requestId);
-    await sendToOffscreen({
-        type: "OCR_RECOGNIZE",
-        dataUrl,
-        rect: request.rect,
-        viewportWidth: request.viewportWidth,
-        tabId: tab.id,
-        requestId
+    return { sequence, tabs };
+}
+
+async function readOcrRequestState() {
+    const stored = await chrome.storage.session.get(OCR_REQUEST_STATE_STORAGE_KEY);
+    return normalizeOcrRequestState(stored?.[OCR_REQUEST_STATE_STORAGE_KEY]);
+}
+
+function writeOcrRequestState(state) {
+    return chrome.storage.session.set({ [OCR_REQUEST_STATE_STORAGE_KEY]: state });
+}
+
+function hasOwnOcrTab(state, tabId) {
+    return Object.prototype.hasOwnProperty.call(state.tabs, String(tabId));
+}
+
+async function registerPendingOcr(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0) throw new Error("OCR要求元タブが不正です。");
+    return enqueueOcrRequestStateOperation(async () => {
+        const state = await readOcrRequestState();
+        if (state.sequence >= Number.MAX_SAFE_INTEGER) {
+            throw new Error("OCR要求番号の上限に達しました。ブラウザを再起動してください。");
+        }
+        const requestId = state.sequence + 1;
+        state.sequence = requestId;
+        state.tabs[String(tabId)] = requestId;
+        await writeOcrRequestState(state);
+        latestOcrRequestByTab.set(tabId, requestId);
+        return requestId;
     });
 }
 
-// OCR_COMPLETE が今も有効な要求のものかを判定する。無効なら true を返して呼び出し側に
-// 捨てさせる。停止・別読み上げで無効化された場合は「文字認識中…」表示だけを片付ける
-// （より新しいOCRが進行中の場合はそのトーストを消さないよう何も通知しない）。
+// 停止・別読み上げ・ページ遷移では、そのタブに保存済みの要求がある場合だけ null にする。
+// 呼び出し自体をキューへ入れるため、直後に OCR_COMPLETE が届いても取消が先に反映される。
+function invalidatePendingOcr(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0) return Promise.resolve();
+    if (latestOcrRequestByTab.has(tabId)) latestOcrRequestByTab.set(tabId, null);
+    return enqueueOcrRequestStateOperation(async () => {
+        const state = await readOcrRequestState();
+        if (!hasOwnOcrTab(state, tabId)) {
+            latestOcrRequestByTab.delete(tabId);
+            return;
+        }
+        state.tabs[String(tabId)] = null;
+        await writeOcrRequestState(state);
+        latestOcrRequestByTab.set(tabId, null);
+    }).catch((error) => {
+        console.warn("Background: OCR取消状態の保存に失敗:", error.message);
+    });
+}
+
+// タブ終了時は状態自体を削除する。以後届く完了通知は「照合できない要求」として捨てる。
+function clearPendingOcrState(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0) return Promise.resolve();
+    latestOcrRequestByTab.delete(tabId);
+    return enqueueOcrRequestStateOperation(async () => {
+        const state = await readOcrRequestState();
+        if (!hasOwnOcrTab(state, tabId)) return;
+        delete state.tabs[String(tabId)];
+        await writeOcrRequestState(state);
+    }).catch((error) => {
+        console.warn("Background: OCR状態の削除に失敗:", error.message);
+    });
+}
+
+async function clearPendingOcrIfCurrent(tabId, requestId) {
+    return enqueueOcrRequestStateOperation(async () => {
+        const state = await readOcrRequestState();
+        if (state.tabs[String(tabId)] !== requestId) return;
+        delete state.tabs[String(tabId)];
+        await writeOcrRequestState(state);
+        if (latestOcrRequestByTab.get(tabId) === requestId) latestOcrRequestByTab.delete(tabId);
+    }).catch((error) => {
+        console.warn("Background: 失敗したOCR要求の状態削除に失敗:", error.message);
+    });
+}
+
+// ページ内オーバーレイで選択された範囲をキャプチャし、offscreen にOCRを依頼する。
+// 要求番号は画像取得より先に session へ保存する。複数要求が並行しても、利用者が後から
+// 開始した要求ほど大きい番号になり、遅いキャプチャが後から完了して順序を逆転させない。
+async function captureAndRecognizeRegion(request, tab) {
+    const requestId = await registerPendingOcr(tab.id);
+    try {
+        let dataUrl = await captureExpectedVisibleTab(tab);
+        if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+            dataUrl = await reencodeCaptureAsJpeg(dataUrl);
+        }
+        if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+            throw new Error("キャプチャ画像が大きすぎます。表示倍率を下げて再度お試しください。");
+        }
+        await setupOffscreen();
+        await sendToOffscreen({
+            type: "OCR_RECOGNIZE",
+            dataUrl,
+            rect: request.rect,
+            viewportWidth: request.viewportWidth,
+            tabId: tab.id,
+            requestId
+        });
+    } catch (error) {
+        await clearPendingOcrIfCurrent(tab.id, requestId);
+        throw error;
+    }
+}
+
+// OCR_COMPLETE が今も有効な要求のものかを判定する。requestId 付きの現行要求は
+// storage.session を正として照合し、状態が無い／番号が違う／取消済みなら捨てる。
+// requestId の無い旧版由来の完了だけは更新直後の互換性のため従来どおり受け付ける。
 function consumeStaleOcrCompletion(tabId, requestId) {
-    if (!Number.isInteger(requestId) || !latestOcrRequestByTab.has(tabId)) return false;
-    const latest = latestOcrRequestByTab.get(tabId);
-    if (latest === requestId) {
+    if (!Number.isInteger(requestId)) return Promise.resolve(false);
+    if (!Number.isInteger(tabId) || tabId < 0) return Promise.resolve(true);
+    return enqueueOcrRequestStateOperation(async () => {
+        const state = await readOcrRequestState();
+        const latest = hasOwnOcrTab(state, tabId) ? state.tabs[String(tabId)] : undefined;
+        if (latest !== requestId) {
+            if (latest === null) notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
+            if (latest === undefined) latestOcrRequestByTab.delete(tabId);
+            else latestOcrRequestByTab.set(tabId, latest);
+            return true;
+        }
+        delete state.tabs[String(tabId)];
+        await writeOcrRequestState(state);
         latestOcrRequestByTab.delete(tabId);
         return false;
-    }
-    // null は次の要求が来るまで残す（同じタブに複数の古い要求が並んでいても全て捨てる）。
-    if (latest === null) notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
-    return true;
+    }).catch((error) => {
+        // 状態を検証できないときに古いOCRを読み上げる方が危険なので fail closed にする。
+        console.warn("Background: OCR完了状態の照合に失敗:", error.message);
+        return true;
+    });
 }
 
 // PNGのdataURLをJPEG（品質92%）へ再エンコードする。
