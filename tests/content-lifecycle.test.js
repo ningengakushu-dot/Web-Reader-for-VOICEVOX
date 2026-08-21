@@ -32,7 +32,7 @@ const createElement = () => ({
 });
 const documentMock = {
     body: createElement(), documentElement: createElement(), activeElement: null,
-    createElement, createElementNS() { return createElement(); }, getElementById() { return null; },
+    createElement, getElementById() { return null; },
     addEventListener(type, fn) { documentListeners.add(type, fn); },
     removeEventListener(type, fn) { documentListeners.remove(type, fn); },
     hasFocus() { return true; }

@@ -210,7 +210,6 @@ setImmediate(() => {
             documentElement: dummyElement,
             activeElement: null,
             createElement: () => createDummyElement(),
-            createElementNS: () => createDummyElement(),
             addEventListener: () => {},
             removeEventListener: () => {},
             getElementById: (id) => elementsMock[id] || null,

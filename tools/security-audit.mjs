@@ -86,9 +86,7 @@ for (const file of firstPartyJs) {
         const allowed = url.startsWith('http://127.0.0.1:50021')
             || url.startsWith('https://chromewebstore.google.com/')
             || url.startsWith('https://voicevox.hiroshiba.jp/')
-            || url.startsWith('https://github.com/')
-            // DOM名前空間の識別子であり、通信先・外部リソースではない。
-            || url === 'http://www.w3.org/1999/xhtml';
+            || url.startsWith('https://github.com/');
         if (!allowed) fail(`${file}: unreviewed remote URL ${url}`);
     }
 }
