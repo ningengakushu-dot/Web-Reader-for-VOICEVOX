@@ -13,7 +13,8 @@ const createElement = () => ({
 });
 const documentMock = {
     body: createElement(), documentElement: createElement(), activeElement: null,
-    createElement, getElementById() { return null; }, addEventListener() {}, removeEventListener() {},
+    createElement, createElementNS() { return createElement(); }, getElementById() { return null; },
+    addEventListener() {}, removeEventListener() {},
     hasFocus() { return true; }
 };
 const windowMock = {
