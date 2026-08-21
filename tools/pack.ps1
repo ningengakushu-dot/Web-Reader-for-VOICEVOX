@@ -27,7 +27,7 @@ $files = @(
     'content-common.js', 'content-indicator.js', 'content-reading.js', 'content-notice.js', 'content-ocr.js', 'content-entry.js',
     'offscreen-security.js', 'offscreen-entry.js', 'offscreen-ocr.js', 'offscreen-audio.js',
     'options.js', 'capture.js', 'constants.js', 'runtime-messaging.js',
-    'ocr-common.js', 'ocr-image.js', 'ocr-refine.js',
+    'tesseract-cache-config.js', 'ocr-common.js', 'ocr-image.js', 'ocr-refine.js',
     'offscreen.html', 'options.html', 'capture.html',
     'options.css', 'capture.css',
     'LICENSE', 'LICENSE-APACHE-2.0'
