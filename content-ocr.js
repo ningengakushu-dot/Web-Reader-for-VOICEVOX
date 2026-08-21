@@ -4,6 +4,7 @@
     if (!content || content.reuseExisting) return;
     const OCR_STALL_TIMEOUT_MS = content.OCR_STALL_TIMEOUT_MS;
     const createVvRadioUiHost = content.createVvRadioUiHost;
+    const createVvRadioHtmlElement = content.createVvRadioHtmlElement;
 
 content.parts.ocr = {
     // --- ページ内OCR範囲選択 ---
@@ -33,7 +34,7 @@ content.parts.ocr = {
         parent.appendChild(host);
         const root = host.attachShadow({ mode: "closed" });
 
-        const style = document.createElement("style");
+        const style = createVvRadioHtmlElement("style");
         style.textContent = `
             #vvradio-ocr-overlay {
                 position: fixed; inset: 0; z-index: 2147483647;
@@ -56,12 +57,12 @@ content.parts.ocr = {
         `;
         root.appendChild(style);
 
-        const overlay = document.createElement("div");
+        const overlay = createVvRadioHtmlElement("div");
         overlay.id = "vvradio-ocr-overlay";
-        const hint = document.createElement("div");
+        const hint = createVvRadioHtmlElement("div");
         hint.id = "vvradio-ocr-hint";
         hint.textContent = "読み上げたい範囲をドラッグで選択（Escまたはクリックでキャンセル）";
-        const box = document.createElement("div");
+        const box = createVvRadioHtmlElement("div");
         box.id = "vvradio-ocr-box";
         overlay.appendChild(hint);
         overlay.appendChild(box);
@@ -282,7 +283,7 @@ content.parts.ocr = {
         // 途中で消してしまわないよう、新しい表示のたびに予約を取り消す。
         this.clearOcrToastDismiss();
         if (!this.ocrToast) {
-            const toast = document.createElement("div");
+            const toast = createVvRadioHtmlElement("div");
             toast.id = "vvradio-ocr-toast";
             toast.setAttribute("role", "status");
             toast.style.cssText = `

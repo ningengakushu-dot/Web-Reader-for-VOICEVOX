@@ -3,6 +3,7 @@
     const content = globalThis.VVRadioContent;
     if (!content || content.reuseExisting) return;
     const createVvRadioUiHost = content.createVvRadioUiHost;
+    const createVvRadioHtmlElement = content.createVvRadioHtmlElement;
 
 content.parts.notice = {
     // 既存ユーザー向けアップデート初回お知らせの確認と表示権の獲得
@@ -27,7 +28,7 @@ content.parts.notice = {
         parent.appendChild(host);
         const root = host.attachShadow({ mode: "open" });
 
-        const style = document.createElement("style");
+        const style = createVvRadioHtmlElement("style");
         style.textContent = `
             :host {
                 all: initial;
@@ -126,7 +127,7 @@ content.parts.notice = {
             }
         `;
 
-        const card = document.createElement("div");
+        const card = createVvRadioHtmlElement("div");
         card.className = "notice-card";
         card.innerHTML = `
             <div class="notice-header">
