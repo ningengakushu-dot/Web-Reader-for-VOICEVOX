@@ -12,7 +12,7 @@ content.parts.indicator = {
         const keys = ["iconSize", "iconStyle", "vv_character_icon", "vv_custom_icon"];
         chrome.storage.local.get(keys, (res) => {
             if (!this.active || !this.indicator || chrome.runtime.lastError) return;
-            this.applyIndicatorSize(res.iconSize || 16);
+            this.applyIndicatorSize(res.iconSize || 32);
             this.applyIndicatorStyle(res);
         });
 
@@ -24,7 +24,7 @@ content.parts.indicator = {
 
             // サイズのリアルタイム反映
             if (changes.iconSize) {
-                this.applyIndicatorSize(changes.iconSize.newValue || 16);
+                this.applyIndicatorSize(changes.iconSize.newValue || 32);
             }
 
             // 見た目のリアルタイム反映。設定画面での保存直後に開いているページへ即反映する。
@@ -50,7 +50,7 @@ content.parts.indicator = {
     // キャラクター名の文字表示は円に内接させたいので、文字サイズも連動させる。
     applyIndicatorSize(size) {
         const numeric = Number(size);
-        const safeSize = Number.isFinite(numeric) ? Math.min(128, Math.max(16, numeric)) : 16;
+        const safeSize = Number.isFinite(numeric) ? Math.min(128, Math.max(16, numeric)) : 32;
         this.indicator.style.width = `${safeSize}px`;
         this.indicator.style.height = `${safeSize}px`;
         this.indicator.style.fontSize = `${Math.max(8, Math.round(safeSize * 0.62))}px`;
@@ -185,7 +185,7 @@ content.parts.indicator = {
         const style = document.createElement("style");
         style.textContent = `
             #vvradio-indicator {
-                position: fixed; bottom: 20px; right: 20px; width: 16px; height: 16px;
+                position: fixed; bottom: 20px; right: 20px; width: 32px; height: 32px;
                 background-color: #3498db; border-radius: 50%; z-index: 2147483647;
                 opacity: 0.4; transition: opacity 0.3s ease, transform 0.2s ease, box-shadow 0.3s ease;
                 cursor: grab; display: flex; align-items: center; justify-content: center;
@@ -327,7 +327,7 @@ content.parts.indicator = {
                 const top = Number(res.vvradio_icon_pos.top);
                 if (!Number.isFinite(left) || !Number.isFinite(top)) return;
                 const rawSize = Number(res.iconSize);
-                const size = Number.isFinite(rawSize) ? Math.min(128, Math.max(16, rawSize)) : 16;
+                const size = Number.isFinite(rawSize) ? Math.min(128, Math.max(16, rawSize)) : 32;
                 // 画面サイズ変更などで画面外に出ないように補正
                 const maxLeft = window.innerWidth - size;
                 const maxTop = window.innerHeight - size;
