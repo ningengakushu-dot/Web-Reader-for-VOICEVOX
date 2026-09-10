@@ -20,6 +20,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // 「画像を指定する」で選ばれた画像。保存ボタンを押すまで storage には書かない。
     let pendingCustomIcon = null;
 
+    // 保存済みの読み上げキャラクター。接続が回復して一覧を取り直すときに使う。
+    let savedSpeakerId = null;
+
     const runtimeMessaging = globalThis.VVRadioRuntimeMessaging || {
         request(message) {
             return new Promise((resolve, reject) => {
@@ -122,19 +125,12 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error restoring settings:', error);
         }
 
+        // 接続が回復したときに一覧を取り直せるよう、保存済みの選択を覚えておく。
+        savedSpeakerId = result.speakerId;
+
         const engineCheck = beginEngineCheck();
         try {
-            const speakers = await getSpeakers();
-            renderSpeakers(speakers);
-            // 一覧の描画後でないと select に値を入れられないため、ここで復元する。
-            // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
-            // undefined/null を除外する判定にする。
-            if (result.speakerId !== undefined && result.speakerId !== null) {
-                const savedId = String(result.speakerId);
-                if ([...speakerSelect.options].some((option) => option.value === savedId)) {
-                    speakerSelect.value = savedId;
-                }
-            }
+            await loadSpeakers();
             applyEngineCheck(engineCheck, true);
         } catch (error) {
             console.error('Error during init:', error);
@@ -142,7 +138,32 @@ document.addEventListener('DOMContentLoaded', () => {
             applyEngineCheck(engineCheck, false);
         } finally {
             showLoader(false);
+            // 初期化中に押された「再確認」が世代交代で早期終了していても、
+            // ボタンが押せないまま残らないようにする。
+            if (engineRecheck) engineRecheck.disabled = false;
         }
+    }
+
+    // キャラクター一覧を取得して描画し、保存済みの選択を復元する。
+    // 一覧の描画後でないと select に値を入れられないため、復元はここで行う。
+    // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
+    // undefined/null を除外する判定にする。
+    async function loadSpeakers() {
+        const speakers = await getSpeakers();
+        renderSpeakers(speakers);
+        if (savedSpeakerId !== undefined && savedSpeakerId !== null) {
+            const savedId = String(savedSpeakerId);
+            if ([...speakerSelect.options].some((option) => option.value === savedId)) {
+                speakerSelect.value = savedId;
+            }
+        }
+    }
+
+    // 一覧が空のまま残っていないか。エンジン停止中に開いた画面では
+    // 「キャラクターを取得中...」の初期値だけが残り、保存もできない。
+    function hasSpeakerOptions() {
+        return speakerSelect.options.length > 0
+            && [...speakerSelect.options].some((option) => option.value !== '');
     }
 
     async function getSpeakers() {
@@ -182,8 +203,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // パスはインストーラー版でインストール先を変えていない場合の既定値で、
     // VOICEVOX 公式が案内しているものと同じ。インストール先の変更・ZIP版では
     // 成立しないので、UI 側で書き換え方を併記する。
-    // 拡張機能からプロセスを起動する手段は無いため、ここで扱うのは
+    // 拡張機能が自力でプロセスを起動するにはネイティブメッセージングホストの
+    // 別途インストールが要る。それを求めない方針のため、ここで扱うのは
     // ユーザー自身が保存するための文字列のみ。
+    // VBScript は Windows で非推奨化が進んでおり（2027年ごろ既定無効化の予定）、
+    // 将来この経路が使えなくなった場合は別の起動方法へ差し替える必要がある。
     const ENGINE_LAUNCH_LINE =
         'CreateObject("WScript.Shell").Run """%LOCALAPPDATA%\\Programs\\VOICEVOX\\vv-engine\\run.exe""", 0, False';
 
@@ -227,6 +251,40 @@ document.addEventListener('DOMContentLoaded', () => {
         setEngineConnected(connected);
     }
 
+    // 画面へ戻るたびに走るため、短い間隔での重複を抑える。
+    const ENGINE_AUTO_CHECK_INTERVAL_MS = 3000;
+    let lastEngineCheckAt = 0;
+
+    /**
+     * 接続を確かめ直す。回復していてキャラクター一覧が空のままなら取り直す。
+     * 一覧を持たない画面は、接続できていても保存できず使い物にならないため。
+     * @param {boolean} byUser 「再確認」ボタンからの実行か
+     */
+    async function runEngineCheck(byUser) {
+        const now = Date.now();
+        if (!byUser && now - lastEngineCheckAt < ENGINE_AUTO_CHECK_INTERVAL_MS) return;
+        lastEngineCheckAt = now;
+
+        const seq = beginEngineCheck();
+        if (engineRecheck) engineRecheck.disabled = true;
+        if (byUser) setEngineConnected(null);
+        try {
+            const response = await runtimeMessaging.requestOrNull({ type: 'CHECK_CONNECTION' });
+            const connected = Boolean(response && response.success);
+            if (connected && !hasSpeakerOptions()) {
+                try {
+                    await loadSpeakers();
+                } catch (error) {
+                    console.error('Error reloading speakers:', error);
+                }
+            }
+            applyEngineCheck(seq, connected);
+        } finally {
+            // 世代交代で早期終了した場合でも、ボタンが押せないまま残らないようにする。
+            if (engineRecheck) engineRecheck.disabled = false;
+        }
+    }
+
     const COPY_BUTTON_LABEL = 'この1行をコピー';
     let copyLabelTimer = null;
 
@@ -235,15 +293,21 @@ document.addEventListener('DOMContentLoaded', () => {
         if (engineSetup) engineSetup.hidden = !isWindows;
 
         if (engineRecheck) {
-            engineRecheck.addEventListener('click', async () => {
-                const seq = beginEngineCheck();
-                engineRecheck.disabled = true;
-                setEngineConnected(null);
-                const response = await runtimeMessaging.requestOrNull({ type: 'CHECK_CONNECTION' });
-                if (seq !== engineCheckSeq) return;
-                engineRecheck.disabled = false;
-                applyEngineCheck(seq, Boolean(response && response.success));
+            engineRecheck.addEventListener('click', () => runEngineCheck(true));
+        }
+
+        // 案内どおりに設定した人は、この画面を離れてエンジンを起動し、戻ってくる。
+        // 戻った時点で自動的に確かめ直す。手順どおりに進めば表示が自分で緑へ変わり、
+        // 「うまくいったのか分からない」状態が残らない。窓が出ない方式では、
+        // この表示が唯一の成功の合図になるため。
+        if (typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) return;
+                runEngineCheck(false);
             });
+        }
+        if (typeof globalThis.addEventListener === 'function') {
+            globalThis.addEventListener('focus', () => runEngineCheck(false));
         }
 
         if (enginePathCopy) {

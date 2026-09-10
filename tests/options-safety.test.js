@@ -111,7 +111,7 @@ const navigator = { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
 
 const context = vm.createContext({
     console, document, chrome, navigator, setTimeout, clearTimeout, URL, Image: class {},
-    Number, Math, Object, Array, String, Promise, parseInt, parseFloat, isNaN
+    Number, Math, Object, Array, String, Promise, parseInt, parseFloat, isNaN, Date
 });
 vm.runInContext(constants, context, { filename: 'constants.js' });
 vm.runInContext(source, context, { filename: 'options.js' });
@@ -141,6 +141,35 @@ async function checkStaleResponseIsIgnored() {
             'a stale connection check must not overwrite a newer result');
         assert.strictEqual(elements['engine-recheck'].disabled, false,
             'the recheck button must be usable again after the latest check settles');
+    } finally {
+        chrome.runtime.sendMessage = original;
+    }
+}
+
+// エンジン停止中に開いた画面は一覧が空のまま。接続が戻ったときに取り直さないと、
+// ヘッダーは緑でもキャラクターを選べず、設定も保存できない。
+async function checkSpeakersRecoverOnReconnect() {
+    const original = chrome.runtime.sendMessage;
+    let speakerRequests = 0;
+    chrome.runtime.sendMessage = (message, callback) => {
+        if (message.type === 'GET_SPEAKERS') {
+            speakerRequests += 1;
+            callback({ success: true, speakers: [{ name: 'Valid', styles: [{ id: 1, name: 'Normal' }] }] });
+            return;
+        }
+        callback({ success: true });
+    };
+    try {
+        // エンジン停止中に開いた状態を作る。
+        elements['speaker-select'].children = [];
+        elements['speaker-select'].value = '';
+        await elements['engine-recheck'].listeners.click();
+        assert.strictEqual(speakerRequests, 1,
+            'a recovered connection must refetch the character list');
+        assert.strictEqual(elements['speaker-select'].children.length, 1,
+            'the character list must be usable again after reconnecting');
+        assert.ok(elements['engine-status'].classList.values.has('ok'),
+            'a recovered connection must be reported');
     } finally {
         chrome.runtime.sendMessage = original;
     }
@@ -187,6 +216,9 @@ setTimeout(async () => {
             'a failed connection must not push the advanced setup at the user');
 
         await checkStaleResponseIsIgnored();
+        await checkSpeakersRecoverOnReconnect();
+        assert.strictEqual(elements['engine-recheck'].disabled, false,
+            'the recheck button must never stay locked once every check has settled');
         console.log('options storage and preview safety: PASSED');
     } catch (error) {
         console.error(error);
