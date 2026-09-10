@@ -13,7 +13,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const customIconClear = document.getElementById('customIcon-clear');
     const engineStatus = document.getElementById('engine-status');
     const engineRecheck = document.getElementById('engine-recheck');
-    const engineGuideLink = document.getElementById('engine-guide-link');
     const engineSetup = document.getElementById('engine-setup');
     const enginePath = document.getElementById('engine-path');
     const enginePathCopy = document.getElementById('engine-path-copy');
@@ -176,13 +175,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ===== エンジンの接続状態 =====
 
-    // VOICEVOX に同梱されている音声合成エンジンの位置。インストーラー版で
-    // インストール先を変えていない場合の既定値で、VOICEVOX 公式が案内している
-    // パスと同じ。インストール先の変更・ZIP版では成立しないため、UI 側では
-    // 「VOICEVOX.exe と同じフォルダーの vv-engine」という関係も併記する。
+    // ユーザーがスタートアップへ置く1行。エンジン(run.exe)はコンソール
+    // アプリケーションで、ショートカットから起動すると黒い画面が残る。
+    // 一般の利用者はそれを不審に思って閉じてしまい、読み上げも止まるため、
+    // 画面を持たない wscript から表示なし(第2引数 0)で起動させる。
+    // パスはインストーラー版でインストール先を変えていない場合の既定値で、
+    // VOICEVOX 公式が案内しているものと同じ。インストール先の変更・ZIP版では
+    // 成立しないので、UI 側で書き換え方を併記する。
     // 拡張機能からプロセスを起動する手段は無いため、ここで扱うのは
-    // ユーザー自身が登録するためのパス文字列のみ。
-    const ENGINE_PATH_WINDOWS = '%LOCALAPPDATA%\\Programs\\VOICEVOX\\vv-engine\\run.exe';
+    // ユーザー自身が保存するための文字列のみ。
+    const ENGINE_LAUNCH_LINE =
+        'CreateObject("WScript.Shell").Run """%LOCALAPPDATA%\\Programs\\VOICEVOX\\vv-engine\\run.exe""", 0, False';
 
     // 手順の案内は Windows でのみ表示する。他OSは同梱エンジンの配置が異なり、
     // 実機で確認できていない手順を出すと、かえって迷わせるため。
@@ -209,8 +212,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 engineStatus.classList.add('ng');
             }
         }
-        // 省メモリの案内は、接続できていないときだけ入口を出す。
-        if (engineGuideLink) engineGuideLink.hidden = !(isWindows && connected === false);
     }
 
     // 接続確認は初期化の一覧取得と「再確認」の両方から走り、応答が前後しうる。
@@ -226,22 +227,12 @@ document.addEventListener('DOMContentLoaded', () => {
         setEngineConnected(connected);
     }
 
-    const COPY_BUTTON_LABEL = 'パスをコピー';
+    const COPY_BUTTON_LABEL = 'この1行をコピー';
     let copyLabelTimer = null;
 
     function initEnginePanel() {
-        if (enginePath) enginePath.value = ENGINE_PATH_WINDOWS;
+        if (enginePath) enginePath.value = ENGINE_LAUNCH_LINE;
         if (engineSetup) engineSetup.hidden = !isWindows;
-
-        if (engineGuideLink) {
-            engineGuideLink.addEventListener('click', () => {
-                if (!engineSetup) return;
-                engineSetup.open = true;
-                if (typeof engineSetup.scrollIntoView === 'function') {
-                    engineSetup.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            });
-        }
 
         if (engineRecheck) {
             engineRecheck.addEventListener('click', async () => {
@@ -257,7 +248,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (enginePathCopy) {
             enginePathCopy.addEventListener('click', async () => {
-                const text = enginePath ? enginePath.value : ENGINE_PATH_WINDOWS;
+                const text = enginePath ? enginePath.value : ENGINE_LAUNCH_LINE;
                 let copied = false;
                 try {
                     // ユーザー操作を起点にした書き込みのため、clipboardWrite 権限は増やさない。

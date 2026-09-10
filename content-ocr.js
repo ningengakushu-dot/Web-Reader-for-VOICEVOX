@@ -275,10 +275,8 @@ content.parts.ocr = {
         }
     },
 
-    // OCRの進行状況・完了・エラーを示す小さなトースト表示。
-    // actionLabel を渡すと、対処へ進むためのリンクを1つだけ添える
-    // （エラーを行き止まりにしないため。トースト自体は pointer-events: none を保つ）。
-    showOcrToast(text, actionLabel, onAction) {
+    // OCRの進行状況・完了・エラーを示す小さなトースト表示
+    showOcrToast(text) {
         if (!this.shadowRoot) return;
         // 前のエラー表示に予約された自動消去が、今から出す表示（進行中のOCR等）を
         // 途中で消してしまわないよう、新しい表示のたびに予約を取り消す。
@@ -298,33 +296,6 @@ content.parts.ocr = {
             this.ocrToast = toast;
         }
         this.ocrToast.textContent = text;
-        if (!actionLabel || typeof onAction !== "function") return;
-        const action = document.createElement("span");
-        action.setAttribute("role", "button");
-        action.tabIndex = 0;
-        action.textContent = actionLabel;
-        action.style.cssText = `
-            margin-left: 8px; color: #9ecbff; text-decoration: underline;
-            cursor: pointer; pointer-events: auto;
-        `;
-        action.addEventListener("click", onAction);
-        action.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onAction(); }
-        });
-        this.ocrToast.appendChild(action);
-    },
-
-    // 拡張機能のオプション画面を開く。VOICEVOX未起動のときに、
-    // エンジンだけを常駐させる手順へ辿り着けるようにするための導線。
-    openOptionsPage() {
-        try {
-            if (!chrome.runtime?.id) return;
-            chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" }, () => {
-                void chrome.runtime.lastError;
-            });
-        } catch (error) {
-            // 更新・再読み込み直後の古いcontent scriptでは何もしない。
-        }
     },
 
     updateOcrToast(text) {
@@ -372,16 +343,9 @@ content.parts.ocr = {
     showPlaybackErrorToast(error) {
         // タイムアウト時の文言（constants.js の「…応答しません」）も同じ案内にする。
         // 従来はここに当たらず「音声の再生に失敗しました: 合成失敗: …」と内部表現が出ていた。
-        const isConnectionError = /Failed to fetch|NetworkError|ERR_CONNECTION|応答しません/i.test(error || "");
-        const message = isConnectionError
+        const message = /Failed to fetch|NetworkError|ERR_CONNECTION|応答しません/i.test(error || "")
             ? "VOICEVOXエンジンに接続できません。VOICEVOXを起動してから再度お試しください。"
             : `音声の再生に失敗しました: ${error || "不明なエラー"}`;
-        if (isConnectionError) {
-            // 起動方法へ辿り着けるよう導線を添える。読む時間が要るぶん表示も長くする。
-            this.showOcrToast(message, "起動方法を見る", () => this.openOptionsPage());
-            this.scheduleOcrToastDismiss(12000);
-            return;
-        }
         this.showOcrToast(message);
         this.scheduleOcrToastDismiss(6000);
     },

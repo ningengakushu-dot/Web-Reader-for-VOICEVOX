@@ -52,7 +52,7 @@ const ids = [
     'intonation-value', 'volume-slider', 'volume-value', 'pause-slider', 'pause-value',
     'iconSize-slider', 'iconSize-value',
     'engine-status', 'engine-recheck', 'engine-setup', 'engine-path',
-    'engine-path-copy', 'engine-guide-link'
+    'engine-path-copy'
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, new MockElement(id)]));
 Object.assign(elements['speed-slider'], { min: '0.5', max: '2.0', value: '1.0' });
@@ -158,35 +158,33 @@ setTimeout(async () => {
         assert.strictEqual(elements['speaker-select'].children.length, 1);
         assert.strictEqual(elements['speaker-select'].value, '1',
             'invalid stored speaker IDs must not clear the valid default option');
-        assert.ok(elements['engine-path'].value.endsWith('vv-engine\\run.exe'),
+        const launchLine = elements['engine-path'].value;
+        assert.ok(launchLine.includes('vv-engine\\run.exe'),
             'engine setup must point at the already installed VOICEVOX engine');
-        assert.ok(!/https?:/i.test(elements['engine-path'].value),
+        assert.ok(!/https?:/i.test(launchLine),
             'engine setup must never hand the user a download URL');
+        // 表示なし(第2引数 0)で起動させる。1 や省略に戻ると黒いコンソール画面が残り、
+        // 利用者がそれを閉じて読み上げが止まる。
+        assert.ok(/\.Run\s+".*",\s*0,\s*False\s*$/.test(launchLine),
+            'the engine must be launched without a console window');
         assert.ok(elements['engine-status'].classList.values.has('ok'),
             'a reachable engine must be reported as connected');
         assert.notStrictEqual(elements['engine-setup'].open, true,
             'setup steps must never open themselves on the options page');
-        assert.strictEqual(elements['engine-guide-link'].hidden, true,
-            'the memory-saving entry point must stay out of the way while connected');
         assert.strictEqual(elements['engine-setup'].hidden, false,
             'the setup steps must be reachable on Windows');
-
-        // 「省メモリで使う」から手順に辿り着けること。
-        elements['engine-guide-link'].listeners.click();
-        assert.strictEqual(elements['engine-setup'].open, true,
-            'the entry point must open the setup steps');
 
         // コピーできない環境でも、次にすべきことがボタンに出ること。
         await elements['engine-path-copy'].listeners.click();
         assert.strictEqual(elements['engine-path-copy'].textContent, 'Ctrl+C でコピー',
             'a failed clipboard write must tell the user how to copy manually');
 
-        // 接続できなくなったら入口が現れること。モックは CHECK_CONNECTION に失敗を返す。
+        // 接続できなくなったら赤く出ること。モックは CHECK_CONNECTION に失敗を返す。
         await elements['engine-recheck'].listeners.click();
         assert.ok(elements['engine-status'].classList.values.has('ng'),
             'a failed connection check must be reported');
-        assert.strictEqual(elements['engine-guide-link'].hidden, false,
-            'the memory-saving entry point must appear when the engine is unreachable');
+        assert.notStrictEqual(elements['engine-setup'].open, true,
+            'a failed connection must not push the advanced setup at the user');
 
         await checkStaleResponseIsIgnored();
         console.log('options storage and preview safety: PASSED');

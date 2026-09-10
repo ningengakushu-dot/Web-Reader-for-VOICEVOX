@@ -14,7 +14,6 @@
             <p class="engine-status-line">
                 <span id="engine-status" class="engine-status" role="status" aria-live="polite">接続を確認しています...</span>
                 <button type="button" id="engine-recheck" class="link-btn">再確認</button>
-                <button type="button" id="engine-guide-link" class="link-btn" hidden>省メモリで使う</button>
             </p>
         </header>
 
@@ -125,25 +124,21 @@
             <details id="engine-setup" class="engine-setup" hidden>
                 <summary>VOICEVOXアプリを起動せずに使う（メモリ節約）</summary>
 
-                <p class="hint">同梱の音声合成エンジンだけを常駐させます。設定は最初の1回だけで、実測でおよそ600MBのメモリが空きます。</p>
+                <p class="hint">同梱の音声合成エンジンだけを常駐させます。設定は最初の1回だけで、実測でおよそ600MBのメモリが空きます。画面には何も出ません。</p>
 
                 <div class="engine-path-row">
-                    <input type="text" id="engine-path" readonly aria-label="エンジンのパス">
-                    <button type="button" id="engine-path-copy" class="secondary-btn">パスをコピー</button>
+                    <input type="text" id="engine-path" readonly aria-label="メモ帳に貼り付ける1行">
+                    <button type="button" id="engine-path-copy" class="secondary-btn">この1行をコピー</button>
                 </div>
-
-                <p class="hint">インストール先を変更した場合やZIP版では、このパスは使えません。<code>VOICEVOX.exe</code> があるフォルダーの中の <code>vv-engine\run.exe</code> を指定してください。</p>
 
                 <ol class="engine-steps">
                     <li>VOICEVOXアプリが起動していれば、閉じます。</li>
-                    <li><code>Windows</code>+<code>R</code>キーを押し、<code>shell:startup</code>と入力して<code>Enter</code>キーを押します。</li>
-                    <li>開いたフォルダーで右クリックし、「新規作成」→「ショートカット」を選びます。</li>
-                    <li>入力欄で<code>Ctrl</code>+<code>V</code>を押して貼り付け、「次へ」を押し、名前を「VOICEVOXエンジン」にして「完了」を押します。</li>
-                    <li>できたショートカットを右クリックして「プロパティ」を開き、「実行時の大きさ」を「最小化」にして「OK」を押します。</li>
-                    <li>ショートカットをダブルクリックします。タスクバーに「VOICEVOXエンジン」が現れれば成功です。</li>
+                    <li><code>Windows</code>+<code>R</code>キーを押し、<code>notepad</code>と入力して<code>Enter</code>キーを押します。開いたメモ帳に、上の1行を貼り付けます。</li>
+                    <li>「ファイル」→「名前を付けて保存」を選び、「ファイルの種類」を「すべてのファイル」に変え、上のアドレス欄に<code>shell:startup</code>と入力して<code>Enter</code>キーを押し、ファイル名を「VOICEVOXエンジン.vbs」にして保存します。</li>
+                    <li>保存したファイルをダブルクリックします。何も起きなければ成功です。</li>
                 </ol>
 
-                <p class="hint">上部の表示が緑色になれば完了です。タスクバーの「VOICEVOXエンジン」が音声を作っている本体で、閉じると読み上げも止まります。VOICEVOXアプリとは同時に起動できません。</p>
+                <p class="hint">上部の表示が緑色になれば完了です。次回からはパソコンを起動するだけで使えます。VOICEVOXアプリとは同時に起動できません。インストール先を変更した場合やZIP版では、1行の中のパスを、<code>VOICEVOX.exe</code> があるフォルダーの中の <code>vv-engine\run.exe</code> に書き換えてください。</p>
             </details>
 
             <div class="actions">
