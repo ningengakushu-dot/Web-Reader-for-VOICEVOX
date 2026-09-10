@@ -9,7 +9,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8')
-    + '\n;globalThis.__test = { splitText };';
+    + '\n;globalThis.__test = { splitText, sanitizeSpeechText };';
 
 let onMessage;
 let onRemoved;
@@ -189,6 +189,7 @@ const send = (message, sender) => new Promise((resolve) => {
     {
         // vm 内の配列は別 realm のため、値で比較する
         const splitText = (text) => Array.from(context.__test.splitText(text));
+        const sanitizeSpeechText = (text) => context.__test.sanitizeSpeechText(text);
         assert.deepEqual(splitText('短い文。次の文！'), ['短い文。', '次の文！'],
             '通常の文は文末記号でのみ分割する');
         // 120字以内の文はそのまま（読点では分割しない）
@@ -212,8 +213,8 @@ const send = (message, sender) => new Promise((resolve) => {
         const mailChunks = splitText(mail);
         assert.ok(mailChunks.length >= 4 && mailChunks.every((c) => c.length <= 132),
             `箇条書きは読点単位の上限以内へ分かれる: ${mailChunks.map((c) => c.length)}`);
-        // 区切り線（同じ記号の連続）は1個に畳まれる以外、文字を落とさない
-        assert.equal(mailChunks.join(''), mail.replace(/-{60}/g, '-'));
+        // 分割で文字を落とさない（区切り線の畳み込みと、整形で外れる括弧を除く）
+        assert.equal(mailChunks.join(''), sanitizeSpeechText(mail));
     }
 
     console.log('background lifecycle and stale OCR handling: PASSED');

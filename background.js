@@ -1014,8 +1014,62 @@ function sanitizeSpeechText(text) {
         // 時刻 10:00 / 9:30（そのままだと「ジュウ、ゼロゼロ」と読まれる）
         .replace(/(?<![\d０-９:：])(\d{1,2})[:：](\d{2})(?![\d０-９:：])/g,
             (m, h, mi) => (Number(h) <= 24 && Number(mi) <= 59)
-                ? `${Number(h)}時${Number(mi) === 0 ? "" : `${Number(mi)}分`}` : m);
+                ? `${Number(h)}時${Number(mi) === 0 ? "" : `${Number(mi)}分`}` : m)
+        // 括弧は取り除く（下の SPEECH_BRACKET_RUN_RE のコメント参照）。
+        // 日付・時刻・金額の変換より後に置く（「（2026/08/16）」を先に年月日へ直す）
+        .replace(SPEECH_BRACKET_RUN_RE, (run, index, whole) =>
+            (SPEECH_BRACKET_KEEP_RE.test(run) ? run
+                : speechBracketReplacement(run, whole[index - 1] || "", whole[index + run.length] || "")));
     return s;
+}
+
+// 括弧は読まれないが、開き・閉じの両方が「間」を作り、直後の助詞を別のアクセント句へ
+// 切り離す。実測（VOICEVOX 0.25.2 / 話者1、audio_query の音素長から算出）:
+//   「彼は「はい」と答えた。」  → カレワ、ハイ、ト/コタエタ   無音0.94秒・全体3.27秒
+//   括弧を取り除くと            → カレワ/ハイト/コタエタ      無音0秒・全体1.92秒
+//   『こころ』を読んだ。        → ココロ、オ/ヨンダ（助詞の「を」が独立する）
+// 検証コーパス（tools/reading-corpus.mjs）の括弧を含む11件では全体2.6%短縮、
+// 引用・法令の多い文書で最大7.5%短縮。時間よりも、助詞が切り離される不自然さが消える
+// ことのほうが体感に効く。
+//
+// ただし、取り除くと前後の語がつながって別の読みになることがある（同じ条件で実測）:
+//   「はい」「いいえ」から → ハイイイエカラ（語がつながって別の語に聞こえる）
+//   （2）つぎに            → フタツギニ（2 が助数詞と読まれて「ふたつ」になる）
+//   1日（月）10時          → ニチゲツ（日と月がつながる）
+// 語の切れ目は辞書無しでは判定できないため、**取り除いても切れ目が残ると言える場合だけ**
+// 取り除き、それ以外は読点1つに置き換える（間は残るが、2つが1つになる）。
+// 切れ目が残ると言えるのは、括弧の外側が助詞・句読点・区切り記号・空白・文頭文末のとき。
+// この条件で、上の「彼は「はい」と答えた。」のような助詞が続く形はすべて取り除ける。
+// VOICEVOX が括弧ごと1語として読む略記は触らない（実測: いずれも間が入らず、
+// 括弧を外すと読みが変わる）。「9月1日（月）」→ ゲツヨオビ／外すと ツイタチビ。
+// 「ABC（株）」→ カブシキガイシャ／外すと カブ。（有）（財）（社）も同様。
+const SPEECH_BRACKET_KEEP_SOURCE = "[（(](?:[月火水木金土日]曜?日?|[株有財社])[）)]";
+const SPEECH_BRACKET_KEEP_RE = new RegExp(`^${SPEECH_BRACKET_KEEP_SOURCE}$`);
+const SPEECH_BRACKET_RUN_RE =
+    new RegExp(`${SPEECH_BRACKET_KEEP_SOURCE}|[「」『』（）()｢｣〈〉《》【】〔〕]+`, "g");
+const SPEECH_CLOSING_BRACKET_RE = /[」』）)｣〉》】〕]/;
+const SPEECH_OPENING_BRACKET_RE = /[「『（(｢〈《【〔]/;
+// 括弧の外側にあれば、括弧を消しても語の切れ目が保たれる文字
+const SPEECH_PARTICLE_RE = /[はがをにへとでもやのかね]/;
+const SPEECH_BOUNDARY_RE = /[\s、。！？!?…‥・：；:;／/｜|]/;
+
+function isSpeechBracketBoundary(ch) {
+    return ch === "" || SPEECH_PARTICLE_RE.test(ch) || SPEECH_BOUNDARY_RE.test(ch);
+}
+
+/**
+ * 括弧の並びを、取り除くか読点1つに置き換えるかを決める。
+ * @param {string} run 連続した括弧
+ * @param {string} before 直前の1文字（無いときは空文字）
+ * @param {string} after 直後の1文字（無いときは空文字）
+ * @returns {string}
+ */
+function speechBracketReplacement(run, before, after) {
+    // 閉じと開きが隣り合う（「はい」「いいえ」）。取り除くと語がつながる
+    if (SPEECH_CLOSING_BRACKET_RE.test(run) && SPEECH_OPENING_BRACKET_RE.test(run)) return "、";
+    if (SPEECH_CLOSING_BRACKET_RE.test(run)) return isSpeechBracketBoundary(after) ? "" : "、";
+    if (SPEECH_OPENING_BRACKET_RE.test(run)) return isSpeechBracketBoundary(before) ? "" : "、";
+    return "";
 }
 
 const SPEECH_COMPAT_CHARS = {
