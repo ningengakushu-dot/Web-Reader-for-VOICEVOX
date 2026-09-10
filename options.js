@@ -334,6 +334,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!byUser && !isRetry && now - lastEngineCheckAt < ENGINE_AUTO_CHECK_INTERVAL_MS) return;
         lastEngineCheckAt = now;
         clearEngineRetry();
+        // 自分で押した人は、いま待つつもりでいる。上限まで確かめ終えた画面でも
+        // そこから数え直し、押した1回で終わらせない。
+        if (byUser) engineRetryCount = 0;
 
         const seq = beginEngineCheck();
         if (engineRecheck) engineRecheck.disabled = true;

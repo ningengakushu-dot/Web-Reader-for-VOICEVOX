@@ -223,6 +223,27 @@ async function main() {
             'returning to the window must resume checking after the limit was reached');
     }
 
+    // 4. 上限まで確かめ終えた画面で「再確認」を押した人。押したのは待つつもりだから。
+    {
+        const page = openOptionsPage();
+        await page.settle();
+        for (let i = 0; i < 40 && page.pendingRetries() > 0; i++) {
+            page.flushRetries();
+            await page.settle();
+        }
+        assert.strictEqual(page.pendingRetries(), 0, 'the limit must be reached first');
+
+        await page.elements['engine-recheck'].listeners.click();
+        assert.ok(page.pendingRetries() > 0,
+            'pressing recheck must resume waiting for the engine');
+
+        page.engineUp = true;
+        page.flushRetries();
+        await page.settle();
+        assert.ok(page.status().classList.values.has('ok'),
+            'the resumed wait must report success');
+    }
+
     console.log('engine retry while starting: PASSED');
 }
 

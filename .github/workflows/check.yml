@@ -89,6 +89,24 @@ jobs:
       - name: 設定値とアイコン表示の安全性検査
         run: node tests/options-safety.test.js
 
+      - name: エンジン起動待ちの再確認の検査
+        run: node tests/options-engine-retry.test.js
+
+      - name: バックグラウンド状態遷移の契約検査
+        run: node tests/background-state-contract.test.js
+
+      - name: コンテンツスクリプトの多重読み込み・後始末の検査
+        run: node tests/content-lifecycle.test.js
+
+      - name: ページ内テキスト抽出のブロック分割検査
+        run: node tests/dom-text-blocks.test.js
+
+      - name: OCR前処理のキャンバス読み出し検査
+        run: node tests/ocr-canvas-readback.test.js
+
+      - name: OCR罫線除去の回帰検査
+        run: node tests/ocr-rule-lines.test.js
+
       - name: バックグラウンド失敗伝播の回帰検査
         run: node tests/background-robustness.test.js
 
@@ -199,6 +217,17 @@ jobs:
             exit 1
           fi
           echo "OK  該当なし"
+
+      - name: 追加したテストが CI で実行されているか
+        run: |
+          # 検査を書いても実行の登録を忘れると、退行がそのまま通ってしまう。
+          missing=0
+          for f in tests/*.test.js; do
+            grep -q "node $f" .github/workflows/check.yml \
+              || { echo "CI で実行されていない: $f"; missing=1; }
+          done
+          [ $missing -eq 0 ] && echo "OK  すべてのテストが実行対象"
+          exit $missing
 
       - name: 提出用パッケージに含めるファイルが揃っているか
         run: |
