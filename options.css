@@ -343,3 +343,84 @@ footer code {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
 }
+
+/* エンジンの接続状態。既定は1行だけの表示にとどめ、
+   接続できているときは案内を開かない（成功した人の邪魔をしない）。 */
+.engine-status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.engine-status {
+    font-size: 14px;
+    margin: 0;
+    color: var(--text-muted);
+}
+
+.engine-status.ok {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.engine-status.ng {
+    color: var(--error);
+    font-weight: 700;
+}
+
+.engine-status-row .secondary-btn {
+    flex-shrink: 0;
+}
+
+.engine-setup > summary {
+    font-size: 13px;
+    color: var(--primary);
+    cursor: pointer;
+    padding: 6px 0;
+}
+
+.engine-setup[hidden] {
+    display: none;
+}
+
+.engine-path-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+#engine-path {
+    flex: 1;
+    min-width: 0;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+}
+
+.engine-path-row .secondary-btn {
+    flex-shrink: 0;
+}
+
+.engine-steps {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.8;
+    margin: 12px 0;
+    padding-left: 22px;
+}
+
+.engine-setup code {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    user-select: all;
+}

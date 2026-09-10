@@ -50,7 +50,9 @@ const ids = [
     'customIcon-row', 'customIcon-file', 'customIcon-clear',
     'speed-slider', 'speed-value', 'pitch-slider', 'pitch-value', 'intonation-slider',
     'intonation-value', 'volume-slider', 'volume-value', 'pause-slider', 'pause-value',
-    'iconSize-slider', 'iconSize-value'
+    'iconSize-slider', 'iconSize-value',
+    'engine-status', 'engine-recheck', 'engine-setup', 'engine-path',
+    'engine-path-alt', 'engine-path-copy'
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, new MockElement(id)]));
 Object.assign(elements['speed-slider'], { min: '0.5', max: '2.0', value: '1.0' });
@@ -124,6 +126,15 @@ setTimeout(() => {
         assert.strictEqual(elements['speaker-select'].children.length, 1);
         assert.strictEqual(elements['speaker-select'].value, '1',
             'invalid stored speaker IDs must not clear the valid default option');
+        assert.ok(elements['engine-path'].value.endsWith('vv-engine\\run.exe'),
+            'engine setup must point at the already installed VOICEVOX engine');
+        assert.ok(!/https?:/i.test(elements['engine-path'].value)
+            && !/https?:/i.test(elements['engine-path-alt'].textContent),
+            'engine setup must never hand the user a download URL');
+        assert.ok(elements['engine-status'].classList.values.has('ok'),
+            'a reachable engine must be reported as connected');
+        assert.strictEqual(elements['engine-setup'].open, false,
+            'setup steps must stay collapsed once the engine is reachable');
         console.log('options storage and preview safety: PASSED');
     } catch (error) {
         console.error(error);

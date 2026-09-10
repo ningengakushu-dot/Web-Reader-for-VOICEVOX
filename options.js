@@ -11,6 +11,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const customIconRow = document.getElementById('customIcon-row');
     const customIconFile = document.getElementById('customIcon-file');
     const customIconClear = document.getElementById('customIcon-clear');
+    const engineStatus = document.getElementById('engine-status');
+    const engineRecheck = document.getElementById('engine-recheck');
+    const engineSetup = document.getElementById('engine-setup');
+    const enginePath = document.getElementById('engine-path');
+    const enginePathAlt = document.getElementById('engine-path-alt');
+    const enginePathCopy = document.getElementById('engine-path-copy');
 
     // 「画像を指定する」で選ばれた画像。保存ボタンを押すまで storage には書かない。
     let pendingCustomIcon = null;
@@ -129,9 +135,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     speakerSelect.value = savedId;
                 }
             }
+            setEngineConnected(true);
         } catch (error) {
             console.error('Error during init:', error);
             showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
+            setEngineConnected(false);
         } finally {
             showLoader(false);
         }
@@ -163,6 +171,89 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         if (count === 0) throw new Error('利用可能なキャラクターが見つかりません');
+    }
+
+    // ===== エンジンの接続状態 =====
+
+    // VOICEVOX に同梱されている音声合成エンジンの位置。既定のインストール先と、
+    // 「すべてのユーザー向け」に入れた場合の代替を用意する。拡張機能から起動する
+    // 手段は無いため、ここで案内するのはユーザー自身が登録するためのパスのみ。
+    const ENGINE_PATH_WINDOWS = '%LOCALAPPDATA%\\Programs\\VOICEVOX\\vv-engine\\run.exe';
+    const ENGINE_PATH_WINDOWS_ALT = 'C:\\Program Files\\VOICEVOX\\vv-engine\\run.exe';
+
+    // 手順の案内は Windows でのみ表示する。他OSは同梱エンジンの配置が異なり、
+    // 実機で確認できていない手順を出すと、かえって迷わせるため。
+    const isWindows = typeof navigator !== 'undefined'
+        && /Windows/i.test(navigator.userAgent || '');
+
+    /**
+     * 接続できたかどうかを1行で示し、成功していれば案内を閉じたままにする。
+     * 「設定できたのか分からない」状態を残さないための唯一のフィードバック。
+     * @param {boolean|null} connected null は確認中
+     */
+    function setEngineConnected(connected) {
+        if (engineStatus) {
+            engineStatus.classList.remove('ok', 'ng');
+            if (connected === null) {
+                engineStatus.textContent = '接続を確認しています...';
+            } else if (connected) {
+                engineStatus.textContent = 'エンジンに接続できています。';
+                engineStatus.classList.add('ok');
+            } else {
+                engineStatus.textContent = 'エンジンに接続できていません。VOICEVOXを起動してください。';
+                engineStatus.classList.add('ng');
+            }
+        }
+        if (!engineSetup) return;
+        engineSetup.hidden = !isWindows;
+        // 接続できている人の画面では開かない。失敗しているときだけ手順を出す。
+        if (isWindows && connected === false) engineSetup.open = true;
+        if (connected === true) engineSetup.open = false;
+    }
+
+    const COPY_BUTTON_LABEL = 'パスをコピー';
+    let copyLabelTimer = null;
+
+    function initEnginePanel() {
+        if (enginePath) enginePath.value = ENGINE_PATH_WINDOWS;
+        if (enginePathAlt) enginePathAlt.textContent = ENGINE_PATH_WINDOWS_ALT;
+        if (engineSetup) engineSetup.hidden = !isWindows;
+
+        if (engineRecheck) {
+            engineRecheck.addEventListener('click', async () => {
+                setEngineConnected(null);
+                const response = await runtimeMessaging.requestOrNull({ type: 'CHECK_CONNECTION' });
+                setEngineConnected(Boolean(response && response.success));
+            });
+        }
+
+        if (enginePathCopy) {
+            enginePathCopy.addEventListener('click', async () => {
+                const text = enginePath ? enginePath.value : ENGINE_PATH_WINDOWS;
+                let copied = false;
+                try {
+                    // ユーザー操作を起点にした書き込みのため、clipboardWrite 権限は増やさない。
+                    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        copied = true;
+                    }
+                } catch (error) {
+                    copied = false;
+                }
+                // 結果は押したボタン自身に出す。画面下の保存メッセージ欄に出すと、
+                // 上部で押した人の視線の外になり、コピーできたか分からなくなる。
+                if (!copied && enginePath && typeof enginePath.select === 'function') {
+                    // コピーできない環境では、選択済みにして Ctrl+C で拾えるようにする。
+                    enginePath.select();
+                }
+                enginePathCopy.textContent = copied ? 'コピーしました' : 'Ctrl+C でコピー';
+                if (copyLabelTimer) clearTimeout(copyLabelTimer);
+                copyLabelTimer = setTimeout(() => {
+                    copyLabelTimer = null;
+                    enginePathCopy.textContent = COPY_BUTTON_LABEL;
+                }, 2500);
+            });
+        }
     }
 
     // ===== ページ内アイコンの見た目 =====
@@ -402,5 +493,6 @@ document.addEventListener('DOMContentLoaded', () => {
         saveBtn.disabled = show;
     }
 
+    initEnginePanel();
     init();
 });
