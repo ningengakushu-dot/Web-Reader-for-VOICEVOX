@@ -344,41 +344,76 @@ footer code {
     100% { transform: rotate(360deg); }
 }
 
-/* エンジンの接続状態。既定は1行だけの表示にとどめ、
-   接続できているときは案内を開かない（成功した人の邪魔をしない）。 */
-.engine-status-row {
+/* エンジンの接続状態。この画面の主目的は声の設定なので、
+   状態はヘッダーの小さな1行に留め、手順は下部へ畳んで置く。
+   接続できていないときも自動では開かない（初見の情報量を増やさない）。 */
+.engine-status-line {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 12px;
+    align-items: baseline;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 12px;
+    margin: 10px 0 0;
 }
 
 .engine-status {
-    font-size: 14px;
-    margin: 0;
     color: var(--text-muted);
 }
 
-.engine-status.ok {
+.engine-status::before {
+    content: "●";
+    margin-right: 5px;
+    color: var(--border);
+}
+
+.engine-status.ok::before {
     color: var(--accent);
-    font-weight: 700;
 }
 
 .engine-status.ng {
     color: var(--error);
-    font-weight: 700;
 }
 
-.engine-status-row .secondary-btn {
-    flex-shrink: 0;
+.engine-status.ng::before {
+    color: var(--error);
+}
+
+/* 状態の隣に置く控えめな操作。ボタンとして目立たせない。 */
+.link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--primary);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.link-btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.link-btn[hidden] {
+    display: none;
+}
+
+/* 省メモリ設定の手順。既定は1行の見出しだけ。 */
+.engine-setup {
+    margin: 0 0 24px;
 }
 
 .engine-setup > summary {
-    font-size: 13px;
-    color: var(--primary);
+    font-size: 12px;
+    color: var(--text-muted);
     cursor: pointer;
-    padding: 6px 0;
+    padding: 4px 0;
+}
+
+.engine-setup[open] > summary {
+    color: var(--primary);
+    margin-bottom: 8px;
 }
 
 .engine-setup[hidden] {

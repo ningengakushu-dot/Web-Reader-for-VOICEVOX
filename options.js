@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const customIconClear = document.getElementById('customIcon-clear');
     const engineStatus = document.getElementById('engine-status');
     const engineRecheck = document.getElementById('engine-recheck');
+    const engineGuideLink = document.getElementById('engine-guide-link');
     const engineSetup = document.getElementById('engine-setup');
     const enginePath = document.getElementById('engine-path');
     const enginePathAlt = document.getElementById('engine-path-alt');
@@ -187,8 +188,10 @@ document.addEventListener('DOMContentLoaded', () => {
         && /Windows/i.test(navigator.userAgent || '');
 
     /**
-     * 接続できたかどうかを1行で示し、成功していれば案内を閉じたままにする。
+     * 接続できたかどうかをヘッダーの1行で示す。
      * 「設定できたのか分からない」状態を残さないための唯一のフィードバック。
+     * 手順は自動では開かない。この画面の主目的は声の設定であり、
+     * 初見の情報量を増やすと本来の操作の邪魔になるため。
      * @param {boolean|null} connected null は確認中
      */
     function setEngineConnected(connected) {
@@ -197,18 +200,15 @@ document.addEventListener('DOMContentLoaded', () => {
             if (connected === null) {
                 engineStatus.textContent = '接続を確認しています...';
             } else if (connected) {
-                engineStatus.textContent = 'エンジンに接続できています。';
+                engineStatus.textContent = 'エンジンに接続できています';
                 engineStatus.classList.add('ok');
             } else {
-                engineStatus.textContent = 'エンジンに接続できていません。VOICEVOXを起動してください。';
+                engineStatus.textContent = 'エンジンに接続できていません（VOICEVOXを起動してください）';
                 engineStatus.classList.add('ng');
             }
         }
-        if (!engineSetup) return;
-        engineSetup.hidden = !isWindows;
-        // 接続できている人の画面では開かない。失敗しているときだけ手順を出す。
-        if (isWindows && connected === false) engineSetup.open = true;
-        if (connected === true) engineSetup.open = false;
+        // 省メモリの案内は、接続できていないときだけ入口を出す。
+        if (engineGuideLink) engineGuideLink.hidden = !(isWindows && connected === false);
     }
 
     const COPY_BUTTON_LABEL = 'パスをコピー';
@@ -218,6 +218,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (enginePath) enginePath.value = ENGINE_PATH_WINDOWS;
         if (enginePathAlt) enginePathAlt.textContent = ENGINE_PATH_WINDOWS_ALT;
         if (engineSetup) engineSetup.hidden = !isWindows;
+
+        if (engineGuideLink) {
+            engineGuideLink.addEventListener('click', () => {
+                if (!engineSetup) return;
+                engineSetup.open = true;
+                if (typeof engineSetup.scrollIntoView === 'function') {
+                    engineSetup.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            });
+        }
 
         if (engineRecheck) {
             engineRecheck.addEventListener('click', async () => {

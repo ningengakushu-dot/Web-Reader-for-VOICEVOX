@@ -52,7 +52,7 @@ const ids = [
     'intonation-value', 'volume-slider', 'volume-value', 'pause-slider', 'pause-value',
     'iconSize-slider', 'iconSize-value',
     'engine-status', 'engine-recheck', 'engine-setup', 'engine-path',
-    'engine-path-alt', 'engine-path-copy'
+    'engine-path-alt', 'engine-path-copy', 'engine-guide-link'
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, new MockElement(id)]));
 Object.assign(elements['speed-slider'], { min: '0.5', max: '2.0', value: '1.0' });
@@ -133,8 +133,10 @@ setTimeout(() => {
             'engine setup must never hand the user a download URL');
         assert.ok(elements['engine-status'].classList.values.has('ok'),
             'a reachable engine must be reported as connected');
-        assert.strictEqual(elements['engine-setup'].open, false,
-            'setup steps must stay collapsed once the engine is reachable');
+        assert.notStrictEqual(elements['engine-setup'].open, true,
+            'setup steps must never open themselves on the options page');
+        assert.strictEqual(elements['engine-guide-link'].hidden, true,
+            'the memory-saving entry point must stay out of the way while connected');
         console.log('options storage and preview safety: PASSED');
     } catch (error) {
         console.error(error);

@@ -11,42 +11,14 @@
         <header>
             <h1>Web Reader for VOICEVOX Settings</h1>
             <p class="subtitle">VOICEVOX ボイスキャラクター設定</p>
+            <p class="engine-status-line">
+                <span id="engine-status" class="engine-status" role="status" aria-live="polite">接続を確認しています...</span>
+                <button type="button" id="engine-recheck" class="link-btn">再確認</button>
+                <button type="button" id="engine-guide-link" class="link-btn" hidden>省メモリで使う</button>
+            </p>
         </header>
 
         <main>
-            <section class="settings-group">
-                <h2 class="group-title">エンジンの接続</h2>
-
-                <div class="settings-section engine-status-row">
-                    <p id="engine-status" class="engine-status" role="status" aria-live="polite">接続を確認しています...</p>
-                    <button type="button" id="engine-recheck" class="secondary-btn">接続を確認</button>
-                </div>
-
-                <details id="engine-setup" class="engine-setup" hidden>
-                    <summary>VOICEVOXの画面を出さずに使う（メモリを節約する）</summary>
-
-                    <p class="hint">読み上げに使っているのは、VOICEVOXに入っている音声合成エンジンだけです。エンジンだけを起動すると、VOICEVOXの画面が使っていたメモリが空きます（実測でおよそ600MB）。<strong>新しくダウンロードするものはありません。</strong></p>
-
-                    <p class="hint"><strong>設定は最初の1回だけです。</strong>次回からはパソコンを起動するだけで、自動的に読み上げられる状態になります。</p>
-
-                    <div class="engine-path-row">
-                        <input type="text" id="engine-path" readonly aria-label="エンジンのパス">
-                        <button type="button" id="engine-path-copy" class="secondary-btn">パスをコピー</button>
-                    </div>
-
-                    <ol class="engine-steps">
-                        <li>VOICEVOXの画面が開いている場合は、先に閉じます。</li>
-                        <li><code>Windows</code>キーを押しながら<code>R</code>キーを押し、<code>shell:startup</code>と入力して<code>Enter</code>キーを押します。</li>
-                        <li>開いたフォルダーの何もないところで右クリックし、「新規作成」→「ショートカット」を選びます。</li>
-                        <li>入力欄で<code>Ctrl</code>+<code>V</code>を押して貼り付け、「次へ」→「完了」を押します。名前は変えなくて構いません。</li>
-                        <li>できたショートカットをダブルクリックします。黒い画面が開けば成功です。</li>
-                    </ol>
-
-                    <p class="hint">最後に上の「接続を確認」を押して、緑色の表示に変われば完了です。手順4で「ファイル名が正しくありません」と出る場合は、代わりに <code id="engine-path-alt"></code> を貼り付けてください。</p>
-
-                    <p class="hint">VOICEVOXの画面を使いたくなったときは、黒い画面を閉じてから起動してください。どちらも同じポート（50021）を使うため、同時には起動できません。</p>
-                </details>
-            </section>
 
             <section class="settings-group">
                 <h2 class="group-title">VOICEVOX 音声設定</h2>
@@ -149,6 +121,29 @@
                     <p class="hint">画面OCR読み上げは<strong>β版</strong>です。画像やPDFの文字を認識して読み上げますが、文書によっては読み間違い・読み飛ばしが起こり、認識に10〜20秒ほどかかります。文字として選択できるページでは、範囲をドラッグするだけでOCRを介さずに読み上げます。</p>
                 </div>
             </section>
+
+            <details id="engine-setup" class="engine-setup" hidden>
+                <summary>VOICEVOXの画面を出さずに使う（メモリを節約する）</summary>
+
+                <p class="hint">読み上げに使うのは、VOICEVOXに入っている音声合成エンジンだけです。エンジンだけを起動すると、実測でおよそ600MBのメモリが空きます。新しくダウンロードするものはありません。<strong>設定は最初の1回だけで、次回からはパソコンを起動するだけで使えます。</strong></p>
+
+                <div class="engine-path-row">
+                    <input type="text" id="engine-path" readonly aria-label="エンジンのパス">
+                    <button type="button" id="engine-path-copy" class="secondary-btn">パスをコピー</button>
+                </div>
+
+                <ol class="engine-steps">
+                    <li>VOICEVOXの画面が開いている場合は、先に閉じます。</li>
+                    <li><code>Windows</code>キーを押しながら<code>R</code>キーを押し、<code>shell:startup</code>と入力して<code>Enter</code>キーを押します。</li>
+                    <li>開いたフォルダーの何もないところで右クリックし、「新規作成」→「ショートカット」を選びます。</li>
+                    <li>入力欄で<code>Ctrl</code>+<code>V</code>を押して貼り付け、「次へ」→「完了」を押します。</li>
+                    <li>できたショートカットをダブルクリックします。黒い画面が開けば成功です。</li>
+                </ol>
+
+                <p class="hint">画面上部の「再確認」を押して、緑色の表示に変われば完了です。手順4で「ファイル名が正しくありません」と出る場合は、代わりに <code id="engine-path-alt"></code> を貼り付けてください。</p>
+
+                <p class="hint">VOICEVOXの画面とエンジンは、同じポート（50021）を使うため同時に起動できません。画面を使いたいときは、黒い画面を閉じてから起動してください。</p>
+            </details>
 
             <div class="actions">
                 <button id="save-btn" class="primary-btn">設定を保存</button>
