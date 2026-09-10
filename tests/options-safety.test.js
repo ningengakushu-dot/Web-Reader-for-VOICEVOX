@@ -105,8 +105,12 @@ const chrome = {
     }
 };
 
+// 省メモリ案内は Windows でのみ出す。非 Windows を装うと、その分岐が壊れても
+// 気付けないため、既定の検査は Windows として走らせる。
+const navigator = { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
+
 const context = vm.createContext({
-    console, document, chrome, setTimeout, clearTimeout, URL, Image: class {},
+    console, document, chrome, navigator, setTimeout, clearTimeout, URL, Image: class {},
     Number, Math, Object, Array, String, Promise, parseInt, parseFloat, isNaN
 });
 vm.runInContext(constants, context, { filename: 'constants.js' });
@@ -114,7 +118,35 @@ vm.runInContext(source, context, { filename: 'options.js' });
 assert.strictEqual(typeof domReady, 'function');
 domReady();
 
-setTimeout(() => {
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// 接続確認は初期化と「再確認」の両方から走る。応答が前後しても、
+// 最後に始めた確認の結果だけが残ることを、応答の順番を握って確かめる。
+async function checkStaleResponseIsIgnored() {
+    const pending = [];
+    const original = chrome.runtime.sendMessage;
+    chrome.runtime.sendMessage = (message, callback) => { pending.push(callback); };
+    try {
+        const onClick = elements['engine-recheck'].listeners.click;
+        const first = onClick();
+        const second = onClick();
+        await tick();
+        pending[1]({ success: true });
+        await second;
+        assert.ok(elements['engine-status'].classList.values.has('ok'),
+            'the latest connection check must be reflected');
+        pending[0]({ success: false });
+        await first;
+        assert.ok(elements['engine-status'].classList.values.has('ok'),
+            'a stale connection check must not overwrite a newer result');
+        assert.strictEqual(elements['engine-recheck'].disabled, false,
+            'the recheck button must be usable again after the latest check settles');
+    } finally {
+        chrome.runtime.sendMessage = original;
+    }
+}
+
+setTimeout(async () => {
     try {
         assert.strictEqual(String(elements['speed-slider'].value), '2');
         assert.strictEqual(String(elements['pitch-slider'].value), '-0.15');
@@ -136,6 +168,27 @@ setTimeout(() => {
             'setup steps must never open themselves on the options page');
         assert.strictEqual(elements['engine-guide-link'].hidden, true,
             'the memory-saving entry point must stay out of the way while connected');
+        assert.strictEqual(elements['engine-setup'].hidden, false,
+            'the setup steps must be reachable on Windows');
+
+        // 「省メモリで使う」から手順に辿り着けること。
+        elements['engine-guide-link'].listeners.click();
+        assert.strictEqual(elements['engine-setup'].open, true,
+            'the entry point must open the setup steps');
+
+        // コピーできない環境でも、次にすべきことがボタンに出ること。
+        await elements['engine-path-copy'].listeners.click();
+        assert.strictEqual(elements['engine-path-copy'].textContent, 'Ctrl+C でコピー',
+            'a failed clipboard write must tell the user how to copy manually');
+
+        // 接続できなくなったら入口が現れること。モックは CHECK_CONNECTION に失敗を返す。
+        await elements['engine-recheck'].listeners.click();
+        assert.ok(elements['engine-status'].classList.values.has('ng'),
+            'a failed connection check must be reported');
+        assert.strictEqual(elements['engine-guide-link'].hidden, false,
+            'the memory-saving entry point must appear when the engine is unreachable');
+
+        await checkStaleResponseIsIgnored();
         console.log('options storage and preview safety: PASSED');
     } catch (error) {
         console.error(error);

@@ -123,6 +123,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error restoring settings:', error);
         }
 
+        const engineCheck = beginEngineCheck();
         try {
             const speakers = await getSpeakers();
             renderSpeakers(speakers);
@@ -135,11 +136,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     speakerSelect.value = savedId;
                 }
             }
-            setEngineConnected(true);
+            applyEngineCheck(engineCheck, true);
         } catch (error) {
             console.error('Error during init:', error);
             showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
-            setEngineConnected(false);
+            applyEngineCheck(engineCheck, false);
         } finally {
             showLoader(false);
         }
@@ -212,6 +213,19 @@ document.addEventListener('DOMContentLoaded', () => {
         if (engineGuideLink) engineGuideLink.hidden = !(isWindows && connected === false);
     }
 
+    // 接続確認は初期化の一覧取得と「再確認」の両方から走り、応答が前後しうる。
+    // 古い応答が新しい結果を上書きすると、実際とは逆の状態が残るため、
+    // 最後に始めた確認の応答だけを表示に反映する。
+    let engineCheckSeq = 0;
+    function beginEngineCheck() {
+        engineCheckSeq += 1;
+        return engineCheckSeq;
+    }
+    function applyEngineCheck(seq, connected) {
+        if (seq !== engineCheckSeq) return;
+        setEngineConnected(connected);
+    }
+
     const COPY_BUTTON_LABEL = 'パスをコピー';
     let copyLabelTimer = null;
 
@@ -231,9 +245,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (engineRecheck) {
             engineRecheck.addEventListener('click', async () => {
+                const seq = beginEngineCheck();
+                engineRecheck.disabled = true;
                 setEngineConnected(null);
                 const response = await runtimeMessaging.requestOrNull({ type: 'CHECK_CONNECTION' });
-                setEngineConnected(Boolean(response && response.success));
+                if (seq !== engineCheckSeq) return;
+                engineRecheck.disabled = false;
+                applyEngineCheck(seq, Boolean(response && response.success));
             });
         }
 
