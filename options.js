@@ -16,7 +16,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const engineGuideLink = document.getElementById('engine-guide-link');
     const engineSetup = document.getElementById('engine-setup');
     const enginePath = document.getElementById('engine-path');
-    const enginePathAlt = document.getElementById('engine-path-alt');
     const enginePathCopy = document.getElementById('engine-path-copy');
 
     // 「画像を指定する」で選ばれた画像。保存ボタンを押すまで storage には書かない。
@@ -176,11 +175,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ===== エンジンの接続状態 =====
 
-    // VOICEVOX に同梱されている音声合成エンジンの位置。既定のインストール先と、
-    // 「すべてのユーザー向け」に入れた場合の代替を用意する。拡張機能から起動する
-    // 手段は無いため、ここで案内するのはユーザー自身が登録するためのパスのみ。
+    // VOICEVOX に同梱されている音声合成エンジンの位置。インストーラー版で
+    // インストール先を変えていない場合の既定値で、VOICEVOX 公式が案内している
+    // パスと同じ。インストール先の変更・ZIP版では成立しないため、UI 側では
+    // 「VOICEVOX.exe と同じフォルダーの vv-engine」という関係も併記する。
+    // 拡張機能からプロセスを起動する手段は無いため、ここで扱うのは
+    // ユーザー自身が登録するためのパス文字列のみ。
     const ENGINE_PATH_WINDOWS = '%LOCALAPPDATA%\\Programs\\VOICEVOX\\vv-engine\\run.exe';
-    const ENGINE_PATH_WINDOWS_ALT = 'C:\\Program Files\\VOICEVOX\\vv-engine\\run.exe';
 
     // 手順の案内は Windows でのみ表示する。他OSは同梱エンジンの配置が異なり、
     // 実機で確認できていない手順を出すと、かえって迷わせるため。
@@ -216,7 +217,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function initEnginePanel() {
         if (enginePath) enginePath.value = ENGINE_PATH_WINDOWS;
-        if (enginePathAlt) enginePathAlt.textContent = ENGINE_PATH_WINDOWS_ALT;
         if (engineSetup) engineSetup.hidden = !isWindows;
 
         if (engineGuideLink) {

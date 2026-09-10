@@ -52,7 +52,7 @@ const ids = [
     'intonation-value', 'volume-slider', 'volume-value', 'pause-slider', 'pause-value',
     'iconSize-slider', 'iconSize-value',
     'engine-status', 'engine-recheck', 'engine-setup', 'engine-path',
-    'engine-path-alt', 'engine-path-copy', 'engine-guide-link'
+    'engine-path-copy', 'engine-guide-link'
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, new MockElement(id)]));
 Object.assign(elements['speed-slider'], { min: '0.5', max: '2.0', value: '1.0' });
@@ -128,8 +128,7 @@ setTimeout(() => {
             'invalid stored speaker IDs must not clear the valid default option');
         assert.ok(elements['engine-path'].value.endsWith('vv-engine\\run.exe'),
             'engine setup must point at the already installed VOICEVOX engine');
-        assert.ok(!/https?:/i.test(elements['engine-path'].value)
-            && !/https?:/i.test(elements['engine-path-alt'].textContent),
+        assert.ok(!/https?:/i.test(elements['engine-path'].value),
             'engine setup must never hand the user a download URL');
         assert.ok(elements['engine-status'].classList.values.has('ok'),
             'a reachable engine must be reported as connected');

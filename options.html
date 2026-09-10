@@ -123,26 +123,26 @@
             </section>
 
             <details id="engine-setup" class="engine-setup" hidden>
-                <summary>VOICEVOXの画面を出さずに使う（メモリを節約する）</summary>
+                <summary>VOICEVOXアプリを起動せずに使う（メモリ節約）</summary>
 
-                <p class="hint">読み上げに使うのは、VOICEVOXに入っている音声合成エンジンだけです。エンジンだけを起動すると、実測でおよそ600MBのメモリが空きます。新しくダウンロードするものはありません。<strong>設定は最初の1回だけで、次回からはパソコンを起動するだけで使えます。</strong></p>
+                <p class="hint">同梱の音声合成エンジンだけを常駐させます。設定は最初の1回だけで、実測でおよそ600MBのメモリが空きます。</p>
 
                 <div class="engine-path-row">
                     <input type="text" id="engine-path" readonly aria-label="エンジンのパス">
                     <button type="button" id="engine-path-copy" class="secondary-btn">パスをコピー</button>
                 </div>
 
+                <p class="hint">インストール先を変更した場合やZIP版では、このパスは使えません。<code>VOICEVOX.exe</code> があるフォルダーの中の <code>vv-engine\run.exe</code> を指定してください。</p>
+
                 <ol class="engine-steps">
-                    <li>VOICEVOXの画面が開いている場合は、先に閉じます。</li>
-                    <li><code>Windows</code>キーを押しながら<code>R</code>キーを押し、<code>shell:startup</code>と入力して<code>Enter</code>キーを押します。</li>
-                    <li>開いたフォルダーの何もないところで右クリックし、「新規作成」→「ショートカット」を選びます。</li>
+                    <li>VOICEVOXアプリが起動していれば、閉じます。</li>
+                    <li><code>Windows</code>+<code>R</code>キーを押し、<code>shell:startup</code>と入力して<code>Enter</code>キーを押します。</li>
+                    <li>開いたフォルダーで右クリックし、「新規作成」→「ショートカット」を選びます。</li>
                     <li>入力欄で<code>Ctrl</code>+<code>V</code>を押して貼り付け、「次へ」→「完了」を押します。</li>
                     <li>できたショートカットをダブルクリックします。黒い画面が開けば成功です。</li>
                 </ol>
 
-                <p class="hint">画面上部の「再確認」を押して、緑色の表示に変われば完了です。手順4で「ファイル名が正しくありません」と出る場合は、代わりに <code id="engine-path-alt"></code> を貼り付けてください。</p>
-
-                <p class="hint">VOICEVOXの画面とエンジンは、同じポート（50021）を使うため同時に起動できません。画面を使いたいときは、黒い画面を閉じてから起動してください。</p>
+                <p class="hint">上部の表示が緑色になれば完了です。VOICEVOXアプリとは同時に起動できません。</p>
             </details>
 
             <div class="actions">
