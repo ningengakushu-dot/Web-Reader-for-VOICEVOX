@@ -124,7 +124,7 @@
             <details id="engine-setup" class="engine-setup" hidden>
                 <summary>VOICEVOXアプリを起動せずに使う（メモリ節約）</summary>
 
-                <p class="hint">同梱の音声合成エンジンだけを常駐させます。設定は最初の1回だけで、実測でおよそ600MBのメモリが空きます。画面には何も出ません。</p>
+                <p class="hint"><strong>VOICEVOXのインストールは必要です。</strong>アプリを起動せず、中の音声合成エンジンだけを常駐させます。設定は最初の1回だけで、次からはパソコンを起動するだけで使えます。</p>
 
                 <div class="engine-path-row">
                     <input type="text" id="engine-path" readonly aria-label="メモ帳に貼り付ける1行">
@@ -132,18 +132,19 @@
                 </div>
 
                 <ol class="engine-steps">
-                    <li>VOICEVOXアプリが起動していれば、閉じます。</li>
-                    <li><code>Windows</code>+<code>R</code>キーを押し、<code>notepad</code>と入力して<code>Enter</code>キーを押します。開いたメモ帳に、上の1行を貼り付けます。</li>
-                    <li>「ファイル」→「名前を付けて保存」を選び、「ファイルの種類」を「すべてのファイル」に変え、上のアドレス欄に<code>shell:startup</code>と入力して<code>Enter</code>キーを押し、ファイル名を「VOICEVOXエンジン.vbs」にして保存します。</li>
-                    <li>もう一度<code>Windows</code>+<code>R</code>キーを押し、<code>shell:startup</code>と入力して<code>Enter</code>キーを押します。開いたフォルダーの「VOICEVOXエンジン」をダブルクリックします。</li>
-                    <li>この画面に戻ります。上部の表示が「エンジンに接続できています」に変われば成功です。エンジンの起動には1分ほどかかることがあります。</li>
+                    <li>VOICEVOXアプリを閉じます。</li>
+                    <li><code>Windows</code>+<code>R</code> → <code>notepad</code> → メモ帳に上の1行を貼り付け。</li>
+                    <li>「ファイル」→「名前を付けて保存」。保存先は<code>shell:startup</code>、種類は「すべてのファイル」、名前は「VOICEVOXエンジン.vbs」。</li>
+                    <li><code>Windows</code>+<code>R</code> → <code>shell:startup</code> → 保存したファイルをダブルクリック。</li>
+                    <li>この画面に戻ります。上の表示が緑になれば成功です（1分ほどかかります）。</li>
                 </ol>
 
-                <p class="hint">次回からはパソコンを起動するだけで使えます。VOICEVOXアプリとは同時に起動できません。インストール先を変更した場合やZIP版では、1行の中のパスを、<code>VOICEVOX.exe</code> があるフォルダーの中の <code>vv-engine\run.exe</code> に書き換えてください。</p>
-
-                <p class="hint">やめるときは、手順4のフォルダーから「VOICEVOXエンジン」を削除します。削除しても動作中のエンジンは止まらないため、すぐ止めたいときはタスクマネージャーで <code>run.exe</code> を終了してください。この拡張機能を削除しても、保存したファイルは残ります。</p>
-
-                <p class="hint">手順4でエラーが出るときは、まず貼り付けた1行が途中で切れていないか、パスが合っているかを確かめてください。それでも直らないときは、お使いの環境ではこの方法を利用できません。これまでどおり VOICEVOXアプリを起動してお使いください。</p>
+                <ul class="engine-notes">
+                    <li>VOICEVOXアプリとは同時に起動できません。</li>
+                    <li>やめるときは、手順4のフォルダーからファイルを削除します。</li>
+                    <li>うまくいかないときは、1行が途中で切れていないか確かめてください。</li>
+                    <li>VOICEVOXの場所を変えた方は、1行の中のパスを書き換えてください。</li>
+                </ul>
             </details>
 
             <div class="actions">
