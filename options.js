@@ -131,7 +131,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const engineCheck = beginEngineCheck();
         try {
             await loadSpeakers(engineCheck);
-            applyEngineCheck(engineCheck, true);
+            settleEngineState(engineCheck, true);
         } catch (error) {
             console.error('Error during init:', error);
             // 初期化中に「再確認」で接続が回復していることがある。古い失敗で
@@ -139,7 +139,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (engineCheck === engineCheckSeq) {
                 showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
             }
-            applyEngineCheck(engineCheck, false);
+            // 起動途中にこの画面を開いた人が、待つだけで緑に変わるようにする。
+            settleEngineState(engineCheck, false);
         } finally {
             showLoader(false);
             // 初期化中に押された「再確認」が世代交代で早期終了していても、
@@ -273,6 +274,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastEngineCheckAt = 0;
     let engineRetryTimer = null;
     let engineRetryCount = 0;
+    let engineUsable = false;
 
     function clearEngineRetry() {
         if (!engineRetryTimer) return;
@@ -280,8 +282,15 @@ document.addEventListener('DOMContentLoaded', () => {
         engineRetryTimer = null;
     }
 
-    function scheduleEngineRetry() {
+    /**
+     * 「見えていて、まだ使える状態になっていなければ、必ず次の確認が控えている」
+     * という一点だけを保つ。個々の経路で予約し忘れると、待っても表示が変わらない
+     * 画面が残るため、状態が動いたあとは常にここを通す。
+     */
+    function ensureEngineRetry() {
         clearEngineRetry();
+        if (engineUsable) return;
+        if (document.hidden) return;
         // 開いたまま放置された画面が、いつまでも問い合わせ続けないようにする。
         if (engineRetryCount >= ENGINE_RETRY_LIMIT) return;
         engineRetryCount += 1;
@@ -290,6 +299,28 @@ document.addEventListener('DOMContentLoaded', () => {
             if (document.hidden) return;
             runEngineCheck(false, true);
         }, ENGINE_RETRY_INTERVAL_MS);
+    }
+
+    /**
+     * 確認の結果を表示へ反映し、次の確認の要否まで決める。
+     * @param {number} seq
+     * @param {boolean} connected
+     * @param {boolean} [listUnavailable]
+     */
+    function settleEngineState(seq, connected, listUnavailable) {
+        applyEngineCheck(seq, connected, listUnavailable);
+        if (seq !== engineCheckSeq) return;
+        engineUsable = Boolean(connected) && !listUnavailable;
+        if (engineUsable) engineRetryCount = 0;
+        ensureEngineRetry();
+    }
+
+    // 画面へ戻ってきた、または操作対象になった。起動待ちを最初から数え直し、
+    // 間隔の抑制で今回の確認が省かれても、次の確認は必ず控えさせる。
+    function wakeEngineChecks() {
+        engineRetryCount = 0;
+        runEngineCheck(false);
+        ensureEngineRetry();
     }
 
     /**
@@ -320,13 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     listUnavailable = true;
                 }
             }
-            applyEngineCheck(seq, connected, listUnavailable);
-            if (seq !== engineCheckSeq) return;
-            if (connected && !listUnavailable) {
-                engineRetryCount = 0;
-            } else {
-                scheduleEngineRetry();
-            }
+            settleEngineState(seq, connected, listUnavailable);
         } finally {
             // 世代交代で早期終了した場合でも、ボタンが押せないまま残らないようにする。
             if (engineRecheck) engineRecheck.disabled = false;
@@ -355,13 +380,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     clearEngineRetry();
                     return;
                 }
-                // 戻ってきたら、起動待ちの再試行を最初からやり直せるようにする。
-                engineRetryCount = 0;
-                runEngineCheck(false);
+                wakeEngineChecks();
             });
         }
         if (typeof globalThis.addEventListener === 'function') {
-            globalThis.addEventListener('focus', () => runEngineCheck(false));
+            globalThis.addEventListener('focus', () => wakeEngineChecks());
         }
 
         if (enginePathCopy) {
