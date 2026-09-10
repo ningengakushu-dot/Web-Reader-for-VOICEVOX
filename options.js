@@ -130,11 +130,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const engineCheck = beginEngineCheck();
         try {
-            await loadSpeakers();
+            await loadSpeakers(engineCheck);
             applyEngineCheck(engineCheck, true);
         } catch (error) {
             console.error('Error during init:', error);
-            showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
+            // 初期化中に「再確認」で接続が回復していることがある。古い失敗で
+            // 「接続できません」を出すと、直ったばかりの画面を誤って否定する。
+            if (engineCheck === engineCheckSeq) {
+                showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
+            }
             applyEngineCheck(engineCheck, false);
         } finally {
             showLoader(false);
@@ -148,8 +152,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // 一覧の描画後でないと select に値を入れられないため、復元はここで行う。
     // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
     // undefined/null を除外する判定にする。
-    async function loadSpeakers() {
+    // seq を渡すのは、初期化と「再確認」の取得が並走したときに、古い応答が
+    // 新しい一覧や、利用者が選び直したキャラクターを上書きしないようにするため。
+    async function loadSpeakers(seq) {
         const speakers = await getSpeakers();
+        if (seq !== undefined && seq !== engineCheckSeq) return;
         renderSpeakers(speakers);
         if (savedSpeakerId !== undefined && savedSpeakerId !== null) {
             const savedId = String(savedSpeakerId);
@@ -222,19 +229,24 @@ document.addEventListener('DOMContentLoaded', () => {
      * 手順は自動では開かない。この画面の主目的は声の設定であり、
      * 初見の情報量を増やすと本来の操作の邪魔になるため。
      * @param {boolean|null} connected null は確認中
+     * @param {boolean} [listUnavailable] 接続はできたがキャラクター一覧を取得できない
      */
-    function setEngineConnected(connected) {
-        if (engineStatus) {
-            engineStatus.classList.remove('ok', 'ng');
-            if (connected === null) {
-                engineStatus.textContent = '接続を確認しています...';
-            } else if (connected) {
-                engineStatus.textContent = 'エンジンに接続できています';
-                engineStatus.classList.add('ok');
-            } else {
-                engineStatus.textContent = 'エンジンに接続できていません（VOICEVOXを起動してください）';
-                engineStatus.classList.add('ng');
-            }
+    function setEngineConnected(connected, listUnavailable) {
+        if (!engineStatus) return;
+        engineStatus.classList.remove('ok', 'ng');
+        if (connected === null) {
+            engineStatus.textContent = '接続を確認しています...';
+        } else if (connected && listUnavailable) {
+            // 接続できていてもキャラクターを選べない画面は保存もできない。
+            // 「接続できています」と出すと、直っていない状態を直ったと誤認させる。
+            engineStatus.textContent = 'キャラクター一覧を取得できません（「再確認」を押してください）';
+            engineStatus.classList.add('ng');
+        } else if (connected) {
+            engineStatus.textContent = 'エンジンに接続できています';
+            engineStatus.classList.add('ok');
+        } else {
+            engineStatus.textContent = 'エンジンに接続できていません（VOICEVOXを起動してください）';
+            engineStatus.classList.add('ng');
         }
     }
 
@@ -246,24 +258,51 @@ document.addEventListener('DOMContentLoaded', () => {
         engineCheckSeq += 1;
         return engineCheckSeq;
     }
-    function applyEngineCheck(seq, connected) {
+    function applyEngineCheck(seq, connected, listUnavailable) {
         if (seq !== engineCheckSeq) return;
-        setEngineConnected(connected);
+        setEngineConnected(connected, listUnavailable);
     }
 
     // 画面へ戻るたびに走るため、短い間隔での重複を抑える。
     const ENGINE_AUTO_CHECK_INTERVAL_MS = 3000;
+    // エンジンは起動を指示してから応答するまで1分ほどかかる。案内どおりに
+    // 設定した人がこの画面へ戻ってきた時点ではまだ起動中で、1回きりの確認だと
+    // 失敗のまま止まってしまう。接続できるまで、上限を決めて確かめ続ける。
+    const ENGINE_RETRY_INTERVAL_MS = 5000;
+    const ENGINE_RETRY_LIMIT = 24;
     let lastEngineCheckAt = 0;
+    let engineRetryTimer = null;
+    let engineRetryCount = 0;
+
+    function clearEngineRetry() {
+        if (!engineRetryTimer) return;
+        clearTimeout(engineRetryTimer);
+        engineRetryTimer = null;
+    }
+
+    function scheduleEngineRetry() {
+        clearEngineRetry();
+        // 開いたまま放置された画面が、いつまでも問い合わせ続けないようにする。
+        if (engineRetryCount >= ENGINE_RETRY_LIMIT) return;
+        engineRetryCount += 1;
+        engineRetryTimer = setTimeout(() => {
+            engineRetryTimer = null;
+            if (document.hidden) return;
+            runEngineCheck(false, true);
+        }, ENGINE_RETRY_INTERVAL_MS);
+    }
 
     /**
      * 接続を確かめ直す。回復していてキャラクター一覧が空のままなら取り直す。
      * 一覧を持たない画面は、接続できていても保存できず使い物にならないため。
      * @param {boolean} byUser 「再確認」ボタンからの実行か
+     * @param {boolean} [isRetry] 起動待ちの自動再試行か（間隔の抑制を受けない）
      */
-    async function runEngineCheck(byUser) {
+    async function runEngineCheck(byUser, isRetry) {
         const now = Date.now();
-        if (!byUser && now - lastEngineCheckAt < ENGINE_AUTO_CHECK_INTERVAL_MS) return;
+        if (!byUser && !isRetry && now - lastEngineCheckAt < ENGINE_AUTO_CHECK_INTERVAL_MS) return;
         lastEngineCheckAt = now;
+        clearEngineRetry();
 
         const seq = beginEngineCheck();
         if (engineRecheck) engineRecheck.disabled = true;
@@ -271,14 +310,23 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await runtimeMessaging.requestOrNull({ type: 'CHECK_CONNECTION' });
             const connected = Boolean(response && response.success);
+            let listUnavailable = false;
             if (connected && !hasSpeakerOptions()) {
                 try {
-                    await loadSpeakers();
+                    await loadSpeakers(seq);
+                    listUnavailable = seq === engineCheckSeq && !hasSpeakerOptions();
                 } catch (error) {
                     console.error('Error reloading speakers:', error);
+                    listUnavailable = true;
                 }
             }
-            applyEngineCheck(seq, connected);
+            applyEngineCheck(seq, connected, listUnavailable);
+            if (seq !== engineCheckSeq) return;
+            if (connected && !listUnavailable) {
+                engineRetryCount = 0;
+            } else {
+                scheduleEngineRetry();
+            }
         } finally {
             // 世代交代で早期終了した場合でも、ボタンが押せないまま残らないようにする。
             if (engineRecheck) engineRecheck.disabled = false;
@@ -302,7 +350,13 @@ document.addEventListener('DOMContentLoaded', () => {
         // この表示が唯一の成功の合図になるため。
         if (typeof document.addEventListener === 'function') {
             document.addEventListener('visibilitychange', () => {
-                if (document.hidden) return;
+                if (document.hidden) {
+                    // 見えていない画面から問い合わせ続けない。
+                    clearEngineRetry();
+                    return;
+                }
+                // 戻ってきたら、起動待ちの再試行を最初からやり直せるようにする。
+                engineRetryCount = 0;
                 runEngineCheck(false);
             });
         }
