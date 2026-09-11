@@ -379,12 +379,12 @@ function voicevoxUnexpectedResponseError() {
 // 判別できない（実測: 「彼は「ええ」と言った」を外すと助詞の「は」が吸収されて
 // カレ/ハエエト になる。「ABC（株）」はカブシキガイシャがカブになる。
 // 「9月1日（月）」はゲツヨオビがツイタチビになる）。
-// そこで**エンジン自身に両方の読みを尋ね、モーラ列が変わらないときだけ外す**。
-// 読点・アクセント句の切れ目はモーラに現れないので、比較は「間が減ったかどうか」に
-// 影響されない。audio_query は実測13ミリ秒で、合成に比べて無視できる。
+// そこで**エンジン自身に両方の読みを尋ね、音素列と語の切れ目が変わらないときだけ外す**。
+// 間（pause_mora）と句の結合は比較に含めない。それを減らすことが目的だから。
+// audio_query は実測13ミリ秒で、合成に比べて無視できる。
 const OFFSCREEN_BRACKET_RE = /[「」『』（）()｢｣〈〉《》【】〔〕]/g;
 // 閉じと開きが隣り合う所（「はい」「いいえ」）は、外すと2つの引用が地続きになる。
-// モーラ列は変わらないためエンジンには区別できないので、読点1つを残す。
+// 音素列は変わらないためエンジンには区別できないので、読点1つを残す。
 const OFFSCREEN_BRACKET_JUNCTION_RE = /[」』）)｣〉》】〕]\s*[「『（(｢〈《【〔]/g;
 
 /**
@@ -405,18 +405,46 @@ function bracketFreeCandidate(text) {
 }
 
 /**
- * 読みの並び（モーラ）だけを取り出す。間・アクセントの違いは無視される。
+ * 読みを比べるための情報を取り出す。
+ * - phonemes: 子音＋母音の並び。カナだけの比較では拾えない無声化（「す」の u → U）まで見る。
+ * - boundaries: アクセント句の切れ目（先頭からのモーラ数）。語のまとまりが変わったかを見る。
+ * 間（pause_mora）と句の長さそのものは含めない。間が減ることが目的だから。
  * @param {object} query
- * @returns {string}
+ * @returns {{phonemes: string, boundaries: number[]}}
  */
-function queryMoraSignature(query) {
-    let signature = "";
+function queryReadingSignature(query) {
+    const phonemes = [];
+    const boundaries = [];
     const phrases = Array.isArray(query?.accent_phrases) ? query.accent_phrases : [];
+    let count = 0;
     for (const phrase of phrases) {
         const moras = Array.isArray(phrase?.moras) ? phrase.moras : [];
-        for (const mora of moras) signature += String(mora?.text || "");
+        for (const mora of moras) {
+            phonemes.push(String(mora?.consonant || "") + String(mora?.vowel || mora?.text || ""));
+            count += 1;
+        }
+        boundaries.push(count);
     }
-    return signature;
+    return { phonemes: phonemes.join(" "), boundaries };
+}
+
+/**
+ * 括弧を外した読みが、元の読みと同じと言えるか。
+ * 許すのは「アクセント句がつながること」だけ。これが括弧を外す目的そのもので、
+ * 直後の助詞が元の句へ戻る（カレワ、ハイ、ト → カレワ/ハイト）。
+ * 逆に**新しい切れ目が生まれた**場合は、語のまとまりが変わっている。
+ * 実測: 「ここで」「はきもの」を脱ぐ。→ ハキモノ が ハキ/モノオ に割れる。
+ * 音素まで一致していても、これは読みが変わったものとして退ける。
+ * @param {object} candidateQuery
+ * @param {object} originalQuery
+ * @returns {boolean}
+ */
+function isSameReading(candidateQuery, originalQuery) {
+    const candidate = queryReadingSignature(candidateQuery);
+    const original = queryReadingSignature(originalQuery);
+    if (candidate.phonemes !== original.phonemes) return false;
+    const originalBoundaries = new Set(original.boundaries);
+    return candidate.boundaries.every((at) => originalBoundaries.has(at));
 }
 
 /**
@@ -436,8 +464,7 @@ async function preferBracketFreeQuery(text, speaker, queryJson) {
     } catch (error) {
         return queryJson;
     }
-    return queryMoraSignature(candidateQuery) === queryMoraSignature(queryJson)
-        ? candidateQuery : queryJson;
+    return isSameReading(candidateQuery, queryJson) ? candidateQuery : queryJson;
 }
 
 /**
