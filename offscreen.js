@@ -368,16 +368,85 @@ function voicevoxUnexpectedResponseError() {
     return error;
 }
 
-/**
- * VOICEVOX APIを使用して音声を合成し、Blob URL と音声長の見積もりを返す。
- * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
- * @returns {Promise<{url: string, durationSec: number}>}
- */
-async function generateVoiceBlob(text, settings) {
-    const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
-    // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
-    const speaker = Number(speakerId);
+// ===== 括弧が作る不自然な間を取り除く =====
+//
+// 括弧そのものは読まれないが、開き・閉じの両方が「間」を作り、直後の助詞を別の
+// アクセント句へ切り離す。実測（VOICEVOX 0.25.2 / 話者1）:
+//   彼は「はい」と答えた。  カレワ、ハイ、ト/コタエタ  無音0.94秒・全体3.27秒
+//   括弧を外すと            カレワ/ハイト/コタエタ     無音0秒・全体1.92秒
+//
+// ただし括弧を外すと、隣り合う語がつながって読みが変わることがある。文字の並びからは
+// 判別できない（実測: 「彼は「ええ」と言った」を外すと助詞の「は」が吸収されて
+// カレ/ハエエト になる。「ABC（株）」はカブシキガイシャがカブになる。
+// 「9月1日（月）」はゲツヨオビがツイタチビになる）。
+// そこで**エンジン自身に両方の読みを尋ね、モーラ列が変わらないときだけ外す**。
+// 読点・アクセント句の切れ目はモーラに現れないので、比較は「間が減ったかどうか」に
+// 影響されない。audio_query は実測13ミリ秒で、合成に比べて無視できる。
+const OFFSCREEN_BRACKET_RE = /[「」『』（）()｢｣〈〉《》【】〔〕]/g;
+// 閉じと開きが隣り合う所（「はい」「いいえ」）は、外すと2つの引用が地続きになる。
+// モーラ列は変わらないためエンジンには区別できないので、読点1つを残す。
+const OFFSCREEN_BRACKET_JUNCTION_RE = /[」』）)｣〉》】〕]\s*[「『（(｢〈《【〔]/g;
 
+/**
+ * 括弧を外した読み上げ用の候補を作る。外すものが無ければ null。
+ * @param {string} text
+ * @returns {string|null}
+ */
+function bracketFreeCandidate(text) {
+    if (!OFFSCREEN_BRACKET_RE.test(text)) {
+        OFFSCREEN_BRACKET_RE.lastIndex = 0;
+        return null;
+    }
+    OFFSCREEN_BRACKET_RE.lastIndex = 0;
+    const candidate = text
+        .replace(OFFSCREEN_BRACKET_JUNCTION_RE, "、")
+        .replace(OFFSCREEN_BRACKET_RE, "");
+    return candidate && candidate !== text ? candidate : null;
+}
+
+/**
+ * 読みの並び（モーラ）だけを取り出す。間・アクセントの違いは無視される。
+ * @param {object} query
+ * @returns {string}
+ */
+function queryMoraSignature(query) {
+    let signature = "";
+    const phrases = Array.isArray(query?.accent_phrases) ? query.accent_phrases : [];
+    for (const phrase of phrases) {
+        const moras = Array.isArray(phrase?.moras) ? phrase.moras : [];
+        for (const mora of moras) signature += String(mora?.text || "");
+    }
+    return signature;
+}
+
+/**
+ * 括弧を外しても読みが変わらないなら、外したほうのクエリを使う。
+ * 判定できない・取得に失敗したときは元のクエリをそのまま返す（読みを壊さない側に倒す）。
+ * @param {string} text
+ * @param {number} speaker
+ * @param {object} queryJson 元のテキストのクエリ
+ * @returns {Promise<object>}
+ */
+async function preferBracketFreeQuery(text, speaker, queryJson) {
+    const candidate = bracketFreeCandidate(text);
+    if (!candidate) return queryJson;
+    let candidateQuery;
+    try {
+        candidateQuery = await requestAudioQuery(candidate, speaker);
+    } catch (error) {
+        return queryJson;
+    }
+    return queryMoraSignature(candidateQuery) === queryMoraSignature(queryJson)
+        ? candidateQuery : queryJson;
+}
+
+/**
+ * 音声合成用クエリを1件取得する。
+ * @param {string} text
+ * @param {number} speaker
+ * @returns {Promise<object>}
+ */
+async function requestAudioQuery(text, speaker) {
     const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
     const queryResponse = await fetchWithTimeout(
         queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
@@ -398,6 +467,21 @@ async function generateVoiceBlob(text, settings) {
     if (!queryJson || typeof queryJson !== "object" || !Array.isArray(queryJson.accent_phrases)) {
         throw voicevoxUnexpectedResponseError();
     }
+    return queryJson;
+}
+
+/**
+ * VOICEVOX APIを使用して音声を合成し、Blob URL と音声長の見積もりを返す。
+ * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
+ * @returns {Promise<{url: string, durationSec: number}>}
+ */
+async function generateVoiceBlob(text, settings) {
+    const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
+    // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
+    const speaker = Number(speakerId);
+
+    let queryJson = await requestAudioQuery(text, speaker);
+    queryJson = await preferBracketFreeQuery(text, speaker, queryJson);
 
     queryJson.prePhonemeLength = 0.1 * speedScale;
     queryJson.postPhonemeLength = 0.1 * speedScale;

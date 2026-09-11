@@ -92,6 +92,9 @@ jobs:
       - name: エンジン起動待ちの再確認の検査
         run: node tests/options-engine-retry.test.js
 
+      - name: 括弧が作る間を取り除く判定の検査
+        run: node tests/offscreen-bracket-reading.test.js
+
       - name: バックグラウンド状態遷移の契約検査
         run: node tests/background-state-contract.test.js
 
