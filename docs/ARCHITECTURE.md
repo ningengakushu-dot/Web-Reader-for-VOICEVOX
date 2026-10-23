@@ -68,7 +68,7 @@ Content Script は物理分割後も、再注入時の stale instance 置換、b
 - メッセージ認可・数値上限: `tests/security-boundary.test.js`、`tests/security-validation-contract.test.js`
 - Service Worker 状態: `tests/background-state-contract.test.js`、`tests/background-robustness.test.js`、`tests/background-concurrency.test.js`、`tests/background-lifecycle.test.js`
 - 読み上げテキスト整形: `tests/speech-text.test.js`
-- Offscreen 音声処理: `tests/offscreen-prefetch.test.js`、`tests/offscreen-synthesis-failure.test.js`、`tests/offscreen-playback.test.js`、`tests/offscreen-queue.test.js`
+- Offscreen 音声処理: `tests/offscreen-buffering.test.js`、`tests/offscreen-prefetch.test.js`、`tests/offscreen-synthesis-failure.test.js`、`tests/offscreen-playback.test.js`、`tests/offscreen-queue.test.js`
 - Content Script 寿命/プライバシー/注入順: `tests/content-lifecycle.test.js`、`tests/content-privacy.test.js`、`tests/context-invalidation.test.js`
 - 設定画面: `tests/options-safety.test.js`
 - Runtime Messaging: `tests/runtime-messaging.test.js`
