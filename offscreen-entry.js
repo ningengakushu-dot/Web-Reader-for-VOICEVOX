@@ -13,8 +13,11 @@ let currentAudioUrl = null;
 // 実測（音声1秒あたり合成0.5秒）では、再生済みの音声が数十秒分たまっていれば
 // 1件の合成時間（最長で音声30〜60秒＝合成15〜40秒）を吸収できる。
 // 24kHz/16bit の WAV は1分で約2.9MB なので、メモリは文章量に依存しない一定範囲に収まる。
-const MAX_READY_AUDIO_QUEUE = 24;
+// ごく短い音声が続いても、件数が先に頭打ちになって必要秒数を蓄えられなくしない。
+// 実音声は45秒を主なメモリ上限とし、件数は異常な長さの応答に対する防御にする。
+const MAX_READY_AUDIO_QUEUE = 256;
 const MAX_READY_AUDIO_SECONDS = 45;
+const MAX_QUERY_LOOKAHEAD_ITEMS = 1024;
 let activeSynthesis = null;
 let synthesisSecondsPerAudioSecond = 0.7;
 let playbackBufferTimer = null;

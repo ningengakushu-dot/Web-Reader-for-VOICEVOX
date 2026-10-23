@@ -30,6 +30,13 @@ async function run(rows, options = {}) {
     assert.ok((await run(lateLong)).maxGap < 0.001);
     assert.ok((await run(lateLong, { settings: { speedScale: 2 } })).maxGap < 0.001,
         '話速を含む実際の再生秒数で計画する');
+    for (const count of [24, 30, 75, 180]) {
+        for (const rate of [0.3, 0.5, 0.7, 0.9]) {
+            const rows = Array.from({ length: count }, (_, i) => ({ text: `line${i}`, audioSec: 0.6, synthMs: 600 * rate }));
+            rows.push({ text: '長い本文', audioSec: 20, synthMs: 20000 * rate });
+            assert.ok((await run(rows)).maxGap < 0.001, `${count}件の短文・合成比${rate}でも件数で先読みを切らない`);
+        }
+    }
 
     const longFirst = await run([20, 20].map((audioSec, i) => ({ text: `long${i}`, audioSec, synthMs: 2000 })));
     assert.ok(longFirst.startLatency < 2.1, '十分な長さの先頭音声は全文の合成を待たない');

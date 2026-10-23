@@ -63,12 +63,17 @@ function audioClockMs() {
 
 // 文の文字数ではなく、エンジンが返したモーラ長で先の合成負荷を予測する。
 // 短文が複数続いてから長文が来る場合も見る必要があるので、次の1件だけにはしない。
-// WAVを増やさずに、完成済み音声と合わせて既存の24件・45秒までのクエリを準備する。
+// WAVとは別の上限で軽いクエリを先読みする。音声が短い場合、WAVの件数上限で
+// クエリも打ち切ると、その先にある長い合成を開始前に発見できない。
 async function prepareSynthesisWindow(item, generation) {
     let seconds = readyAudioSeconds();
     let count = audioQueue.length;
+    // 再生より少し速いだけのエンジンほど蓄積が遅いので、より遠くまで調べる。
+    // 45〜450秒相当、かつ1024件で上限を固定し、全文分を無制限には保持しない。
+    const headroom = Math.max(0.1, 1 - synthesisSecondsPerAudioSecond * 1.2);
+    const lookaheadSeconds = MAX_READY_AUDIO_SECONDS / headroom;
     for (let index = -1; index < textQueue.length; index++) {
-        if (index >= 0 && (count >= MAX_READY_AUDIO_QUEUE || seconds >= MAX_READY_AUDIO_SECONDS)) break;
+        if (index >= 0 && (count >= MAX_QUERY_LOOKAHEAD_ITEMS || seconds >= lookaheadSeconds)) break;
         const pending = index < 0 ? item : textQueue[index];
         if (!pending.query && !pending.queryError) {
             try {
