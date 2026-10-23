@@ -1,7 +1,7 @@
 // 多様なテキストを出荷コードの整形・分割にかけ、実際の VOICEVOX エンジンで1件ずつ合成して、
 // 「途切れ（無音）」「失敗」「不自然な読み」を計測する実機検証ツール。
 //
-//   node tools/reading-corpus-check.mjs [--only name,name] [--no-synth] [--json out.json]
+//   node tools/reading-corpus-check.mjs [--only name,name] [--no-synth] [--json out.json] [--baseline-ref ref]
 //
 // - 出荷コード（background.js の splitText / ocr-common.js の normalizeOcrText・cleanForSpeech）を
 //   vm で読み込んで使う（コピーではなく実物）。content.js の cleanMessage は 2 行なので同等処理を置く。
@@ -11,6 +11,7 @@
 //   旧方式（先読み1件）と現行方式（件数・秒数の上限まで先読み）の両方を計算して比較する。
 // - CI では動かない（ローカルのエンジン http://127.0.0.1:50021 が必要）。
 import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
@@ -23,12 +24,15 @@ const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1
 const only = opt("--only")?.split(",") || null;
 const noSynth = args.includes("--no-synth");
 const jsonOut = opt("--json");
+const baselineRef = opt("--baseline-ref");
 const speaker = Number(opt("--speaker") || 3);
 const BASE = "http://127.0.0.1:50021";
 
 // ---- 出荷コードの読み込み ----
 function loadBackground() {
-    const source = readFileSync(resolve(repo, "background.js"), "utf8")
+    const source = (baselineRef
+        ? execFileSync("git", ["show", `${baselineRef}:background.js`], { cwd: repo, encoding: "utf8" })
+        : readFileSync(resolve(repo, "background.js"), "utf8"))
         + "\n;globalThis.__api = { splitText, sanitizeSpeechText, speechCost, SPEECH_SOFT_COST };";
     const noop = () => {};
     const chrome = {
