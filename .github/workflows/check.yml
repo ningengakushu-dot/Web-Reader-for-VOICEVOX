@@ -101,8 +101,8 @@ jobs:
       - name: 読み上げテキストの整形・分割の検査
         run: node tests/speech-text.test.js
 
-      - name: 短文の句点後に合成待ちを作らない分割の検査
-        run: node tests/speech-sentence-gap.test.js
+      - name: 分割記号に依存しない音声バッファ制御の検査
+        run: node tests/offscreen-buffering.test.js
 
       - name: OCRテキスト整形（段落・見出し・英文折り返し）の検査
         run: node tests/ocr-text-normalize.test.js

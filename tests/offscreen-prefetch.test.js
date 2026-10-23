@@ -43,20 +43,20 @@ const context = vm.createContext({
     VOICEVOX_BASE_URL: 'http://127.0.0.1:50021', VOICEVOX_FETCH_TIMEOUT_MS: 100,
     VOICEVOX_SYNTHESIS_TIMEOUT_MS: 100, OCR_WORKER_IDLE_RELEASE_MS: 1000,
     OCR_RECOGNIZE_TIMEOUT_MS: 1000,
-    fetchWithTimeout: async (url) => {
+    fetchWithTimeout: async (url, options) => {
         if (url.includes('audio_query')) {
             const text = decodeURIComponent(url.split('text=')[1]);
             return { ok: true, status: 200, text };
         }
+        synthesized.push(JSON.parse(options.body).test_text);
         if (synthDelayMs) await new Promise((r) => setTimeout(r, synthDelayMs));
         return { ok: true, status: 200 };
     },
     // 音声長 d 秒 = モーラ1つ（vowel_length = d - pre/post 0.2）
     readJsonResponseWithLimit: async (res) => {
         const d = durationOf(res.text);
-        synthesized.push(res.text);
         return { accent_phrases: [{ moras: [{ vowel_length: Math.max(0, d - 0.2), consonant_length: 0 }], pause_mora: null }],
-            prePhonemeLength: 0.1, postPhonemeLength: 0.1 };
+            prePhonemeLength: 0.1, postPhonemeLength: 0.1, test_text: res.text };
     },
     readBlobResponseWithLimit: async () => ({}),
     createOcrWorkerPool: () => ({ get: async () => ({}), terminate() {} }),
@@ -93,6 +93,8 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
         assert.ok(Math.abs(estimateQueryDurationSec(query, 2) - 0.5) < 1e-9);
         assert.equal(estimateQueryDurationSec({}, 0), 0);
         assert.equal(estimateQueryDurationSec({ accent_phrases: 'bad' }, 1), 0);
+        assert.ok(Math.abs(estimateQueryDurationSec({ ...query, pauseLengthScale: 2 }, 1) - 1.3) < 1e-9);
+        assert.ok(Math.abs(estimateQueryDurationSec({ ...query, pauseLength: 0.5, pauseLengthScale: 2 }, 2) - 0.85) < 1e-9);
     }
 
     // --- 短い文の直後に長い文: 再生中に上限秒数まで先読みする ---
@@ -123,13 +125,13 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
         notifications.length = 0;
     }
 
-    // --- 件数の上限: ごく短い文が多数でも件数で頭打ちになる ---
+    // --- ごく短い文が多数でも、秒数と件数の上限を守る ---
     {
         const texts = Array.from({ length: 200 }, (_, i) => `0.5:短${i}`);
         await enqueue(texts);
         await settle();
         assert.equal(playing.length, 1);
-        assert.equal(synthesized.length - 1, MAX_READY_AUDIO_QUEUE, `件数上限まで先読み: ${synthesized.length - 1}`);
+        assert.equal(synthesized.length - 1, Math.min(MAX_READY_AUDIO_QUEUE, Math.ceil(MAX_READY_AUDIO_SECONDS / 0.5)));
         await stop();
         await settle();
         playing.length = 0;

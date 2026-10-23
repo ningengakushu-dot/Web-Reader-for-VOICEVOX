@@ -57,6 +57,71 @@ function readyAudioSeconds() {
     return audioQueue.reduce((sum, item) => sum + (item.durationSec || 0), 0);
 }
 
+function audioClockMs() {
+    return globalThis.performance?.now?.() ?? Date.now();
+}
+
+// 文の文字数ではなく、エンジンが返したモーラ長で先の合成負荷を予測する。
+// 短文が複数続いてから長文が来る場合も見る必要があるので、次の1件だけにはしない。
+// WAVとは別の上限で軽いクエリを先読みする。音声が短い場合、WAVの件数上限で
+// クエリも打ち切ると、その先にある長い合成を開始前に発見できない。
+async function prepareSynthesisWindow(item, generation) {
+    let seconds = readyAudioSeconds();
+    let count = audioQueue.length;
+    // 再生より少し速いだけのエンジンほど蓄積が遅いので、より遠くまで調べる。
+    // 45〜450秒相当、かつ1024件で上限を固定し、全文分を無制限には保持しない。
+    const headroom = Math.max(0.1, 1 - synthesisSecondsPerAudioSecond * 1.2);
+    const lookaheadSeconds = MAX_READY_AUDIO_SECONDS / headroom;
+    for (let index = -1; index < textQueue.length; index++) {
+        if (index >= 0 && (count >= MAX_QUERY_LOOKAHEAD_ITEMS || seconds >= lookaheadSeconds)) break;
+        const pending = index < 0 ? item : textQueue[index];
+        if (!pending.query && !pending.queryError) {
+            try {
+                const query = await prepareVoiceQuery(pending.text, pending.settings);
+                if (generation !== synthesisGeneration) return false;
+                pending.query = query;
+                pending.durationSec = estimateQueryDurationSec(query, pending.settings.speedScale);
+            } catch (error) {
+                if (generation !== synthesisGeneration) return false;
+                pending.queryError = error;
+            }
+        }
+        // 失敗は元の合成キューの順番で処理し、分割再試行とエラー通知の契約を保つ。
+        // 到達不能のまま後続全件に同じ要求を出さない。
+        if (pending.queryError) break;
+        seconds += pending.durationSec;
+        count++;
+    }
+    return generation === synthesisGeneration;
+}
+
+function requiredPlaybackBufferSeconds() {
+    // 直近の合成実測に20%の余裕を持たせる。実測値は各合成で更新するので、
+    // エンジン起動時の一時的な遅さを以降ずっと引きずらない。
+    const rate = synthesisSecondsPerAudioSecond * 1.2;
+    let synthesisSeconds = 0;
+    let precedingAudioSeconds = 0;
+    let required = 0;
+    const add = (durationSec, elapsed = 0) => {
+        synthesisSeconds += Math.max(0, durationSec * rate - elapsed);
+        required = Math.max(required, synthesisSeconds - precedingAudioSeconds);
+        precedingAudioSeconds += durationSec;
+    };
+    if (activeSynthesis?.durationSec != null) {
+        add(activeSynthesis.durationSec, Math.max(0, audioClockMs() - activeSynthesis.startedAt) / 1000);
+    }
+    for (const pending of textQueue) {
+        if (!pending.query || pending.queryError) break;
+        add(pending.durationSec);
+    }
+    return required > 0 ? required + 0.1 : 0;
+}
+
+function clearPlaybackBufferTimer() {
+    if (playbackBufferTimer !== null) clearTimeout(playbackBufferTimer);
+    playbackBufferTimer = null;
+}
+
 async function processSynthesis() {
     if (isSynthesizing || textQueue.length === 0
         || audioQueue.length >= MAX_READY_AUDIO_QUEUE
@@ -66,14 +131,22 @@ async function processSynthesis() {
     const item = textQueue.shift();
     // この合成が属する世代を記録。完了時に世代が進んでいれば stale とみなす。
     const generation = synthesisGeneration;
+    activeSynthesis = { durationSec: null, startedAt: null };
 
     try {
-        const { url: blobUrl, durationSec } = await generateVoiceBlob(item.text, item.settings);
+        if (!await prepareSynthesisWindow(item, generation)) return;
+        if (item.queryError) throw item.queryError;
+        activeSynthesis = { durationSec: item.durationSec, startedAt: audioClockMs() };
+        processPlayback();
+        const { url: blobUrl, durationSec } = await generateVoiceBlob(item.text, item.settings, item.query);
         // 合成中に stopAll() が走った場合、生成済み Blob を破棄して状態を触らない
         if (generation !== synthesisGeneration) {
             URL.revokeObjectURL(blobUrl);
             return;
         }
+        const elapsedSec = Math.max(0, audioClockMs() - activeSynthesis.startedAt) / 1000;
+        if (durationSec > 0) synthesisSecondsPerAudioSecond = elapsedSec / durationSec;
+        activeSynthesis = null;
         consecutiveSynthesisFailures = 0;
         audioQueue.push({ url: blobUrl, text: item.text, durationSec });
         processPlayback();
@@ -116,8 +189,10 @@ async function processSynthesis() {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
         // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。
         if (generation === synthesisGeneration) {
+            activeSynthesis = null;
             isSynthesizing = false;
             processSynthesis();
+            processPlayback();
         }
     }
 }
@@ -139,8 +214,8 @@ function isVoicevoxUnreachableError(err) {
 }
 
 /**
- * audio_query の結果から音声の長さ（秒）を見積もる。先読み量の制御にだけ使うので
- * 厳密でなくてよい（モーラと休止の長さの合計を話速で割る）。
+ * audio_query の結果から音声の長さ（秒）を見積もる。先読み量と再生開始の判断に使い、
+ * 話速・休止設定を含める。フレーム丸めの差は再生開始の余裕で吸収する。
  */
 function estimateQueryDurationSec(query, speedScale) {
     let seconds = (Number(query.prePhonemeLength) || 0) + (Number(query.postPhonemeLength) || 0);
@@ -150,7 +225,12 @@ function estimateQueryDurationSec(query, speedScale) {
         for (const mora of moras) {
             seconds += (Number(mora?.consonant_length) || 0) + (Number(mora?.vowel_length) || 0);
         }
-        seconds += Number(phrase?.pause_mora?.vowel_length) || 0;
+        if (phrase?.pause_mora) {
+            const pause = query.pauseLength == null
+                ? (Number(phrase.pause_mora.vowel_length) || 0) : Number(query.pauseLength);
+            const scale = Number.isFinite(Number(query.pauseLengthScale)) ? Number(query.pauseLengthScale) : 1;
+            seconds += pause * scale;
+        }
     }
     const speed = Number(speedScale) > 0 ? Number(speedScale) : 1;
     return seconds / speed;
@@ -183,12 +263,7 @@ function voicevoxUnexpectedResponseError() {
     return error;
 }
 
-/**
- * VOICEVOX APIを使用して音声を合成し、Blob URL と音声長の見積もりを返す。
- * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
- * @returns {Promise<{url: string, durationSec: number}>}
- */
-async function generateVoiceBlob(text, settings) {
+async function prepareVoiceQuery(text, settings) {
     const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
     // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
     const speaker = Number(speakerId);
@@ -221,6 +296,16 @@ async function generateVoiceBlob(text, settings) {
     queryJson.intonationScale = intonationScale;
     queryJson.volumeScale = volumeScale;
     queryJson.pauseLengthScale = pauseLengthScale;
+    return queryJson;
+}
+
+/**
+ * 検証済みのクエリを合成する。先読み済みなら同じクエリを再取得しない。
+ * @returns {Promise<{url: string, durationSec: number}>}
+ */
+async function generateVoiceBlob(text, settings, preparedQuery = null) {
+    const queryJson = preparedQuery || await prepareVoiceQuery(text, settings);
+    const speaker = Number(settings.speakerId);
 
     const synthUrl = `${VOICEVOX_BASE_URL}/synthesis?speaker=${speaker}`;
     const synthResponse = await fetchWithTimeout(synthUrl, {
@@ -233,15 +318,35 @@ async function generateVoiceBlob(text, settings) {
     const audioBlob = await readBlobResponseWithLimit(synthResponse);
     return {
         url: URL.createObjectURL(audioBlob),
-        durationSec: estimateQueryDurationSec(queryJson, speedScale)
+        durationSec: estimateQueryDurationSec(queryJson, settings.speedScale)
     };
 }
 
 /**
  * 再生待ちキューを処理する
  */
-async function processPlayback() {
+async function processPlayback(continuePlayback = false) {
     if (isPlaying || audioQueue.length === 0) return;
+
+    clearPlaybackBufferTimer();
+    processSynthesis();
+    const atBufferLimit = audioQueue.length >= MAX_READY_AUDIO_QUEUE
+        || readyAudioSeconds() >= MAX_READY_AUDIO_SECONDS;
+    if (!continuePlayback && !atBufferLimit && activeSynthesis?.durationSec === null) return;
+    // 未準備の次クエリがある間は負荷を判定できない。準備完了・失敗時に再評価される。
+    if (!continuePlayback && !atBufferLimit && !activeSynthesis && textQueue[0]
+        && !textQueue[0].query && !textQueue[0].queryError) return;
+    const waitSeconds = requiredPlaybackBufferSeconds() - readyAudioSeconds();
+    if (!continuePlayback && !atBufferLimit && waitSeconds > 0.001) {
+        const generation = playbackGeneration;
+        // 合成完了時にも再評価する。長い合成の途中でも残り時間がバッファ内に収まれば
+        // 開始でき、全文合成の完了まで待たせない。
+        playbackBufferTimer = setTimeout(() => {
+            playbackBufferTimer = null;
+            if (generation === playbackGeneration) processPlayback();
+        }, Math.max(1, waitSeconds * 1000));
+        return;
+    }
 
     isPlaying = true;
     notifyBackground("PLAYBACK_STARTED");
@@ -275,7 +380,9 @@ async function processPlayback() {
             notifyBackground("PLAYBACK_ENDED");
         }
 
-        processPlayback();
+        // 既に完成している音声はそのまま続ける。予測の更新を理由に途中へ間を挿入しない。
+        // 実際にバッファが空になった場合だけ、再開時に必要量を再び確保する。
+        processPlayback(completedNormally && audioQueue.length > 0);
     };
 
     audio.onended = () => cleanup(true);
@@ -306,6 +413,9 @@ function stopAll() {
         || currentAudio != null;
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
+    clearPlaybackBufferTimer();
+    activeSynthesis = null;
+    synthesisSecondsPerAudioSecond = 0.7;
     // 連続失敗の数え上げは1回の読み上げの中だけで意味を持つ。エンジンを起動し直して
     // やり直したときに、前回の失敗数のせいで1文目で打ち切られないようにする。
     consecutiveSynthesisFailures = 0;
