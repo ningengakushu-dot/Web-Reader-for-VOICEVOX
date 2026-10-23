@@ -136,8 +136,9 @@ const SPEECH_READABLE_RE = /[\p{L}\p{N}]/u;
 //      結ぶ（「価格：12,800円」）ので切らない
 //   2: 語（空白の直後）
 //   3: 文字と記号の境（括弧・中黒・スラッシュ等の前後）
-// 0 は無条件に切る（1文＝1件）。1 以降は上限を超える文だけに使う。
+// 0 は文の候補位置。短文は splitText で後続とまとめ、1 以降は上限を超える文に使う。
 const SPEECH_CLOSERS = "」』）)\\]】〕〉》\"'’”";
+const SPEECH_SENTENCE_END_RE = new RegExp(`[。！？．][${SPEECH_CLOSERS}]*$`, "u");
 const SPEECH_SPLIT_LEVELS = [
     new RegExp(`(?<=[。！？][${SPEECH_CLOSERS}]*)(?![。！？${SPEECH_CLOSERS}])|(?<=\\n)`
         + `|(?<=．)(?![0-9A-Za-z])(?<!^\\s*[0-9]{1,3}．)`, "um"),
@@ -232,8 +233,8 @@ function hardCutByCost(text, limit) {
  * 読み上げテキストを VOICEVOX へ渡す合成単位の配列にする。
  *
  * 1. 整形（sanitizeSpeechText）
- * 2. 文末（。！？ 改行）で1文ずつに分ける。通常の長さの文はそのまま1件にする
- *    （読点等は VOICEVOX が自然な間として処理する）。
+ * 2. 文末（。！？ 改行）で候補を分ける。短文だけの再生中に次の長文を合成すると
+ *    間に合わないため、短文は同じ段落の後続とまとめる。句点は残し、間はエンジンに任せる。
  * 3. 上限コストを超える文だけを、読点→空白→記号境界の順で上限以内に分ける。
  *    句点の無い長い箇条書き（メールの求人紹介等）が1件になると、その合成
  *    （実測: 約390字＝音声55秒に26秒）が直前の文の再生中に終わらず、文の間に
@@ -262,9 +263,21 @@ function splitText(text) {
             if (part && SPEECH_READABLE_RE.test(part)) result.push(part);
         }
     };
-    for (const sentence of sentences) {
+    for (let sentenceIndex = 0; sentenceIndex < sentences.length; sentenceIndex++) {
+        const sentence = sentences[sentenceIndex];
         let rest = sentence.trim();
         if (!rest || !SPEECH_READABLE_RE.test(rest)) continue;
+        // 実測:「正しい。」0.9秒の再生中に続く文の合成6.9秒は終わらず、約6秒途切れる。
+        // 先読み件数を増やしても開始直後の不足は埋まらない。先頭目標の半分に満たない
+        // 文は後続と同じ合成単位にし、既存のコスト分割で開始待ち・要求サイズを抑える。
+        // 改行をまたぐと見出し・表の独立性が失われるため、同じ段落の文末だけを対象にする。
+        while (speechCost(rest) < SPEECH_LEAD_COSTS[0] / 2
+            && SPEECH_SENTENCE_END_RE.test(rest) && !sentence.includes("\n")) {
+            const next = sentences[sentenceIndex + 1];
+            if (!next || next.includes("\n") || !SPEECH_READABLE_RE.test(next)) break;
+            rest += next;
+            sentenceIndex++;
+        }
         // 先頭の数件は、節の区切り（読点・英文の文末）で小さく切り出せるならそうする。
         // 節の区切りが無い文は無理に語の途中で切らず、通常の上限で扱う。
         // 切り出した先頭が上限の半分にも満たない（「新型センサー、」のような短い語句）
