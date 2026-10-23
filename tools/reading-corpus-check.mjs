@@ -7,8 +7,8 @@
 //   vm で読み込んで使う（コピーではなく実物）。content.js の cleanMessage は 2 行なので同等処理を置く。
 // - 各件について audio_query（読み仮名・モーラ数・見積もり秒数・所要時間）と synthesis（所要時間・
 //   実音声長）を測る。
-// - 再生パイプライン（再生中の1件＋先読み）を模擬し、文の間の無音（gap）と開始までの待ち時間を出す。
-//   旧方式（先読み1件）と現行方式（件数・秒数の上限まで先読み）の両方を計算して比較する。
+// - 実測した同じ値で変更前後の出荷用entry/audioを仮想時計で動かし、途中の合成待ちと
+//   開始待ちを比較する。歴史的な先読み1件の方式は old として参考値だけ残す。
 // - CI では動かない（ローカルのエンジン http://127.0.0.1:50021 が必要）。
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -16,6 +16,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { CORPUS } from "./reading-corpus.mjs";
+import pipelineHarness from "../tests/audio-pipeline-harness.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..");
@@ -145,6 +146,7 @@ for (const item of items) {
         c.queryMs = Math.round(q.ms);
         if (!q.ok) { c.error = `audio_query HTTP ${q.status}`; row.errors.push(c.error); row.chunks.push(c); continue; }
         c.kana = q.kana; c.moras = q.moras; c.estSec = +q.est.toFixed(2);
+        c.query = q.q;
         if (!noSynth) {
             const s = await synth(q.q);
             c.synthMs = Math.round(s.ms);
@@ -159,12 +161,26 @@ for (const item of items) {
         const synthSec = row.chunks.map((c) => ((c.queryMs || 0) + (c.synthMs || 0)) / 1000);
         const audioSec = row.chunks.map((c) => c.audioSec || 0.2);
         row.old = simulate(synthSec, audioSec, { maxItems: 1, maxSeconds: Infinity });
-        row.now = simulate(synthSec, audioSec, { maxItems: 24, maxSeconds: 45 });
+        // 同一の実測値を出荷コードへ渡すので、旧ポリシーと新ポリシーの比較に
+        // エンジン負荷の時間差を混ぜない。再生開始タイマー・停止・先読みも実物を使う。
+        if (!row.errors.length) {
+            const samples = row.chunks.map((chunk) => ({ text: chunk.text, query: chunk.query,
+                queryMs: chunk.queryMs, synthMs: chunk.synthMs, audioSec: chunk.audioSec }));
+            for (const [name, sourceRef] of [["before", baselineRef || "b71687c"], ["now", null]]) {
+                const pipeline = pipelineHarness.createAudioPipeline({ rows: samples, sourceRef });
+                pipeline.enqueue();
+                await pipeline.advanceTo();
+                row[name] = pipeline.report();
+                if (!row[name].ended || row[name].played.length !== chunks.length) {
+                    row.errors.push(`playback did not finish: ${name}`);
+                }
+            }
+        }
         row.audioTotal = +audioSec.reduce((a, b) => a + b, 0).toFixed(1);
         row.synthTotal = +synthSec.reduce((a, b) => a + b, 0).toFixed(1);
     }
     results.push(row);
-    const gapInfo = row.now ? ` audio=${row.audioTotal}s synth=${row.synthTotal}s start=${row.now.startLatency.toFixed(1)}s maxGap(now)=${row.now.maxGap.toFixed(1)}s maxGap(old)=${row.old.maxGap.toFixed(1)}s` : "";
+    const gapInfo = row.now ? ` audio=${row.audioTotal}s synth=${row.synthTotal}s start=${row.now.startLatency.toFixed(1)}s maxGap(now)=${row.now.maxGap.toFixed(1)}s maxGap(before)=${row.before.maxGap.toFixed(1)}s` : "";
     console.log(`\n### ${row.name} [${row.path}] chunks=${chunks.length}${gapInfo}${row.errors.length ? " ERRORS=" + row.errors.join("; ") : ""}`);
     for (const c of row.chunks) {
         const timing = c.audioSec != null ? ` a=${c.audioSec}s s=${((c.queryMs + c.synthMs) / 1000).toFixed(1)}s` : "";
@@ -178,9 +194,10 @@ const worst = withGap.slice().sort((a, b) => b.now.maxGap - a.now.maxGap).slice(
 console.log("\n===== summary =====");
 console.log(`items=${results.length} chunks=${results.reduce((s, r) => s + r.chunks.length, 0)} errors=${results.reduce((s, r) => s + r.errors.length, 0)}`);
 if (withGap.length) {
-    console.log(`maxGap now: ${Math.max(...withGap.map((r) => r.now.maxGap)).toFixed(1)}s / old: ${Math.max(...withGap.map((r) => r.old.maxGap)).toFixed(1)}s`);
+    console.log(`maxGap now: ${Math.max(...withGap.map((r) => r.now.maxGap)).toFixed(1)}s / before: ${Math.max(...withGap.map((r) => r.before.maxGap)).toFixed(1)}s`);
     console.log(`start latency max: ${Math.max(...withGap.map((r) => r.now.startLatency)).toFixed(1)}s`);
-    for (const r of worst) console.log(`  ${r.name}: gap now=${r.now.maxGap.toFixed(1)}s old=${r.old.maxGap.toFixed(1)}s start=${r.now.startLatency.toFixed(1)}s`);
+    for (const r of worst) console.log(`  ${r.name}: gap now=${r.now.maxGap.toFixed(1)}s before=${r.before.maxGap.toFixed(1)}s start=${r.now.startLatency.toFixed(1)}s`);
 }
 for (const r of results.filter((x) => x.errors.length)) console.log(`  ERROR ${r.name}: ${r.errors.join("; ")}`);
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify(results, null, 1));
+if (results.some((row) => row.errors.length)) process.exitCode = 1;

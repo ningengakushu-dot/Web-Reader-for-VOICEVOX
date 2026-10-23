@@ -189,8 +189,8 @@ const send = (message, sender) => new Promise((resolve) => {
     {
         // vm 内の配列は別 realm のため、値で比較する
         const splitText = (text) => Array.from(context.__test.splitText(text));
-        assert.deepEqual(splitText('短い文。次の文！'), ['短い文。次の文！'],
-            '短文は句点を残して後続とまとめる');
+        assert.deepEqual(splitText('短い文。次の文！'), ['短い文。', '次の文！'],
+            '通常の文は文末記号でのみ分割する');
         // 120字以内の文はそのまま（読点では分割しない）
         const medium = 'これは、読点を含む、しかし長すぎない、普通の一文です。';
         assert.deepEqual(splitText(medium), [medium], '120字以内の文は読点で分割しない');
@@ -210,7 +210,7 @@ const send = (message, sender) => new Promise((resolve) => {
             + '■所属するクリエイター／技術者の技術書出版、技術フォーラムにスピーカーとして登壇、'
             + 'フロアを利用した最新トレンドの勉強会の一般開放など、高い専門性を持つ社員多数、' + '-'.repeat(60);
         const mailChunks = splitText(mail);
-        assert.ok(mailChunks.length >= 3 && mailChunks.every((c) => c.length <= 132),
+        assert.ok(mailChunks.length >= 4 && mailChunks.every((c) => c.length <= 132),
             `箇条書きは読点単位の上限以内へ分かれる: ${mailChunks.map((c) => c.length)}`);
         // 区切り線（同じ記号の連続）は1個に畳まれる以外、文字を落とさない
         assert.equal(mailChunks.join(''), mail.replace(/-{60}/g, '-'));

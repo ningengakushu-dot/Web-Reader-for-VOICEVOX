@@ -15,6 +15,9 @@ let currentAudioUrl = null;
 // 24kHz/16bit の WAV は1分で約2.9MB なので、メモリは文章量に依存しない一定範囲に収まる。
 const MAX_READY_AUDIO_QUEUE = 24;
 const MAX_READY_AUDIO_SECONDS = 45;
+let activeSynthesis = null;
+let synthesisSecondsPerAudioSecond = 0.7;
+let playbackBufferTimer = null;
 // 合成の世代トークン。stopAll() で繰り上げることで、停止前に開始済みの
 // 合成（in-flight）が完了しても、その結果を破棄して状態に反映させない。
 let synthesisGeneration = 0;

@@ -93,6 +93,8 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
         assert.ok(Math.abs(estimateQueryDurationSec(query, 2) - 0.5) < 1e-9);
         assert.equal(estimateQueryDurationSec({}, 0), 0);
         assert.equal(estimateQueryDurationSec({ accent_phrases: 'bad' }, 1), 0);
+        assert.ok(Math.abs(estimateQueryDurationSec({ ...query, pauseLengthScale: 2 }, 1) - 1.3) < 1e-9);
+        assert.ok(Math.abs(estimateQueryDurationSec({ ...query, pauseLength: 0.5, pauseLengthScale: 2 }, 2) - 0.85) < 1e-9);
     }
 
     // --- 短い文の直後に長い文: 再生中に上限秒数まで先読みする ---
