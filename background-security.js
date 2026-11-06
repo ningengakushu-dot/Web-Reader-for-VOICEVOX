@@ -86,13 +86,18 @@
         const allowed = new Set([
             "CLAIM_UPDATE_NOTICE", "SHORTCUT_PRESSED", "OPEN_OPTIONS", "CHECK_CONNECTION",
             "GET_SPEAKERS", "GET_SPEAKER_ICON", "GENERATE_VOICE", "STOP_ALL",
-            "CAPTURE_OCR_REGION"
+            "CAPTURE_OCR_REGION", "TOGGLE_READING_REQUEST", "SELECTION_REQUIRED"
         ]);
         if (!allowed.has(request.type)) return { ok: false, error: "不明な要求です" };
 
-        if (["CLAIM_UPDATE_NOTICE", "SHORTCUT_PRESSED", "CAPTURE_OCR_REGION"].includes(request.type)
+        if (["CLAIM_UPDATE_NOTICE", "SHORTCUT_PRESSED", "CAPTURE_OCR_REGION",
+            "TOGGLE_READING_REQUEST", "SELECTION_REQUIRED"].includes(request.type)
             && !isTabSender(sender)) {
             return { ok: false, error: "要求元タブを確認できません" };
+        }
+        if (request.type === "TOGGLE_READING_REQUEST"
+            && sender.frameId !== undefined && sender.frameId !== 0) {
+            return { ok: false, error: "トップフレーム以外からは実行できません" };
         }
         if (["GET_SPEAKERS", "GET_SPEAKER_ICON"].includes(request.type)
             && !isExtensionPage(sender, "options.html")) {

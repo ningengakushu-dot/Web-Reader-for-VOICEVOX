@@ -59,6 +59,29 @@ content.parts.reading = {
             && (event.code === "KeyU" || key === "u");
     },
 
+    requestToggleReading() {
+        if (!this.active) return;
+        if (this.isPlaying) {
+            this.stopAll();
+            return;
+        }
+        try {
+            if (!chrome.runtime?.id) return;
+            // 親ページから子フレームの選択を直接読むと同一オリジン制約に阻まれる。
+            // background 経由で配信し、選択を持つフレーム自身に取得させる。
+            chrome.runtime.sendMessage({ type: "TOGGLE_READING_REQUEST" }, (response) => {
+                if (!this.active) return;
+                const error = chrome.runtime.lastError?.message || response?.error;
+                if (error) {
+                    this.updateUIState('error');
+                    this.showPlaybackErrorToast(error);
+                }
+            });
+        } catch (error) {
+            // 更新・再読み込み直後の古いcontent scriptでは何もしない。
+        }
+    },
+
     toggleReading() {
         if (this.isPlaying) {
             this.stopAll();
@@ -77,12 +100,17 @@ content.parts.reading = {
             if (this.isTopFrame) {
                 this.showOcrToast("読み上げるテキストを選択してください。");
                 this.scheduleOcrToastDismiss(4000);
+            } else {
+                // インジケーターと案内UIはトップフレームだけが持つ。
+                try {
+                    chrome.runtime.sendMessage({ type: "SELECTION_REQUIRED" }, () => { void chrome.runtime.lastError; });
+                } catch (error) { /* 更新直後の無効コンテキスト */ }
             }
         }
     },
 
     // TOGGLE_READING を自フレームで処理すべきか判定する。
-    // ショートカットは全フレームに配信されるため、フォーカスを持つないフレームや、
+    // アイコン・ショートカットは全フレームに配信されるため、フォーカスを持たないフレームや、
     // フォーカスが子フレーム（IFRAME/FRAME）にあるフレームでは処理せず、
     // 実際にフォーカスを持つフレームだけが読み上げを担当することで二重読み上げを防ぐ。
     shouldHandleToggleReading() {
@@ -131,6 +159,12 @@ content.parts.reading = {
                     // フォーカスを持つフレームのみが処理（全フレーム配信による二重読み上げ防止）
                     if (!this.shouldHandleToggleReading()) break;
                     this.toggleReading();
+                    break;
+                case "SELECTION_REQUIRED":
+                    if (!this.isTopFrame) break;
+                    this.updateUIState('error');
+                    this.showOcrToast("読み上げるテキストを選択してください。");
+                    this.scheduleOcrToastDismiss(4000);
                     break;
                 case "PLAYBACK_STARTED":
                     this.isPlaying = true;

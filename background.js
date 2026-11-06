@@ -400,6 +400,12 @@ async function handleShortcutRequest(tabId, source) {
     // commands と content の同時発火による二重トリガを防ぐ。
     lastShortcut.set(tabId, { at: now, source });
 
+    await dispatchToggleReading(tabId);
+}
+
+// アイコンとショートカットの双方で、選択があるフレーム自身に取得・読み上げさせる。
+async function dispatchToggleReading(tabId) {
+    if (tabId == null) return;
     // TOGGLE_READING は全フレームへ配信され、フォーカスを持つフレームのみが処理する。
     // 未注入のフレーム（フォーカス中の子フレーム等）が取りこぼされないよう、
     // 送信前に全フレームへ content.js を事前注入する。
@@ -407,13 +413,13 @@ async function handleShortcutRequest(tabId, source) {
     try {
         await injectContentScripts({ tabId, allFrames: true });
     } catch (err) {
-        console.warn(`Background: ショートカット用 content.js 事前注入失敗 (${source}):`, err.message);
+        console.warn("Background: 選択読み上げ用 Content Script 事前注入失敗:", err.message);
     }
 
     await sendMessageWithInjection(
         tabId,
         { type: "TOGGLE_READING" },
-        "ショートカットキーのメッセージ送信失敗"
+        "選択読み上げのメッセージ送信失敗"
     );
 }
 
@@ -702,6 +708,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             handleShortcutRequest(sender.tab?.id, "content.SHORTCUT_PRESSED")
                 .then(() => sendResponse({ success: true }))
                 .catch(err => sendResponse({ success: false, error: err.message }));
+            return true;
+
+        case "TOGGLE_READING_REQUEST":
+            respondWith(dispatchToggleReading(sender.tab?.id), sendResponse);
+            return true;
+
+        case "SELECTION_REQUIRED":
+            respondWith(chrome.tabs.sendMessage(sender.tab.id,
+                { type: "SELECTION_REQUIRED" }, { frameId: 0 }), sendResponse);
             return true;
 
         case "OPEN_OPTIONS":
