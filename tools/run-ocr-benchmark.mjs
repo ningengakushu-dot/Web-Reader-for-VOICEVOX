@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { localDevtoolsUrl } from "./local-devtools-url.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // 実行者ごとに異なるローカルパスを埋め込まないため、Chromium の場所は環境変数で受け取る
@@ -61,7 +62,7 @@ async function poll(fn, timeoutMs = 15000) {
 
 async function evaluate(webSocketDebuggerUrl, expression) {
     return new Promise((resolveEval, reject) => {
-        const socket = new WebSocket(webSocketDebuggerUrl);
+        const socket = new WebSocket(localDevtoolsUrl(webSocketDebuggerUrl, port));
         const id = 1;
         socket.addEventListener("open", () => socket.send(JSON.stringify({
             id,
