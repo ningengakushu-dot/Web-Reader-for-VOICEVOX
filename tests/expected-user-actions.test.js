@@ -26,7 +26,10 @@ assert.match(connectionBody, /if \(chrome\.runtime\.lastError\) return;/,
   '更新直後などのruntime.lastErrorは初期接続確認で静かに処理する');
 
 const reviewUrl = 'https://chromewebstore.google.com/detail/web-reader-for-voicevox/ilcfondcjhaalpcghnhcejioopcbhhla/reviews';
-assert.ok(source.includes(reviewUrl), '公開済み拡張機能のレビューページを開く');
+const reviewUrlLiteral = /const storeUrl = ("[^"\r\n]+");/.exec(source);
+assert.ok(reviewUrlLiteral, 'レビューページのURL定義がある');
+assert.equal(new URL(JSON.parse(reviewUrlLiteral[1])).href, reviewUrl,
+  '公開済み拡張機能のレビューページを正確なURLで開く');
 assert.ok(!source.includes('detail/web-reader-for-voicevox/${chrome.runtime.id}'),
   '開発者モードの一時的な拡張機能IDをストアURLに使用しない');
 assert.ok(source.includes('率直なご感想や評価をお寄せください。今後の改善に活用します。'),

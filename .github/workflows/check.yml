@@ -74,6 +74,9 @@ jobs:
       - name: アイコンドラッグの捕捉・解放・後始末の検査
         run: node tests/indicator-drag.test.js
 
+      - name: OCRベンチマークのローカル接続先検査
+        run: node tests/local-devtools-url.test.js
+
       - name: 拡張コンテキスト無効化の回帰検査
         run: node tests/context-invalidation.test.js
 
