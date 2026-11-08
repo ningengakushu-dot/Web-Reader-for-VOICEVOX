@@ -71,6 +71,9 @@ jobs:
       - name: アイコンサイズ範囲の検査
         run: node tests/icon-size-range.test.js
 
+      - name: アイコンドラッグの捕捉・解放・後始末の検査
+        run: node tests/indicator-drag.test.js
+
       - name: 拡張コンテキスト無効化の回帰検査
         run: node tests/context-invalidation.test.js
 

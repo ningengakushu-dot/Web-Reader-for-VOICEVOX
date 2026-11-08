@@ -54,6 +54,9 @@ function createHarness({ voiceError } = {}) {
             appendChild() {}, remove() {}, setAttribute() {}, removeAttribute() {},
             addEventListener(type, fn) { this.listeners.set(type, fn); }, removeEventListener() {},
             attachShadow() { return element(); },
+            setPointerCapture(id) { this.capturedPointer = id; },
+            hasPointerCapture(id) { return this.capturedPointer === id; },
+            releasePointerCapture() { this.capturedPointer = null; },
             offsetWidth: 32, offsetHeight: 32, offsetLeft: 100, offsetTop: 100
         });
         const documentListeners = new Map();
@@ -109,8 +112,8 @@ function createHarness({ voiceError } = {}) {
         for (let i = 0; i < pending.length; i++) await pending[i];
     };
     const click = async (frame) => {
-        frame.reader.indicator.listeners.get('mousedown')({ button: 0, clientX: 100, clientY: 100, preventDefault() {} });
-        frame.documentListeners.get('mouseup')();
+        frame.reader.indicator.listeners.get('pointerdown')({ pointerId: 1, button: 0, clientX: 100, clientY: 100, preventDefault() {} });
+        frame.documentListeners.get('pointerup')({ pointerId: 1, clientX: 100, clientY: 100 });
         frame.reader.indicator.listeners.get('click')({ preventDefault() {} });
         await settle();
     };
@@ -142,9 +145,9 @@ function createHarness({ voiceError } = {}) {
     const plainTop = plain.addFrame(0, { selected: '通常ページの本文' });
     await plain.click(plainTop);
     assert.deepEqual(plain.voices, [{ frameId: 0, text: '通常ページの本文' }]);
-    plainTop.reader.indicator.listeners.get('mousedown')({ button: 0, clientX: 100, clientY: 100, preventDefault() {} });
-    plainTop.documentListeners.get('mousemove')({ clientX: 120, clientY: 120 });
-    plainTop.documentListeners.get('mouseup')();
+    plainTop.reader.indicator.listeners.get('pointerdown')({ pointerId: 1, button: 0, clientX: 100, clientY: 100, preventDefault() {} });
+    plainTop.documentListeners.get('pointermove')({ pointerId: 1, buttons: 1, clientX: 120, clientY: 120 });
+    plainTop.documentListeners.get('pointerup')({ pointerId: 1, clientX: 120, clientY: 120 });
     plainTop.reader.indicator.listeners.get('click')({ preventDefault() {} });
     await plain.settle();
     assert.equal(plain.voices.length, 1, 'アイコンのドラッグでは読み上げ要求を送らない');
