@@ -129,9 +129,9 @@ ${escapeScript(source)}
         }
         return JSON.parse(match[1]
             .replaceAll("&quot;", "\"")
-            .replaceAll("&amp;", "&")
             .replaceAll("&lt;", "<")
-            .replaceAll("&gt;", ">"));
+            .replaceAll("&gt;", ">")
+            .replaceAll("&amp;", "&"));
     } finally {
         rmSync(temp, { recursive: true, force: true });
     }
