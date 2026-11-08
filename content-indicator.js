@@ -148,7 +148,8 @@ content.parts.indicator = {
                 return;
             }
 
-            this.toggleReading();
+            // 本文が別オリジンの子フレーム内にある場合も、そのフレームの選択を読む。
+            this.requestToggleReading();
         });
 
         // 右クリックリスナー。動作は設定で切替可能（既定: 画面OCR読み上げの開始）。
