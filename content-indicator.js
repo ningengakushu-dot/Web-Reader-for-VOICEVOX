@@ -189,9 +189,15 @@ content.parts.indicator = {
                 background-color: #3498db; border-radius: 50%; z-index: 2147483647;
                 opacity: 0.4; transition: opacity 0.3s ease, transform 0.2s ease, box-shadow 0.3s ease;
                 cursor: grab; display: flex; align-items: center; justify-content: center;
+                touch-action: none; user-select: none;
                 box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             }
             #vvradio-indicator:active { cursor: grabbing; }
+            #vvradio-indicator.dragging { cursor: grabbing; }
+            #vvradio-drag-surface {
+                position: fixed; inset: 0; z-index: 2147483646;
+                cursor: grabbing; touch-action: none; user-select: none;
+            }
             #vvradio-indicator:hover { opacity: 0.8; transform: scale(1.1); }
             #vvradio-indicator.reading {
                 opacity: 1; background-color: #2eb67d; box-shadow: 0 0 15px rgba(46, 182, 125, 0.8);
@@ -242,12 +248,13 @@ content.parts.indicator = {
     // 読み上げトグルとドラッグの競合を避けるために使う。
     // @returns {() => boolean}
     enableIndicatorDrag() {
-        let isDragging = false;
+        const indicator = this.indicator;
+        let pointerId = null;
+        let dragSurface = null;
         let dragMoved = false;
         let startX, startY, initialLeft, initialTop;
 
-        const onMouseMove = (e) => {
-            if (!isDragging) return;
+        const updatePosition = (e) => {
             const dx = e.clientX - startX;
             const dy = e.clientY - startY;
 
@@ -266,19 +273,25 @@ content.parts.indicator = {
             }
         };
 
-        const onMouseUp = () => {
-            if (!isDragging) return;
-            isDragging = false;
-            document.removeEventListener("mousemove", onMouseMove);
-            document.removeEventListener("mouseup", onMouseUp);
-            window.removeEventListener("blur", onMouseUp);
+        const finishDrag = (persist = true) => {
+            if (pointerId === null) return;
+            const releasedId = pointerId;
+            pointerId = null;
+            document.removeEventListener("pointermove", onPointerMove, true);
+            document.removeEventListener("pointerup", onPointerUp, true);
+            document.removeEventListener("pointercancel", onPointerCancel, true);
+            window.removeEventListener("blur", onBlur);
+            indicator.classList.remove("dragging");
+            dragSurface?.remove();
+            dragSurface = null;
+            if (indicator.hasPointerCapture(releasedId)) indicator.releasePointerCapture(releasedId);
 
             // 移動した場合、その位置を永続化（次回ロード時に復元するため）
-            if (dragMoved) {
+            if (persist && dragMoved && this.active) {
                 try {
                     if (chrome.runtime?.id) {
                         chrome.storage.local.set({
-                            vvradio_icon_pos: { left: this.indicator.offsetLeft, top: this.indicator.offsetTop }
+                            vvradio_icon_pos: { left: indicator.offsetLeft, top: indicator.offsetTop }
                         });
                     }
                 } catch (e) {
@@ -287,11 +300,29 @@ content.parts.indicator = {
             }
         };
 
-        this.indicator.addEventListener("mousedown", (e) => {
-            if (e.button !== 0) return; // 左クリックのみ許可
+        const onPointerMove = (e) => {
+            if (e.pointerId !== pointerId) return;
+            // ウィンドウ外での解放などで pointerup を受け取れなくても、再接近で吸着させない。
+            if (!(e.buttons & 1)) { finishDrag(); return; }
+            updatePosition(e);
+        };
+        const onPointerUp = (e) => {
+            if (e.pointerId !== pointerId) return;
+            updatePosition(e);
+            finishDrag();
+        };
+        const onPointerCancel = (e) => {
+            if (e.pointerId === pointerId) finishDrag();
+        };
+        const onBlur = () => finishDrag();
+        const onMouseDown = (e) => {
+            if (e.button === 0) e.preventDefault();
+        };
+        const onPointerDown = (e) => {
+            if (!this.active || pointerId !== null || e.button !== 0 || e.isPrimary === false) return;
             e.preventDefault(); // テキスト選択解除を防止
 
-            isDragging = true;
+            pointerId = e.pointerId;
             dragMoved = false;
             startX = e.clientX;
             startY = e.clientY;
@@ -307,13 +338,30 @@ content.parts.indicator = {
             this.indicator.style.left = `${initialLeft}px`;
             this.indicator.style.top = `${initialTop}px`;
 
-            // ドキュメント全体でマウスイベントを捕捉（高速にドラッグしても見失わないため）
-            document.addEventListener("mousemove", onMouseMove);
-            document.addEventListener("mouseup", onMouseUp);
+            // Chromeでは捕捉直後の最初の移動が別オリジンiframeへ飛ぶと、
+            // pendingのcaptureが有効になる前にイベントが子フレームへ届く。
+            // 操作中だけ透明な面でiframeを覆い、捕捉開始時の移動もトップ文書で受ける。
+            dragSurface = document.createElement("div");
+            dragSurface.id = "vvradio-drag-surface";
+            this.shadowRoot.appendChild(dragSurface);
+            indicator.setPointerCapture(pointerId);
+            indicator.classList.add("dragging");
+            document.addEventListener("pointermove", onPointerMove, true);
+            document.addEventListener("pointerup", onPointerUp, true);
+            document.addEventListener("pointercancel", onPointerCancel, true);
             // ドラッグ中にウィンドウが非アクティブになる（Alt+Tab 等）と mouseup が
             // 届かず、アイコンがカーソルに貼り付いたままになるため、ここでも終了する。
-            window.addEventListener("blur", onMouseUp);
-        });
+            window.addEventListener("blur", onBlur);
+        };
+        indicator.addEventListener("pointerdown", onPointerDown);
+        indicator.addEventListener("mousedown", onMouseDown);
+        indicator.addEventListener("lostpointercapture", onPointerCancel);
+        this.indicatorDragCleanup = () => {
+            finishDrag(false);
+            indicator.removeEventListener("pointerdown", onPointerDown);
+            indicator.removeEventListener("mousedown", onMouseDown);
+            indicator.removeEventListener("lostpointercapture", onPointerCancel);
+        };
 
         return () => dragMoved;
     },

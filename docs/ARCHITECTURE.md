@@ -71,6 +71,7 @@ Content Script は物理分割後も、再注入時の stale instance 置換、b
 - Offscreen 音声処理: `tests/offscreen-buffering.test.js`、`tests/offscreen-prefetch.test.js`、`tests/offscreen-synthesis-failure.test.js`、`tests/offscreen-playback.test.js`、`tests/offscreen-queue.test.js`
 - Content Script 寿命/プライバシー/注入順: `tests/content-lifecycle.test.js`、`tests/content-privacy.test.js`、`tests/context-invalidation.test.js`
 - 設定画面: `tests/options-safety.test.js`
+- アイコンドラッグ: `tests/indicator-drag.test.js`。別オリジンiframe越しのChrome確認は `node tools/test-indicator-drag-browser.mjs`（`tools/ocr-e2e` の依存を使用、`OCR_CHROMIUM` で実行ファイルを指定）。捕捉・透明なドラッグ面・文書監視は `indicatorDragCleanup` を通じて `deactivate` で一括解放する。
 - Runtime Messaging: `tests/runtime-messaging.test.js`
 - OCR: `tests/ocr-*.test.js` と `tools/ocr-*`、精度根拠は `docs/OCR-ACCURACY.md`
 
