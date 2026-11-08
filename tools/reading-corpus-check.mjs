@@ -64,6 +64,24 @@ function loadOcrText() {
     vm.runInContext(source, ctx, { filename: "ocr.js" });
     return ctx.__api;
 }
+// 括弧が作る間を取り除く判定（offscreen-audio.js）を、出荷コードのまま読み込む。
+// ここを通さないと、実際に合成されるクエリと計測対象がずれる。
+function loadOffscreenAudio() {
+    const source = readFileSync(resolve(repo, "offscreen-audio.js"), "utf8")
+        + "\n;globalThis.__api = { preferBracketFreeQuery, bracketFreeCandidate };";
+    const noop = () => {};
+    const ctx = vm.createContext({ console, setTimeout, clearTimeout, Promise, Date, Math, JSON,
+        Number, Array, Object, String, URL, Audio: class {},
+        chrome: { runtime: { id: "x", onMessage: { addListener: noop }, sendMessage: noop } },
+        document: { addEventListener: noop },
+        VOICEVOX_BASE_URL: BASE, VOICEVOX_FETCH_TIMEOUT_MS: 15000, VOICEVOX_SYNTHESIS_TIMEOUT_MS: 60000,
+        fetchWithTimeout: (url, options) => fetch(url, options),
+        readJsonResponseWithLimit: (res) => res.json(),
+        readBlobResponseWithLimit: (res) => res.blob() });
+    vm.runInContext(source, ctx, { filename: "offscreen-audio.js" });
+    return ctx.__api;
+}
+
 // content.js cleanMessage と同等（URL置換・改行は残す）
 function cleanMessage(text) {
     return text.replace(/https?:\/\/[\w\/:%#\$&\?\(\)~\.=\+\-]+/g, "URL省略")
@@ -72,6 +90,7 @@ function cleanMessage(text) {
 
 const bg = loadBackground();
 const ocr = loadOcrText();
+const off = loadOffscreenAudio();
 
 function prepare(item) {
     if (item.path === "ocr") return ocr.cleanForSpeech(ocr.normalizeOcrText(item.text));
@@ -84,15 +103,20 @@ async function query(text) {
     const res = await fetch(`${BASE}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`, { method: "POST" });
     const ms = performance.now() - t0;
     if (!res.ok) return { ok: false, status: res.status, ms };
-    const q = await res.json();
+    const original = await res.json();
+    // 出荷コードと同じ判定で、括弧を外した読みに差し替える（合成されるのはこちら）
+    const t1 = performance.now();
+    const q = await off.preferBracketFreeQuery(text, speaker, original);
+    const decideMs = performance.now() - t1;
     let moras = 0;
-    let est = q.prePhonemeLength + q.postPhonemeLength;
+    let est = (q.prePhonemeLength || 0) + (q.postPhonemeLength || 0);
     for (const p of q.accent_phrases) {
         moras += p.moras.length;
         for (const m of p.moras) est += (m.consonant_length || 0) + m.vowel_length;
         if (p.pause_mora) est += p.pause_mora.vowel_length;
     }
-    return { ok: true, ms, kana: q.kana, moras, est, q };
+    return { ok: true, ms: ms + decideMs, kana: q.kana, moras, est, q,
+        hasBracket: off.bracketFreeCandidate(text) !== null, bracketRemoved: q !== original };
 }
 async function synth(q) {
     q.prePhonemeLength = 0.1; q.postPhonemeLength = 0.1;
@@ -147,6 +171,7 @@ for (const item of items) {
         if (!q.ok) { c.error = `audio_query HTTP ${q.status}`; row.errors.push(c.error); row.chunks.push(c); continue; }
         c.kana = q.kana; c.moras = q.moras; c.estSec = +q.est.toFixed(2);
         c.query = q.q;
+        c.hasBracket = q.hasBracket; c.bracketRemoved = q.bracketRemoved;
         if (!noSynth) {
             const s = await synth(q.q);
             c.synthMs = Math.round(s.ms);
@@ -184,7 +209,8 @@ for (const item of items) {
     console.log(`\n### ${row.name} [${row.path}] chunks=${chunks.length}${gapInfo}${row.errors.length ? " ERRORS=" + row.errors.join("; ") : ""}`);
     for (const c of row.chunks) {
         const timing = c.audioSec != null ? ` a=${c.audioSec}s s=${((c.queryMs + c.synthMs) / 1000).toFixed(1)}s` : "";
-        console.log(`  [${c.cost}]${timing} ${JSON.stringify(c.text)}\n        → ${c.kana ?? c.error}`);
+        const bracket = c.hasBracket ? (c.bracketRemoved ? " 括弧:外した" : " 括弧:残した") : "";
+        console.log(`  [${c.cost}]${timing}${bracket} ${JSON.stringify(c.text)}\n        → ${c.kana ?? c.error}`);
     }
 }
 
@@ -192,6 +218,8 @@ for (const item of items) {
 const withGap = results.filter((r) => r.now);
 const worst = withGap.slice().sort((a, b) => b.now.maxGap - a.now.maxGap).slice(0, 5);
 console.log("\n===== summary =====");
+const bracketChunks = results.flatMap((r) => r.chunks).filter((c) => c.hasBracket);
+console.log(`括弧を含むチャンク: ${bracketChunks.length}  外した: ${bracketChunks.filter((c) => c.bracketRemoved).length}`);
 console.log(`items=${results.length} chunks=${results.reduce((s, r) => s + r.chunks.length, 0)} errors=${results.reduce((s, r) => s + r.errors.length, 0)}`);
 if (withGap.length) {
     console.log(`maxGap now: ${Math.max(...withGap.map((r) => r.now.maxGap)).toFixed(1)}s / before: ${Math.max(...withGap.map((r) => r.before.maxGap)).toFixed(1)}s`);

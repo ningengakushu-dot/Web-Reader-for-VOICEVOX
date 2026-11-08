@@ -263,11 +263,112 @@ function voicevoxUnexpectedResponseError() {
     return error;
 }
 
-async function prepareVoiceQuery(text, settings) {
-    const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
-    // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
-    const speaker = Number(speakerId);
+// ===== 括弧が作る不自然な間を取り除く =====
+//
+// 括弧そのものは読まれないが、開き・閉じの両方が「間」を作り、直後の助詞を別の
+// アクセント句へ切り離す。実測（VOICEVOX 0.25.2 / 話者1）:
+//   彼は「はい」と答えた。  カレワ、ハイ、ト/コタエタ  無音0.94秒・全体3.27秒
+//   括弧を外すと            カレワ/ハイト/コタエタ     無音0秒・全体1.92秒
+//
+// ただし括弧を外すと、隣り合う語がつながって読みが変わることがある。文字の並びからは
+// 判別できない（実測: 「彼は「ええ」と言った」を外すと助詞の「は」が吸収されて
+// カレ/ハエエト になる。「ABC（株）」はカブシキガイシャがカブになる。
+// 「9月1日（月）」はゲツヨオビがツイタチビになる）。
+// そこで**エンジン自身に両方の読みを尋ね、音素列と語の切れ目が変わらないときだけ外す**。
+// 間（pause_mora）と句の結合は比較に含めない。それを減らすことが目的だから。
+// audio_query は実測13ミリ秒で、合成に比べて無視できる。
+const OFFSCREEN_BRACKET_RE = /[「」『』（）()｢｣〈〉《》【】〔〕]/g;
+// 閉じと開きが隣り合う所（「はい」「いいえ」）は、外すと2つの引用が地続きになる。
+// 音素列は変わらないためエンジンには区別できないので、読点1つを残す。
+const OFFSCREEN_BRACKET_JUNCTION_RE = /[」』）)｣〉》】〕]\s*[「『（(｢〈《【〔]/g;
 
+/**
+ * 括弧を外した読み上げ用の候補を作る。外すものが無ければ null。
+ * @param {string} text
+ * @returns {string|null}
+ */
+function bracketFreeCandidate(text) {
+    if (!OFFSCREEN_BRACKET_RE.test(text)) {
+        OFFSCREEN_BRACKET_RE.lastIndex = 0;
+        return null;
+    }
+    OFFSCREEN_BRACKET_RE.lastIndex = 0;
+    const candidate = text
+        .replace(OFFSCREEN_BRACKET_JUNCTION_RE, "、")
+        .replace(OFFSCREEN_BRACKET_RE, "");
+    return candidate && candidate !== text ? candidate : null;
+}
+
+/**
+ * 読みを比べるための情報を取り出す。
+ * - phonemes: 子音＋母音の並び。カナだけの比較では拾えない無声化（「す」の u → U）まで見る。
+ * - boundaries: アクセント句の切れ目（先頭からのモーラ数）。語のまとまりが変わったかを見る。
+ * 間（pause_mora）と句の長さそのものは含めない。間が減ることが目的だから。
+ * @param {object} query
+ * @returns {{phonemes: string, boundaries: number[]}}
+ */
+function queryReadingSignature(query) {
+    const phonemes = [];
+    const boundaries = [];
+    const phrases = Array.isArray(query?.accent_phrases) ? query.accent_phrases : [];
+    let count = 0;
+    for (const phrase of phrases) {
+        const moras = Array.isArray(phrase?.moras) ? phrase.moras : [];
+        for (const mora of moras) {
+            phonemes.push(String(mora?.consonant || "") + String(mora?.vowel || mora?.text || ""));
+            count += 1;
+        }
+        boundaries.push(count);
+    }
+    return { phonemes: phonemes.join(" "), boundaries };
+}
+
+/**
+ * 括弧を外した読みが、元の読みと同じと言えるか。
+ * 許すのは「アクセント句がつながること」だけ。これが括弧を外す目的そのもので、
+ * 直後の助詞が元の句へ戻る（カレワ、ハイ、ト → カレワ/ハイト）。
+ * 逆に**新しい切れ目が生まれた**場合は、語のまとまりが変わっている。
+ * 実測: 「ここで」「はきもの」を脱ぐ。→ ハキモノ が ハキ/モノオ に割れる。
+ * 音素まで一致していても、これは読みが変わったものとして退ける。
+ * @param {object} candidateQuery
+ * @param {object} originalQuery
+ * @returns {boolean}
+ */
+function isSameReading(candidateQuery, originalQuery) {
+    const candidate = queryReadingSignature(candidateQuery);
+    const original = queryReadingSignature(originalQuery);
+    if (candidate.phonemes !== original.phonemes) return false;
+    const originalBoundaries = new Set(original.boundaries);
+    return candidate.boundaries.every((at) => originalBoundaries.has(at));
+}
+
+/**
+ * 括弧を外しても読みが変わらないなら、外したほうのクエリを使う。
+ * 判定できない・取得に失敗したときは元のクエリをそのまま返す（読みを壊さない側に倒す）。
+ * @param {string} text
+ * @param {number} speaker
+ * @param {object} queryJson 元のテキストのクエリ
+ * @returns {Promise<object>}
+ */
+async function preferBracketFreeQuery(text, speaker, queryJson) {
+    const candidate = bracketFreeCandidate(text);
+    if (!candidate) return queryJson;
+    let candidateQuery;
+    try {
+        candidateQuery = await requestAudioQuery(candidate, speaker);
+    } catch (error) {
+        return queryJson;
+    }
+    return isSameReading(candidateQuery, queryJson) ? candidateQuery : queryJson;
+}
+
+/**
+ * 音声合成用クエリを1件取得する。
+ * @param {string} text
+ * @param {number} speaker
+ * @returns {Promise<object>}
+ */
+async function requestAudioQuery(text, speaker) {
     const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
     const queryResponse = await fetchWithTimeout(
         queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
@@ -288,6 +389,21 @@ async function prepareVoiceQuery(text, settings) {
     if (!queryJson || typeof queryJson !== "object" || !Array.isArray(queryJson.accent_phrases)) {
         throw voicevoxUnexpectedResponseError();
     }
+    return queryJson;
+}
+
+/**
+ * 読みが変わらない場合だけ括弧の間を除き、先読み・合成で共有するクエリを用意する。
+ * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
+ * @returns {Promise<object>}
+ */
+async function prepareVoiceQuery(text, settings) {
+    const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
+    // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
+    const speaker = Number(speakerId);
+
+    let queryJson = await requestAudioQuery(text, speaker);
+    queryJson = await preferBracketFreeQuery(text, speaker, queryJson);
 
     queryJson.prePhonemeLength = 0.1 * speedScale;
     queryJson.postPhonemeLength = 0.1 * speedScale;
