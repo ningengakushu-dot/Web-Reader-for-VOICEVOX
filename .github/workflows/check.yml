@@ -86,6 +86,9 @@ jobs:
       - name: コンテンツのプライバシー境界検査
         run: node tests/content-privacy.test.js
 
+      - name: アイコンから子フレームの選択を読み上げる回帰検査
+        run: node tests/selection-reading.test.js
+
       - name: 設定値とアイコン表示の安全性検査
         run: node tests/options-safety.test.js
 

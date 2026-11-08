@@ -37,6 +37,8 @@
 
 manifest の `content_scripts[0].js` が production の読み込み順の正本であり、Service Worker の動的再注入も `background-content-scripts.js` を通じて同じ一覧を使用する。これにより、通常注入とフォールバック注入でファイルの欠落や順序差が生じないようにしている。
 
+右下アイコンとショートカットからの選択読み上げは、background の `dispatchToggleReading` から全フレームへ配信し、フォーカスを持つ末端フレームだけが選択テキストを取得する。親フレームから子の DOM を直接参照しないため、別オリジンや多重 iframe でも同じ経路を使える。アイコンの mousedown は既定動作を抑止し、選択範囲と子フレームのフォーカスを維持する。未選択の案内は要求元タブのトップフレームへ返し、再生中のアイコンクリックは従来どおり直接停止する。
+
 `tests/content-source.js` は責務別 Content Script を VM テスト向けに同じ順序で連結するテスト補助であり、拡張機能には同梱しない。旧 `content.js` は production・提出物ともに使用しない。
 
 ## Offscreen の責務分割
@@ -70,6 +72,7 @@ Content Script は物理分割後も、再注入時の stale instance 置換、b
 - 読み上げテキスト整形: `tests/speech-text.test.js`
 - Offscreen 音声処理: `tests/offscreen-buffering.test.js`、`tests/offscreen-prefetch.test.js`、`tests/offscreen-synthesis-failure.test.js`、`tests/offscreen-playback.test.js`、`tests/offscreen-queue.test.js`
 - Content Script 寿命/プライバシー/注入順: `tests/content-lifecycle.test.js`、`tests/content-privacy.test.js`、`tests/context-invalidation.test.js`
+- アイコン・ショートカットの選択フレーム配信: `tests/selection-reading.test.js`
 - 設定画面: `tests/options-safety.test.js`
 - Runtime Messaging: `tests/runtime-messaging.test.js`
 - OCR: `tests/ocr-*.test.js` と `tools/ocr-*`、精度根拠は `docs/OCR-ACCURACY.md`
