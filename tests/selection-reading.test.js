@@ -7,7 +7,7 @@ const { readContentSource } = require('./content-source');
 const root = path.join(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 
-function createHarness() {
+function createHarness({ voiceError } = {}) {
     const frames = [];
     const voices = [];
     const injections = [];
@@ -78,7 +78,9 @@ function createHarness() {
                 onMessage: { addListener(fn) { frame.listener = fn; }, removeListener() {} },
                 sendMessage(message, callback) {
                     if (message.type === 'GENERATE_VOICE') {
-                        voices.push({ frameId, text: message.text }); callback?.({ success: true }); return;
+                        voices.push({ frameId, text: message.text });
+                        callback?.(voiceError ? { success: false, error: voiceError } : { success: true });
+                        return;
                     }
                     if (message.type === 'STOP_ALL') { stops++; callback?.({ success: true }); return; }
                     if (message.type === 'CHECK_CONNECTION' || message.type === 'CLAIM_UPDATE_NOTICE') {
@@ -163,6 +165,32 @@ function createHarness() {
     } });
     await password.click(passwordTop);
     assert.equal(password.voices.length, 0, '子フレームでもパスワードを読み上げない');
+
+    for (const reason of ['読み上げられる文字がありません', '読み上げテキストが長すぎます', 'Offscreenの初期化に失敗しました']) {
+        const failing = createHarness({ voiceError: reason });
+        const parent = failing.addFrame(0, { child: true });
+        const child = failing.addFrame(1, { selected: '選択本文' });
+        parent.reader.showPlaybackErrorToast = text => parent.notices.push(text);
+        child.reader.showPlaybackErrorToast = () => { throw new Error('子フレームにUIを生成しない'); };
+        await failing.click(parent);
+        assert.deepEqual(parent.notices, [reason], '子フレームの失敗理由をトップフレームに1回表示する');
+        const errorDelivery = failing.deliveries.find(d => d.message.type === 'SELECTION_READING_ERROR');
+        assert.equal(errorDelivery.tabId, 7);
+        assert.equal(errorDelivery.options.frameId, 0);
+        for (const [sender, error] of [
+            [{ id: 'other', tab: { id: 7 }, frameId: 1 }, reason],
+            [{ id: 'test-extension', frameId: 1 }, reason],
+            [{ id: 'test-extension', tab: { id: 7 }, frameId: 0 }, reason],
+            [{ id: 'test-extension', tab: { id: 7 }, frameId: 1 }, 'x'.repeat(1001)],
+            [{ id: 'test-extension', tab: { id: 7 }, frameId: 1 }, {}]
+        ]) {
+            let response;
+            const deliveries = failing.deliveries.length;
+            failing.backgroundListener({ type: 'SELECTION_READING_ERROR', error, tabId: 99 }, sender, r => { response = r; });
+            assert.equal(response?.success, false);
+            assert.equal(failing.deliveries.length, deliveries);
+        }
+    }
 
     // アイコン要求から任意のタブへ転送させない。
     for (const sender of [

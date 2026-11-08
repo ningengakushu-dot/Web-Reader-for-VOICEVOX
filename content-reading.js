@@ -166,6 +166,11 @@ content.parts.reading = {
                     this.showOcrToast("読み上げるテキストを選択してください。");
                     this.scheduleOcrToastDismiss(4000);
                     break;
+                case "SELECTION_READING_ERROR":
+                    if (!this.isTopFrame) break;
+                    this.updateUIState('error');
+                    this.showPlaybackErrorToast(request.error);
+                    break;
                 case "PLAYBACK_STARTED":
                     this.isPlaying = true;
                     this.updateUIState('reading');
@@ -222,7 +227,14 @@ content.parts.reading = {
                     this.updateUIState('error');
                     // 「テキストが長すぎる」「Offscreenを用意できない」等の理由を利用者にも見せる
                     // （アイコンが赤くなるだけでは原因不明の無反応に見える）。
-                    if (this.isTopFrame) this.showPlaybackErrorToast(reason);
+                    if (this.isTopFrame) {
+                        this.showPlaybackErrorToast(reason);
+                    } else {
+                        // 子フレームは案内UIを持たないため、要求元タブのトップへ理由を返す。
+                        chrome.runtime.sendMessage({
+                            type: "SELECTION_READING_ERROR", error: String(reason).slice(0, 1000)
+                        }, () => { void chrome.runtime.lastError; });
+                    }
                 }
             });
         } catch (error) {
