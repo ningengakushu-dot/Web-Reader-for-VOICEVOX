@@ -105,6 +105,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 .catch(err => sendResponse({ success: false, error: err.message }));
             return true;
 
+        case "TOGGLE_READING_REQUEST":
+            respondWith(dispatchToggleReading(sender.tab?.id), sendResponse);
+            return true;
+
+        case "SELECTION_REQUIRED":
+            respondWith(chrome.tabs.sendMessage(sender.tab.id,
+                { type: "SELECTION_REQUIRED" }, { frameId: 0 }), sendResponse);
+            return true;
+
+        case "SELECTION_READING_ERROR":
+            respondWith(chrome.tabs.sendMessage(sender.tab.id,
+                { type: "SELECTION_READING_ERROR", error: request.error }, { frameId: 0 }), sendResponse);
+            return true;
+
         case "OPEN_OPTIONS":
             respondWith(chrome.runtime.openOptionsPage(), sendResponse);
             return true;
