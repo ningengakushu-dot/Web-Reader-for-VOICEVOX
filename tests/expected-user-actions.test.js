@@ -1,0 +1,45 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { readContentSource } = require('./content-source');
+
+const source = readContentSource();
+const start = source.indexOf('    toggleReading() {');
+const end = source.indexOf('\n    // TOGGLE_READING', start);
+assert.ok(start >= 0 && end > start, 'toggleReading の実装が見つかる');
+const body = source.slice(start, end);
+assert.match(body, /this\.updateUIState\(['"]error['"]\)/,
+  '未選択時のページ内エラー表示を維持する');
+assert.doesNotMatch(body, /console\.(?:warn|error)\s*\(/,
+  'テキスト未選択は想定内操作のため拡張機能エラーへ記録しない');
+
+const connectionStart = source.indexOf('    checkVoicevoxConnection() {');
+const connectionEnd = source.indexOf('\n    // 音声再生リクエスト', connectionStart);
+assert.ok(connectionStart >= 0 && connectionEnd > connectionStart,
+  'VOICEVOX接続確認の実装が見つかる');
+const connectionBody = source.slice(connectionStart, connectionEnd);
+assert.match(connectionBody, /this\.updateUIState\(['"]error['"]\)/,
+  'VOICEVOX未接続時のインジケーター表示は維持する');
+assert.doesNotMatch(connectionBody, /console\.(?:warn|error)\s*\(/,
+  'VOICEVOX未起動は想定内状態のため拡張機能エラーへ記録しない');
+assert.match(connectionBody, /if \(chrome\.runtime\.lastError\) return;/,
+  '更新直後などのruntime.lastErrorは初期接続確認で静かに処理する');
+
+const reviewUrl = 'https://chromewebstore.google.com/detail/web-reader-for-voicevox/ilcfondcjhaalpcghnhcejioopcbhhla/reviews';
+const reviewUrlLiteral = /const storeUrl = ("[^"\r\n]+");/.exec(source);
+assert.ok(reviewUrlLiteral, 'レビューページのURL定義がある');
+assert.equal(new URL(JSON.parse(reviewUrlLiteral[1])).href, reviewUrl,
+  '公開済み拡張機能のレビューページを正確なURLで開く');
+assert.ok(!source.includes('detail/web-reader-for-voicevox/${chrome.runtime.id}'),
+  '開発者モードの一時的な拡張機能IDをストアURLに使用しない');
+assert.ok(source.includes('率直なご感想や評価をお寄せください。今後の改善に活用します。'),
+  '中立的なレビュー案内を表示する');
+assert.ok(source.includes('評価する'), '中立的なボタン文言を表示する');
+assert.doesNotMatch(source, /(?:星\s*5|5\s*つ星|★\s*5)/,
+  '特定の高評価を促す文言を含めない');
+
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf8'));
+const optionsHtml = fs.readFileSync(path.join(__dirname, '..', 'options.html'), 'utf8');
+assert.ok(optionsHtml.includes(`Web Reader for VOICEVOX v${manifest.version}`),
+  'オプション画面の表示バージョンをmanifestと一致させる');
+console.log('expected user actions and store feedback link: PASSED');

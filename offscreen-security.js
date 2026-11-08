@@ -11,8 +11,8 @@
         speedScale: [0.5, 2], pitchScale: [-0.15, 0.15], intonationScale: [0, 2],
         volumeScale: [0, 2], pauseLengthScale: [0, 2]
     };
-    const finite = (v) => typeof v === "number" && Number.isFinite(v);
-    const clamp = (v, min, max, fallback) => finite(v) ? Math.min(max, Math.max(min, v)) : fallback;
+    const { isFiniteNumber, isNonNegativeInteger, isRectWithinBounds } = globalThis.VVRadioValidation;
+    const clamp = (v, min, max, fallback) => isFiniteNumber(v) ? Math.min(max, Math.max(min, v)) : fallback;
 
     function sanitizeSettings(value) {
         const source = value && typeof value === "object" ? value : {};
@@ -52,24 +52,25 @@
             const imageOk = typeof message.dataUrl === "string"
                 && /^data:image\/(?:png|jpeg);base64,/i.test(message.dataUrl)
                 && message.dataUrl.length <= MAX_IMAGE_DATA_URL_CHARS;
-            const rectOk = r && [r.x, r.y, r.width, r.height].every(finite)
-                && r.x >= 0 && r.y >= 0 && r.width >= 1 && r.height >= 1
-                && r.width <= 100000 && r.height <= 100000
-                && r.width * r.height <= 100000000;
-            if (!imageOk || !rectOk || !finite(message.viewportWidth)
+            const rectOk = isRectWithinBounds(r);
+            if (!imageOk || !rectOk || !isFiniteNumber(message.viewportWidth)
                 || message.viewportWidth < 1 || message.viewportWidth > 100000
-                || !Number.isInteger(message.tabId) || message.tabId < 0) {
+                || !isNonNegativeInteger(message.tabId)) {
                 return { ok: false, error: "OCR要求が不正です" };
             }
-            return { ok: true, message: {
+            const sanitized = {
                 type: "OCR_RECOGNIZE",
                 target: "offscreen",
                 dataUrl: message.dataUrl,
                 rect: { x: r.x, y: r.y, width: r.width, height: r.height },
                 viewportWidth: message.viewportWidth,
-                tabId: message.tabId,
-                removeRuby: message.removeRuby === true
-            } };
+                tabId: message.tabId
+            };
+            // background が古い要求の結果を捨てるための通し番号（省略可・非負整数のみ通す）
+            if (isNonNegativeInteger(message.requestId)) {
+                sanitized.requestId = message.requestId;
+            }
+            return { ok: true, message: sanitized };
         }
         if (message.type === "STOP_AUDIO" || message.type === "PREWARM_OCR") {
             return { ok: true, message };

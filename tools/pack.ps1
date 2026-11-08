@@ -21,13 +21,15 @@ $zip = Join-Path $root "dist\web-reader-for-voicevox-$version.zip"
 # プライバシーポリシー・利用規約はストアのダッシュボードに URL で登録する）。
 $files = @(
     'manifest.json',
-    'background-entry.js', 'background-security.js', 'background.js',
-    'content-guard.js', 'content.js', 'dom-text.js', 'offscreen-security.js', 'offscreen.js',
-    'options.js', 'capture.js', 'constants.js',
-    'ocr-common.js', 'ocr-image.js', 'ocr-refine.js', 'ocr-ruby.js',
+    'background-entry.js', 'validation-utils.js', 'background-security.js', 'background-content-scripts.js',
+    'background-bootstrap.js', 'background-playback.js', 'background-runtime.js', 'background-speech.js',
+    'content-guard.js', 'dom-text.js',
+    'content-common.js', 'content-indicator.js', 'content-reading.js', 'content-notice.js', 'content-ocr.js', 'content-entry.js',
+    'offscreen-security.js', 'offscreen-entry.js', 'offscreen-ocr.js', 'offscreen-audio.js',
+    'options.js', 'capture.js', 'constants.js', 'runtime-messaging.js',
+    'tesseract-cache-config.js', 'ocr-common.js', 'ocr-image.js', 'ocr-refine.js',
     'offscreen.html', 'options.html', 'capture.html',
     'options.css', 'capture.css',
-    'ocr-words.txt', 'ocr-dictionary-NOTICE.md',
     'LICENSE', 'LICENSE-APACHE-2.0'
 )
 $dirs = @('vendor')

@@ -291,10 +291,8 @@ function isBoxVisiblyOnTop(el, box, sel, offset, context) {
     return false;
 }
 
-// ルビの扱い。設定 ocrRemoveRuby=true は「ルビ優先読み」を意味する
-// （OCR経路の実装と同じ意味。true なら本文の代わりに読み rt を読む）。
-// 既定の false では本文（親文字）を読み、rt は読まない。
-// OCR経路では文字サイズと行位置から推定していた区別が、DOMでは構造そのもの。
+// DOMのルビは本文（親文字）だけを読み、読み仮名 rt と表示補助の括弧 rp は読まない。
+// 同じ内容を二重に読み上げないためのHTML構造上の処理であり、OCR補正は行わない。
 function rubyRoleOf(node) {
     let el = node.parentElement;
     while (el) {
@@ -307,11 +305,40 @@ function rubyRoleOf(node) {
     return null;
 }
 
+// 文中の一部として横に並ぶ表示値。これ以外（block / flex / grid / list-item /
+// table-cell など）は視覚的に独立した箱なので、段落の切れ目として扱う。
+// inline-block は「文の途中に置かれた小さな箱」（強調のバッジ等）にも使われるため、
+// 文を割らない側に倒して従来どおりインライン扱いにする。
+const DOM_TEXT_INLINE_DISPLAYS = new Set([
+    "inline", "inline-block", "inline-flex", "inline-grid", "inline-table",
+    "contents", "ruby", "ruby-base", "ruby-text",
+    "ruby-base-container", "ruby-text-container"
+]);
+
 // 直近のブロック要素。ここが変わったら段落の切れ目とみなす。
-function blockAncestorOf(node) {
+//
+// タグ名だけで判定すると、SPAN や A を横並びにしたナビゲーション（display:flex の子）で
+// 全項目の祖先が同じ NAV になり、「会社概要サービス一覧お問い合わせ採用情報」のように
+// 区切り無しで読み上げられていた。同じHTMLを素のテキスト選択で取ると項目ごとに改行が
+// 入るので、この経路だけがブラウザ既定より劣っていたことになる。
+// flex / grid の子要素は CSS 側で表示値が block へ変わる（blockification）ため、
+// 実際の表示値を見ればタグ名の一覧に頼らずに視覚的な箱の切れ目を拾える。
+//
+// **判定はタグ名と表示値の「和」にする**。表示値だけで決める版も試したが、実ページ
+// （ja.wikipedia.org、可視テキスト6441ノード）で境界が **562個減り、増加は0** だった
+// ＝これまで分かれていた箇所が融合する方向で、意図と逆だった。和にすると同じページで
+// 増減ゼロ（従来と完全一致）のまま、横並びナビだけが項目ごとに分かれる。
+// 走査のコストは 6441ノードで 2ms → 8ms（要素ごとの getComputedStyle は context の
+// styleCache で1回だけ）。
+function blockAncestorOf(node, context) {
     let el = node.parentElement;
     while (el) {
+        // 従来のタグ名判定。ここで返る限り境界は減らない
         if (DOM_TEXT_BLOCK_TAGS.has(el.tagName)) return el;
+        // タグ名では拾えない「視覚的に独立した箱」（flex/grid の子など）を表示値で拾う。
+        // 表示値が取れない（切り離された文書・window が無い）ときは従来どおり素通りする
+        const display = context ? cachedStyle(el, context)?.display : null;
+        if (display && display !== "none" && !DOM_TEXT_INLINE_DISPLAYS.has(display)) return el;
         el = el.parentElement;
     }
     return null;
@@ -451,13 +478,12 @@ function imageAltOf(el) {
  * @param {Element} el
  * @param {{left:number,top:number,right:number,bottom:number}} sel 選択矩形（最上位ビューポート基準）
  * @param {{x:number,y:number}|null} offset フレームのオフセット
- * @param {{removeRuby?: boolean}} options
  * @param {{units: object[], foreignArea: number, opaqueArea: number, textArea: number}} out
  * @param {Window} win
  * @param {object} context 抽出ごとのキャッシュと協調スケジューラ
  * @returns {Promise<boolean>} true ならこの要素の部分木をまとめて飛ばす
  */
-async function collectFromMediaElement(el, sel, offset, options, out, win, context) {
+async function collectFromMediaElement(el, sel, offset, out, win, context) {
     const box = offsetRect(el.getBoundingClientRect(), offset);
     const overlap = rectIntersectionArea(box, sel);
     // 手前が別の要素で塞がれている画像・フレームは、面積も代替テキストも
@@ -481,7 +507,7 @@ async function collectFromMediaElement(el, sel, offset, options, out, win, conte
                     x: box.left + parseFloat(cs.borderLeftWidth || 0) + parseFloat(cs.paddingLeft || 0),
                     y: box.top + parseFloat(cs.borderTopWidth || 0) + parseFloat(cs.paddingTop || 0)
                 };
-                await collectFromDocument(inner.body, inner, sel, childOffset, options, out, context);
+                await collectFromDocument(inner.body, inner, sel, childOffset, out, context);
             } else if (isElementReadable(el, context) !== false) {
                 out.foreignArea += overlap;
             }
@@ -528,7 +554,7 @@ async function collectFromMediaElement(el, sel, offset, options, out, win, conte
  * 選択矩形に入っているテキスト断片を収集する。
  * 座標は全て最上位ビューポート基準に揃える（offset で補正）。
  */
-async function collectFromDocument(root, doc, sel, offset, options, out, context) {
+async function collectFromDocument(root, doc, sel, offset, out, context) {
     const win = doc.defaultView;
     if (!win) return;
 
@@ -563,7 +589,7 @@ async function collectFromDocument(root, doc, sel, offset, options, out, context
 
             // open な Shadow Root は中へ潜る。closed なものは読めない（OCR行き）。
             if (el.shadowRoot) {
-                await collectFromDocument(el.shadowRoot, doc, sel, offset, options, out, context);
+                await collectFromDocument(el.shadowRoot, doc, sel, offset, out, context);
             }
 
             // 矩形の取得はレイアウト計算を伴うため、必要な要素だけで行う。
@@ -574,7 +600,7 @@ async function collectFromDocument(root, doc, sel, offset, options, out, context
                 node = walker.nextNode();
                 continue;
             }
-            node = await collectFromMediaElement(el, sel, offset, options, out, win, context)
+            node = await collectFromMediaElement(el, sel, offset, out, win, context)
                 ? skipSubtree(walker)
                 : walker.nextNode();
             continue;
@@ -588,9 +614,7 @@ async function collectFromDocument(root, doc, sel, offset, options, out, context
         }
 
         const role = rubyRoleOf(node);
-        const skipRuby = role === "paren"
-            || (options.removeRuby ? role === "base" : role === "reading");
-        if (skipRuby) {
+        if (role === "paren" || role === "reading") {
             node = walker.nextNode();
             continue;
         }
@@ -618,7 +642,10 @@ async function collectFromDocument(root, doc, sel, offset, options, out, context
                 text: clipped.text,
                 rect: clipped.lineRects[0],
                 kind: "text",
-                block: blockAncestorOf(node)
+                // <pre> のように空白と改行が有意な要素かどうか。整形済みテキストの表や
+                // ログでは、改行と桁揃えの空白が唯一の区切りなので潰してはいけない。
+                pre: /^pre/.test(cachedStyle(parent, context)?.whiteSpace || ""),
+                block: blockAncestorOf(node, context)
             });
         }
         node = walker.nextNode();
@@ -673,7 +700,12 @@ function joinTextUnits(units) {
         const unit = units[i];
         // HTMLの字下げによる改行や連続空白は文章としての意味を持たないので潰す。
         // 段落の「間」はブロック要素の境界だけで表す。
-        const text = unit.text.replace(/\s+/g, " ");
+        // ただし <pre>（white-space: pre*）では改行と桁揃えの空白が唯一の区切りで、
+        // 潰すと「氏名 部署 内線 佐藤 営業部 101 鈴木…」のように行も列も融合し、
+        // どの数値が誰のものか分からなくなる。改行と2つ以上の空白は切れ目として残す。
+        const text = unit.pre
+            ? unit.text.replace(/[^\S\n]{2,}/g, "\n").replace(/[^\S\n]+/g, " ")
+            : unit.text.replace(/\s+/g, " ");
         if (!text.trim()) continue;
         // 同じ文言が連続する場合は1回だけ読む。
         // 画像の代替テキストとリンクの文字列が同一のカード（ニュース一覧で頻出）や、
@@ -705,7 +737,7 @@ function joinTextUnits(units) {
  * @returns {{ok: boolean, text: string, chars: number, reason: string, stats: object}}
  *   ok=false のときは OCR 経路へ回すべきことを示し、reason にその理由が入る。
  */
-async function collectRegionText(rect, options = {}) {
+async function collectRegionText(rect) {
     const started = Date.now();
     const sel = {
         left: rect.x,
@@ -725,7 +757,6 @@ async function collectRegionText(rect, options = {}) {
             document,
             sel,
             null,
-            options,
             out,
             context
         );

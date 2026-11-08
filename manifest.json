@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Web Reader for VOICEVOX",
-  "version": "1.4.2",
+  "version": "1.4.4",
   "minimum_chrome_version": "119",
   "description": "閲覧中のWEBページの選択テキストや、画像・PDF上の文字（OCR）を読み上げてくれるアプリです。(This extension is designed to read Japanese text aloud.)",
   "icons": {
@@ -46,7 +46,16 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content-guard.js", "dom-text.js", "content.js"],
+      "js": [
+        "content-guard.js",
+        "dom-text.js",
+        "content-common.js",
+        "content-indicator.js",
+        "content-reading.js",
+        "content-notice.js",
+        "content-ocr.js",
+        "content-entry.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true,
       "match_origin_as_fallback": true

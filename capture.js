@@ -26,7 +26,8 @@
     // OCRの世代トークン。実行中に新しい選択が行われた場合、古い結果を破棄する。
     let ocrGeneration = 0;
 
-    function sendRuntimeMessage(message, callback) {
+    const sendRuntimeMessage = globalThis.VVRadioRuntimeMessaging?.send || ((message, callback) => {
+        // 単体実行・更新直後など共有アダプターが無い場合も従来どおり安全に失敗させる。
         try {
             if (!chrome.runtime?.id) return false;
             chrome.runtime.sendMessage(message, callback);
@@ -34,16 +35,19 @@
         } catch (error) {
             return false;
         }
-    }
+    });
     let ocrInProgress = false;
 
     // 組版方向（横書き jpn / 縦書き jpn_vert）ごとのワーカーを使い回す。
     // 生成処理（同梱アセットの指定・タイムアウト保護）と使い回しの管理は
     // ocr-common.js の createOcrWorkerPool に集約している。
-    const workers = createOcrWorkerPool((m) => {
-        if (m.status === "recognizing text") {
-            ocrProgress.value = m.progress;
-        }
+    // 進捗バーには主経路（元寸・全文）の認識だけを反映する。精錬・局所確認の
+    // 各認識も 0→1 を報告するため、生の値をそのまま表示するとバーが何度も
+    // 往復する（判別と変換は ocr-common.js の createPrimaryOcrProgressTracker）。
+    const ocrDisplayProgress = createPrimaryOcrProgressTracker();
+    const workers = createOcrWorkerPool((m, source) => {
+        const progress = ocrDisplayProgress.update(m, source);
+        if (progress != null) ocrProgress.value = progress;
     });
     const getWorker = workers.get;
     // ワーカーを破棄する（ページ離脱時・認識タイムアウト時）。
@@ -226,16 +230,15 @@
         if (ocrInProgress) terminateWorkers();
         ocrInProgress = true;
         setOcrStatus("文字認識を実行中...");
+        ocrDisplayProgress.reset();
         ocrProgress.value = 0;
         ocrProgress.hidden = false;
 
         try {
-            // ルビ除去設定を取得（既定OFF）
-            const { ocrRemoveRuby } = await chrome.storage.local.get(OCR_SETTING_DEFAULTS);
             // 組版方向（横書き/縦書き）を自動判定して認識する。
             // 認識がハングしても「実行中」表示が残らないようタイムアウトで打ち切る。
             const data = await withOcrTimeout(
-                recognizeWithOrientation(canvas, getWorker, { removeRuby: ocrRemoveRuby }),
+                recognizeWithOrientation(canvas, getWorker),
                 OCR_RECOGNIZE_TIMEOUT_MS,
                 "文字認識に時間がかかりすぎました。範囲を狭めてお試しください。"
             );
@@ -297,8 +300,10 @@
     // background から転送される再生状態（target:'tab'）を反映する。
     // offscreen が全拡張ページへブロードキャストする通知（target:'background'）は
     // background 経由の転送と二重になるため、ここでは処理しない。
-    chrome.runtime.onMessage.addListener((request) => {
-        if (request.target !== "tab") return;
+    chrome.runtime.onMessage.addListener((request, sender) => {
+        // 拡張機能内部（background）からの転送のみ扱う（他コンテキストからの偽装を排除）
+        if (sender?.id !== chrome.runtime.id) return;
+        if (!request || request.target !== "tab") return;
 
         switch (request.type) {
             case "PLAYBACK_STARTED":

@@ -4,7 +4,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetBtn = document.getElementById('reset-btn');
     const statusMsg = document.getElementById('status-msg');
     const loader = document.getElementById('loader');
-    const ocrRemoveRubyCheck = document.getElementById('ocrRemoveRuby-check');
     const iconRightClickSelect = document.getElementById('iconRightClick-select');
     const iconStyleSelect = document.getElementById('iconStyle-select');
     const iconStylePreview = document.getElementById('iconStyle-preview');
@@ -12,9 +11,38 @@ document.addEventListener('DOMContentLoaded', () => {
     const customIconRow = document.getElementById('customIcon-row');
     const customIconFile = document.getElementById('customIcon-file');
     const customIconClear = document.getElementById('customIcon-clear');
+    const engineStatus = document.getElementById('engine-status');
+    const engineRecheck = document.getElementById('engine-recheck');
+    const engineSetup = document.getElementById('engine-setup');
+    const enginePath = document.getElementById('engine-path');
+    const enginePathCopy = document.getElementById('engine-path-copy');
 
     // 「画像を指定する」で選ばれた画像。保存ボタンを押すまで storage には書かない。
     let pendingCustomIcon = null;
+
+    // 保存済みの読み上げキャラクター。接続が回復して一覧を取り直すときに使う。
+    let savedSpeakerId = null;
+
+    const runtimeMessaging = globalThis.VVRadioRuntimeMessaging || {
+        request(message) {
+            return new Promise((resolve, reject) => {
+                try {
+                    chrome.runtime.sendMessage(message, (response) => {
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                            return;
+                        }
+                        resolve(response);
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        },
+        requestOrNull(message) {
+            return this.request(message).catch(() => null);
+        }
+    };
 
     // スライダー設定定義: デフォルト値は constants.js の SETTING_DEFAULTS を単一の真実源とする
     const sliderConfigs = [
@@ -66,13 +94,14 @@ document.addEventListener('DOMContentLoaded', () => {
         // 保存済み設定の復元はエンジンの起動状態に依存しない。
         // キャラクター一覧の取得失敗でスライダーやアイコン設定まで初期化されないよう、
         // storage の読み出しを先に済ませてから一覧の取得を試みる。
-        const storageKeys = ['speakerId', 'ocrRemoveRuby', 'iconRightClickAction', 'iconStyle',
+        const storageKeys = ['speakerId', 'iconRightClickAction', 'iconStyle',
             CHARACTER_ICON_STORAGE_KEY, CUSTOM_ICON_STORAGE_KEY, ...sliders.map(s => s.key)];
         let result = {};
         try {
             result = await chrome.storage.local.get(storageKeys);
         } catch (error) {
             console.error('Error reading settings:', error);
+            showStatus('保存済みの設定を読み込めませんでした。既定値を表示しています。', 'error');
         }
 
         try {
@@ -83,7 +112,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 s.slider.value = value;
                 s.valueEl.textContent = Number(value).toFixed(s.decimals);
             }
-            ocrRemoveRubyCheck.checked = result.ocrRemoveRuby === true;
             // 既定は「画面OCR読み上げを開始」（content.js 側の既定値と揃える）
             iconRightClickSelect.value = result.iconRightClickAction === 'options' ? 'options' : 'capture';
 
@@ -97,39 +125,59 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error restoring settings:', error);
         }
 
+        // 接続が回復したときに一覧を取り直せるよう、保存済みの選択を覚えておく。
+        savedSpeakerId = result.speakerId;
+
+        const engineCheck = beginEngineCheck();
         try {
-            const speakers = await getSpeakers();
-            renderSpeakers(speakers);
-            // 一覧の描画後でないと select に値を入れられないため、ここで復元する。
-            // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
-            // undefined/null を除外する判定にする。
-            if (result.speakerId !== undefined && result.speakerId !== null) {
-                const savedId = String(result.speakerId);
-                if ([...speakerSelect.options].some((option) => option.value === savedId)) {
-                    speakerSelect.value = savedId;
-                }
-            }
+            await loadSpeakers(engineCheck);
+            settleEngineState(engineCheck, true);
         } catch (error) {
             console.error('Error during init:', error);
-            showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
+            // 初期化中に「再確認」で接続が回復していることがある。古い失敗で
+            // 「接続できません」を出すと、直ったばかりの画面を誤って否定する。
+            if (engineCheck === engineCheckSeq) {
+                showStatus('VOICEVOXエンジンに接続できません。起動しているか確認してください。', 'error');
+            }
+            // 起動途中にこの画面を開いた人が、待つだけで緑に変わるようにする。
+            settleEngineState(engineCheck, false);
         } finally {
             showLoader(false);
+            // 初期化中に押された「再確認」が世代交代で早期終了していても、
+            // ボタンが押せないまま残らないようにする。
+            if (engineRecheck) engineRecheck.disabled = false;
         }
     }
 
+    // キャラクター一覧を取得して描画し、保存済みの選択を復元する。
+    // 一覧の描画後でないと select に値を入れられないため、復元はここで行う。
+    // speakerId が 0（先頭スピーカー等）でも復元できるよう、真偽値ではなく
+    // undefined/null を除外する判定にする。
+    // seq を渡すのは、初期化と「再確認」の取得が並走したときに、古い応答が
+    // 新しい一覧や、利用者が選び直したキャラクターを上書きしないようにするため。
+    async function loadSpeakers(seq) {
+        const speakers = await getSpeakers();
+        if (seq !== undefined && seq !== engineCheckSeq) return;
+        renderSpeakers(speakers);
+        if (savedSpeakerId !== undefined && savedSpeakerId !== null) {
+            const savedId = String(savedSpeakerId);
+            if ([...speakerSelect.options].some((option) => option.value === savedId)) {
+                speakerSelect.value = savedId;
+            }
+        }
+    }
+
+    // 一覧が空のまま残っていないか。エンジン停止中に開いた画面では
+    // 「キャラクターを取得中...」の初期値だけが残り、保存もできない。
+    function hasSpeakerOptions() {
+        return speakerSelect.options.length > 0
+            && [...speakerSelect.options].some((option) => option.value !== '');
+    }
+
     async function getSpeakers() {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ type: "GET_SPEAKERS" }, (response) => {
-                if (chrome.runtime.lastError) {
-                    return reject(new Error(chrome.runtime.lastError.message));
-                }
-                if (response && response.success) {
-                    resolve(response.speakers);
-                } else {
-                    reject(new Error(response?.error || 'Failed to fetch speakers'));
-                }
-            });
-        });
+        const response = await runtimeMessaging.request({ type: "GET_SPEAKERS" });
+        if (response && response.success) return response.speakers;
+        throw new Error(response?.error || 'Failed to fetch speakers');
     }
 
     function renderSpeakers(speakers) {
@@ -152,6 +200,223 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         if (count === 0) throw new Error('利用可能なキャラクターが見つかりません');
+    }
+
+    // ===== エンジンの接続状態 =====
+
+    // ユーザーがスタートアップへ置く1行。エンジン(run.exe)はコンソール
+    // アプリケーションで、ショートカットから起動すると黒い画面が残る。
+    // 一般の利用者はそれを不審に思って閉じてしまい、読み上げも止まるため、
+    // 画面を持たない wscript から表示なし(第2引数 0)で起動させる。
+    // パスはインストーラー版でインストール先を変えていない場合の既定値で、
+    // VOICEVOX 公式が案内しているものと同じ。インストール先の変更・ZIP版では
+    // 成立しないので、UI 側で書き換え方を併記する。
+    // 拡張機能が自力でプロセスを起動するにはネイティブメッセージングホストの
+    // 別途インストールが要る。それを求めない方針のため、ここで扱うのは
+    // ユーザー自身が保存するための文字列のみ。
+    // VBScript は Windows で非推奨化が進んでおり（2027年ごろ既定無効化の予定）、
+    // 将来この経路が使えなくなった場合は別の起動方法へ差し替える必要がある。
+    const ENGINE_LAUNCH_LINE =
+        'CreateObject("WScript.Shell").Run """%LOCALAPPDATA%\\Programs\\VOICEVOX\\vv-engine\\run.exe""", 0, False';
+
+    // 手順の案内は Windows でのみ表示する。他OSは同梱エンジンの配置が異なり、
+    // 実機で確認できていない手順を出すと、かえって迷わせるため。
+    const isWindows = typeof navigator !== 'undefined'
+        && /Windows/i.test(navigator.userAgent || '');
+
+    /**
+     * 接続できたかどうかをヘッダーの1行で示す。
+     * 「設定できたのか分からない」状態を残さないための唯一のフィードバック。
+     * 手順は自動では開かない。この画面の主目的は声の設定であり、
+     * 初見の情報量を増やすと本来の操作の邪魔になるため。
+     * @param {boolean|null} connected null は確認中
+     * @param {boolean} [listUnavailable] 接続はできたがキャラクター一覧を取得できない
+     */
+    function setEngineConnected(connected, listUnavailable) {
+        if (!engineStatus) return;
+        engineStatus.classList.remove('ok', 'ng');
+        if (connected === null) {
+            engineStatus.textContent = '接続を確認しています...';
+        } else if (connected && listUnavailable) {
+            // 接続できていてもキャラクターを選べない画面は保存もできない。
+            // 「接続できています」と出すと、直っていない状態を直ったと誤認させる。
+            engineStatus.textContent = 'キャラクター一覧を取得できません（「再確認」を押してください）';
+            engineStatus.classList.add('ng');
+        } else if (connected) {
+            engineStatus.textContent = 'エンジンに接続できています';
+            engineStatus.classList.add('ok');
+        } else {
+            engineStatus.textContent = 'エンジンに接続できていません（VOICEVOXを起動してください）';
+            engineStatus.classList.add('ng');
+        }
+    }
+
+    // 接続確認は初期化の一覧取得と「再確認」の両方から走り、応答が前後しうる。
+    // 古い応答が新しい結果を上書きすると、実際とは逆の状態が残るため、
+    // 最後に始めた確認の応答だけを表示に反映する。
+    let engineCheckSeq = 0;
+    function beginEngineCheck() {
+        engineCheckSeq += 1;
+        return engineCheckSeq;
+    }
+    function applyEngineCheck(seq, connected, listUnavailable) {
+        if (seq !== engineCheckSeq) return;
+        setEngineConnected(connected, listUnavailable);
+    }
+
+    // 画面へ戻るたびに走るため、短い間隔での重複を抑える。
+    const ENGINE_AUTO_CHECK_INTERVAL_MS = 3000;
+    // エンジンは起動を指示してから応答するまで1分ほどかかる。案内どおりに
+    // 設定した人がこの画面へ戻ってきた時点ではまだ起動中で、1回きりの確認だと
+    // 失敗のまま止まってしまう。接続できるまで、上限を決めて確かめ続ける。
+    const ENGINE_RETRY_INTERVAL_MS = 5000;
+    const ENGINE_RETRY_LIMIT = 24;
+    let lastEngineCheckAt = 0;
+    let engineRetryTimer = null;
+    let engineRetryCount = 0;
+    let engineUsable = false;
+
+    function clearEngineRetry() {
+        if (!engineRetryTimer) return;
+        clearTimeout(engineRetryTimer);
+        engineRetryTimer = null;
+    }
+
+    /**
+     * 「見えていて、まだ使える状態になっていなければ、必ず次の確認が控えている」
+     * という一点だけを保つ。個々の経路で予約し忘れると、待っても表示が変わらない
+     * 画面が残るため、状態が動いたあとは常にここを通す。
+     */
+    function ensureEngineRetry() {
+        clearEngineRetry();
+        if (engineUsable) return;
+        if (document.hidden) return;
+        // 開いたまま放置された画面が、いつまでも問い合わせ続けないようにする。
+        if (engineRetryCount >= ENGINE_RETRY_LIMIT) return;
+        engineRetryCount += 1;
+        engineRetryTimer = setTimeout(() => {
+            engineRetryTimer = null;
+            if (document.hidden) return;
+            runEngineCheck(false, true);
+        }, ENGINE_RETRY_INTERVAL_MS);
+    }
+
+    /**
+     * 確認の結果を表示へ反映し、次の確認の要否まで決める。
+     * @param {number} seq
+     * @param {boolean} connected
+     * @param {boolean} [listUnavailable]
+     */
+    function settleEngineState(seq, connected, listUnavailable) {
+        applyEngineCheck(seq, connected, listUnavailable);
+        if (seq !== engineCheckSeq) return;
+        engineUsable = Boolean(connected) && !listUnavailable;
+        if (engineUsable) engineRetryCount = 0;
+        ensureEngineRetry();
+    }
+
+    // 画面へ戻ってきた、または操作対象になった。起動待ちを最初から数え直し、
+    // 間隔の抑制で今回の確認が省かれても、次の確認は必ず控えさせる。
+    function wakeEngineChecks() {
+        engineRetryCount = 0;
+        runEngineCheck(false);
+        ensureEngineRetry();
+    }
+
+    /**
+     * 接続を確かめ直す。回復していてキャラクター一覧が空のままなら取り直す。
+     * 一覧を持たない画面は、接続できていても保存できず使い物にならないため。
+     * @param {boolean} byUser 「再確認」ボタンからの実行か
+     * @param {boolean} [isRetry] 起動待ちの自動再試行か（間隔の抑制を受けない）
+     */
+    async function runEngineCheck(byUser, isRetry) {
+        const now = Date.now();
+        if (!byUser && !isRetry && now - lastEngineCheckAt < ENGINE_AUTO_CHECK_INTERVAL_MS) return;
+        lastEngineCheckAt = now;
+        clearEngineRetry();
+        // 自分で押した人は、いま待つつもりでいる。上限まで確かめ終えた画面でも
+        // そこから数え直し、押した1回で終わらせない。
+        if (byUser) engineRetryCount = 0;
+
+        const seq = beginEngineCheck();
+        if (engineRecheck) engineRecheck.disabled = true;
+        if (byUser) setEngineConnected(null);
+        try {
+            const response = await runtimeMessaging.requestOrNull({ type: 'CHECK_CONNECTION' });
+            const connected = Boolean(response && response.success);
+            let listUnavailable = false;
+            if (connected && !hasSpeakerOptions()) {
+                try {
+                    await loadSpeakers(seq);
+                    listUnavailable = seq === engineCheckSeq && !hasSpeakerOptions();
+                } catch (error) {
+                    console.error('Error reloading speakers:', error);
+                    listUnavailable = true;
+                }
+            }
+            settleEngineState(seq, connected, listUnavailable);
+        } finally {
+            // 世代交代で早期終了した場合でも、ボタンが押せないまま残らないようにする。
+            if (engineRecheck) engineRecheck.disabled = false;
+        }
+    }
+
+    const COPY_BUTTON_LABEL = 'この1行をコピー';
+    let copyLabelTimer = null;
+
+    function initEnginePanel() {
+        if (enginePath) enginePath.value = ENGINE_LAUNCH_LINE;
+        if (engineSetup) engineSetup.hidden = !isWindows;
+
+        if (engineRecheck) {
+            engineRecheck.addEventListener('click', () => runEngineCheck(true));
+        }
+
+        // 案内どおりに設定した人は、この画面を離れてエンジンを起動し、戻ってくる。
+        // 戻った時点で自動的に確かめ直す。手順どおりに進めば表示が自分で緑へ変わり、
+        // 「うまくいったのか分からない」状態が残らない。窓が出ない方式では、
+        // この表示が唯一の成功の合図になるため。
+        if (typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    // 見えていない画面から問い合わせ続けない。
+                    clearEngineRetry();
+                    return;
+                }
+                wakeEngineChecks();
+            });
+        }
+        if (typeof globalThis.addEventListener === 'function') {
+            globalThis.addEventListener('focus', () => wakeEngineChecks());
+        }
+
+        if (enginePathCopy) {
+            enginePathCopy.addEventListener('click', async () => {
+                const text = enginePath ? enginePath.value : ENGINE_LAUNCH_LINE;
+                let copied = false;
+                try {
+                    // ユーザー操作を起点にした書き込みのため、clipboardWrite 権限は増やさない。
+                    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        copied = true;
+                    }
+                } catch (error) {
+                    copied = false;
+                }
+                // 結果は押したボタン自身に出す。画面下の保存メッセージ欄に出すと、
+                // 上部で押した人の視線の外になり、コピーできたか分からなくなる。
+                if (!copied && enginePath && typeof enginePath.select === 'function') {
+                    // コピーできない環境では、選択済みにして Ctrl+C で拾えるようにする。
+                    enginePath.select();
+                }
+                enginePathCopy.textContent = copied ? 'コピーしました' : 'Ctrl+C でコピー';
+                if (copyLabelTimer) clearTimeout(copyLabelTimer);
+                copyLabelTimer = setTimeout(() => {
+                    copyLabelTimer = null;
+                    enginePathCopy.textContent = COPY_BUTTON_LABEL;
+                }, 2500);
+            });
+        }
     }
 
     // ===== ページ内アイコンの見た目 =====
@@ -314,12 +579,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function sendMessage(message) {
-        return new Promise((resolve) => {
-            chrome.runtime.sendMessage(message, (response) => {
-                if (chrome.runtime.lastError) return resolve(null);
-                resolve(response);
-            });
-        });
+        return runtimeMessaging.requestOrNull(message);
     }
 
     saveBtn.addEventListener('click', async () => {
@@ -336,7 +596,6 @@ document.addEventListener('DOMContentLoaded', () => {
             s.slider.value = val;
             s.valueEl.textContent = Number(val).toFixed(s.decimals);
         }
-        settings.ocrRemoveRuby = ocrRemoveRubyCheck.checked;
         settings.iconRightClickAction = iconRightClickSelect.value === 'options' ? 'options' : 'capture';
         settings.iconStyle = ICON_STYLE_VALUES.includes(iconStyleSelect.value)
             ? iconStyleSelect.value : SETTING_DEFAULTS.iconStyle;
@@ -397,5 +656,6 @@ document.addEventListener('DOMContentLoaded', () => {
         saveBtn.disabled = show;
     }
 
+    initEnginePanel();
     init();
 });

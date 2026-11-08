@@ -1,0 +1,72 @@
+[
+ {
+  "id": "A_article",
+  "px": 15,
+  "confidence": 93,
+  "original": "在宅ワークの生産性を上げる5つの工夫\n\n在宅勤務が広がる中で、自宅でも集中力を保ちながら効率よく作業を進めたいという声が増えている。特別な道具がなくても、日々の習慣を少し見直すだけで作業効率は大きく変わる。\n\nここでは、すぐに実践できる工夫をいくつか紹介する。どれも今日から始められる簡単なものばかりで、無理なく続けられる点が特徴である。\n\n作業開始前に今日やることを3つだけ書き出す\n25分作業したら5分休むリズムを作る\n通知はまとめて1時間おきに確認する\n朝9時から会議はZoomで開始、資料はPDF2部を事前共有する",
+  "raw": "在宅 ワー ク の 生産 性 を 上 げ る 5 つの 工夫\n\n在宅 勤務 が 広がる 中 で 、 自 宅 で も 集中 力 を 保ち な が ら 効 率 よく 作業 を 進め た いと いう 声 が 増え\nて いる 。 特別 な 道具 が な く て も 、 日 々 の 習慣 を 少し 見 直す だ け で 作業 効率 は 大 きく 変わ る 。\n\nここ で は 、 す ぐに 実践 で きる 工夫 を いく つか 紹介 する 。 ど れ も 今 日 か ら 始 め ら れる 簡単 な も の\nば か り で 、 無 理 な く 続け られ る 点 が 特徴 で ある 。\n\n・ 作業 開始 前 に 今日 や る こと を 3 つ だ け 書 き 出す\n\n・ 25 分 作業 し た ら 5 分 休 お リズ ム を 作る\n\n・ 通知 は まとめ て 1 時 間 お き に 確認 する\n\n・ 朝 9 時 か ら 会 議 は Zoom で 開始 、 資 料 は PDF2 部 を 事前 共有 する"
+ },
+ {
+  "id": "B_table",
+  "px": 15,
+  "confidence": 44,
+  "original": "品名\t数量\t単価\t備考\nコピー用紙A4\t3\t480円\tType-A在庫あり\n段ボール箱\t12\t210円\t耐荷重20kg\n米(こしひかり)\t2\t3,980円\t5kg×2袋\n工具セットNo.5\t1\t7,150円\tMade in Japan",
+  "raw": "あ mn\n庫 | 臣\nな | の |m\nの | 弄\n| 面 M\nニニ\n豆\n\n9\n\n量\n\n施\n\n)_z\n4 りー_e\n生 | 洒 | か カード\n|\nコ | 咽 | 米 | エ"
+ },
+ {
+  "id": "C_email",
+  "px": 15,
+  "confidence": 86,
+  "original": "田中様\nいつもお世話になっております。株式会社サンプルの佐藤です。\n\n下記の通り打ち合わせの日程をご案内いたします。\n\n------------------------------\n\n◆日時\n\n2026年8月16日(金) 10:00〜11:30\n\n◆会場URL\n\nhttps://example.com/meeting?a=1\n\n◆お問い合わせ先\n\n03-1234-5678\n\n------------------------------\n\nご不明な点がございましたらお気軽にご連絡ください。\n何卒よろしくお願いいたします。",
+  "raw": "田中 様\n\nいつ も お 世話 に な っ て お り ま す 。 株 式 会 社 サ ンプ ブル の 佐藤 で す 。\n下記 の 通り 打ち 合わ せ の 日 程 を ご 研 内 いた し ます 。\n\nる 日 時\n\n2026 年 8 月 16 日 ( 金 ) 10:00 へ 11:30\n\nる 会 場 URL\n\nhttps://example.com/meeting?a=1\n\n$ る お 問い 合わ せ 先\n\n03-1234-5678\n\nご 不明 な 点 が ご ざい まし た ら お 気軽 に ご 連絡 くだ さい 。\n\n何 和 よろ し く お 願 いい た し ます 。"
+ },
+ {
+  "id": "D_news",
+  "px": 15,
+  "confidence": 91,
+  "original": "新型センサー、国内工場に導入相次ぐ\n\n2026/08/16 12:34\n\n国内の製造業で新型センサーの導入が進んでいる。ある調査によれば、対象企業のうち42%が今年度中に導入を予定しており、前年比で15km圏内の関連工場に波及しているという。\n\n背景には、OpenAIが提供する解析技術との連携があるとされる。現場担当者は「iPhone 17と同じセンサー規格を採用したことで、既存機器との互換性が保たれた」と説明する。\n\n一方で導入コストの高さを課題に挙げる声もある(担当者への取材による、数値は概算)。今後は中小企業向けの支援策が焦点となりそうだ。",
+  "raw": "新型 セン サー、 国 内 工場 に 導入 相次ぐ\n\n2026/08/16 12:34\n\n国内 の 製造 業 で 新型 セン サー の 導入 が 進ん で いる 。 あ る 調査 に よれ ば 、 対 象 企 業 の うち 429% が\n今年 度 中 に 導入 を 予定 し て お り 、 前 年 比 で 15km 圏 内 の 関連 工場 に 波及 し て いる と いう 。\n\n背景 に は 、OpenAI が 提供 する 解析 技術 と の 連携 が ある と され る 。 現場 担当 者 は 「iPhone 17 と\n同じ セン サー 規格 を 採用 し た こと で 、 既 存 機器 と の 互換 性 が 保 た れ た 」 と 説明 する 。\n\n一 方 で 導入 コス ト の 高 さ を 課題 に 挙げ る 声 も ある (担当 者 へ の 取材 に よる 、 数 値 は 概算 )。 今後\nは 中 小 企業 向け の 支援 策 が 焦点 と な り そ う だ 。"
+ },
+ {
+  "id": "E_english",
+  "px": 15,
+  "confidence": 90,
+  "original": "The quarterly report shows a steady increase in customer engagement across all major regions this year. Our support team responded to more than three thousand tickets within the first week alone, which is a new record for the department. Several product managers have already started reviewing the feedback in detail to plan the next release cycle. We expect the momentum to continue into the following quarter as new features roll out gradually.\n\n来月にはこの内容を日本語でも共有する予定です。",
+  "raw": "The quarterly report shows a steady increase in customer engagement across all\n\nmajor regions this year. Our support team responded to more than three thousand\n\ntickets within the first week alone, which is a new record for the department. Several\nproduct managers have already started reviewing the feedback in detail to plan the\n\nnext release cycle. We expect the momentum to continue into the following quarter as\nnew features roll out gradualy.\n\n来 月 に は この 内 容 を 日 本 語 で も 共有 する 予定 で す 。"
+ },
+ {
+  "id": "F_code",
+  "px": 15,
+  "confidence": 80,
+  "original": "npm install foo\nconst x = 10;\nif (a && b) {\n  return;\n}\n\n上記は依存パッケージの導入例と、簡単な条件分岐のサンプルコードである。",
+  "raw": "npm instal1 foo\n\nconst x = 16>\n\nf (a&&b) て\n\nreturns\n\n}\n\n上 記 は 依存 バッ ケー ジ の 導入 例 と 、 科 単 な 条 件 分 岐 の サン プル コー ド で ある 。"
+ },
+ {
+  "id": "G_spec",
+  "px": 15,
+  "confidence": 91,
+  "original": "価格：¥12,800（税込）\n重量：1.2kg\nサイズ：150×75×8 mm\n発売日：2026年9月1日",
+  "raw": "価格 : \\12,800 (税込 )\n重量 : 1.2kg\n\nサイ ズ : 150x75x8 mm\n発売 日 : 2026 年 9 月 1 日"
+ },
+ {
+  "id": "H_toc",
+  "px": 15,
+  "confidence": 85,
+  "original": "第1章 はじめに ・・・・・・・・・・ 3\n第2章 導入 ・・・・・・・・・・・・ 12\n第3章 基本操作 ・・・・・・・・・・ 27\n第4章 応用編 ・・・・・・・・・・・ 45\n第5章 トラブルシューティング ・・・ 61\n第6章 付録 ・・・・・・・・・・・・ 78",
+  "raw": "第 1 章 は じ め に ・・・・・・・・・・3\n第 2 章 導入 ・・・・・・・・・・・・12\n第 3 章 基本 操作 ・・・・・・・・・・27\n第 4 章 応用 編 ・・・・・・・・・・・ 45\n第 5 章 トラ ブル シュ ー テ ィング ・・・ 61\n第 6 章 付録 ・・・・・・・・・・・・ 78"
+ },
+ {
+  "id": "A_article_11px",
+  "px": 11,
+  "confidence": 89,
+  "original": "在宅ワークの生産性を上げる5つの工夫\n\n在宅勤務が広がる中で、自宅でも集中力を保ちながら効率よく作業を進めたいという声が増えている。特別な道具がなくても、日々の習慣を少し見直すだけで作業効率は大きく変わる。\n\nここでは、すぐに実践できる工夫をいくつか紹介する。どれも今日から始められる簡単なものばかりで、無理なく続けられる点が特徴である。\n\n作業開始前に今日やることを3つだけ書き出す\n25分作業したら5分休むリズムを作る\n通知はまとめて1時間おきに確認する\n朝9時から会議はZoomで開始、資料はPDF2部を事前共有する",
+  "raw": "在宅 ワー ク の 生産 性 を 上 げ る 5 つの 工夫\n\n在宅 勤務 が 広がる 中 で 、 自 宅 で も 集中 力 を 保ち な が ら 効率 よく 作業 を 進め た いと いう 声 が 増え て いる 。 特 別 な 道具 が な く て も 、\n\n日 々 の 習慣 を 少し 見 直す だ け で 作業 効率 は 大 きく 変わ る 。\n\nここ で は 、 す ぐに 実践 で きる 工夫 を いく つか 紹介 する 。 ど れ も 今 日 か ら 始 め ら れる 簡単 な も の ば か り で 、 無 理 な く 続け られ る 上 点 が\n特徴 で ある 。\n\n・* 作業 始 前 に 今日 や る こと を 3 つ だ け 書 き 出す\n\n* 25 分 作業 し た ら 5 分 休 お リズ ム を 作る\n\n・ 通 知 は まとめ て 1 時 間 お き に 確認 する\n\n・ 朝 9 時 か ら 会 議 は Zoom で 開始 、 資 料 は PDF2 部 を 事前 共有 する"
+ },
+ {
+  "id": "C_email_11px",
+  "px": 11,
+  "confidence": 87,
+  "original": "田中様\nいつもお世話になっております。株式会社サンプルの佐藤です。\n\n下記の通り打ち合わせの日程をご案内いたします。\n\n------------------------------\n\n◆日時\n\n2026年8月16日(金) 10:00〜11:30\n\n◆会場URL\n\nhttps://example.com/meeting?a=1\n\n◆お問い合わせ先\n\n03-1234-5678\n\n------------------------------\n\nご不明な点がございましたらお気軽にご連絡ください。\n何卒よろしくお願いいたします。",
+  "raw": "田中 様\n\nいつ も お 世話 に な っ て お り ま す 。 株 式 会 社 サ ンプ ル の 佐藤 で す 。\n下記 の 通り 打ち 合わ せ の 日 程 を ご 案内 いた し ます 。\n\nる 日 時\n\n2026 年 8 月 16 日 ( 金 ) 10:0011:30\n\nる 会 場 URL\n\nhttps:/ が example.com/meeting?a=1\n\nる お 問い 合わ せ 先\n\n03-1234-5678\n\nご 不明 な 点 が ご ざい まし た ら お 気軽 に ご 連絡 くだ さい 。\n\n何卒 よろ し く お 六 い いた し ます 。"
+ }
+]

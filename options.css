@@ -309,7 +309,20 @@ footer {
 footer p {
     font-size: 12px;
     color: var(--text-muted);
-    margin: 0;
+    margin: 0 0 6px;
+}
+
+footer code {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    background: var(--bg, #f3f4f6);
+    padding: 1px 4px;
+    border-radius: 4px;
+    user-select: all;
+}
+
+.hint a {
+    color: var(--primary);
 }
 
 /* Loader */
@@ -329,4 +342,130 @@ footer p {
 @keyframes rotation {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
+}
+
+/* エンジンの接続状態。この画面の主目的は声の設定なので、
+   状態はヘッダーの小さな1行に留め、手順は下部へ畳んで置く。
+   接続できていないときも自動では開かない（初見の情報量を増やさない）。 */
+.engine-status-line {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 12px;
+    margin: 10px 0 0;
+}
+
+.engine-status {
+    color: var(--text-muted);
+}
+
+.engine-status::before {
+    content: "●";
+    margin-right: 5px;
+    color: var(--border);
+}
+
+.engine-status.ok::before {
+    color: var(--accent);
+}
+
+.engine-status.ng {
+    color: var(--error);
+}
+
+.engine-status.ng::before {
+    color: var(--error);
+}
+
+/* 状態の隣に置く控えめな操作。ボタンとして目立たせない。 */
+.link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--primary);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.link-btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.link-btn[hidden] {
+    display: none;
+}
+
+/* 省メモリ設定の手順。メモリで困った人が自分で開いたときだけ見えればよいので、
+   既定は1行の見出しだけにし、こちらからは一切誘導しない。 */
+.engine-setup {
+    margin: 0 0 24px;
+}
+
+.engine-setup > summary {
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px 0;
+}
+
+.engine-setup[open] > summary {
+    color: var(--primary);
+    margin-bottom: 8px;
+}
+
+.engine-setup[hidden] {
+    display: none;
+}
+
+.engine-path-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+#engine-path {
+    flex: 1;
+    min-width: 0;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+}
+
+.engine-path-row .secondary-btn {
+    flex-shrink: 0;
+}
+
+.engine-steps {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.8;
+    margin: 12px 0;
+    padding-left: 22px;
+}
+
+/* 手順のあとの補足。読まなくても設定できる内容なので、控えめに置く。 */
+.engine-notes {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin: 12px 0 0;
+    padding-left: 20px;
+}
+
+.engine-setup code {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    user-select: all;
 }

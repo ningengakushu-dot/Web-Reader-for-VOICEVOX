@@ -2,16 +2,18 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { CONTENT_MODULE_FILES, readContentSource } = require('./content-source');
 
 console.log('=== Web Reader for VOICEVOX - お知らせ機能実ソース自動検証テスト ===\n');
 
 const projectRoot = path.join(__dirname, '..');
 const backgroundPath = path.join(projectRoot, 'background.js');
-const contentPath = path.join(projectRoot, 'content.js');
 
 // 1. ソースコードの存在確認
-assert.strictEqual(fs.existsSync(backgroundPath), true, 'background.js が存在すること');
-assert.strictEqual(fs.existsSync(contentPath), true, 'content.js が存在すること');
+assert.strictEqual(fs.existsSync(backgroundPath), true, 'background.js 互換バンドルが存在すること');
+for (const file of CONTENT_MODULE_FILES) {
+    assert.strictEqual(fs.existsSync(path.join(projectRoot, file)), true, `${file} が存在すること`);
+}
 
 // --- モック Storage クラス ---
 class MockStorage {
@@ -42,6 +44,12 @@ class MockStorage {
                 Object.assign(this.data, obj);
                 cb && cb();
             }
+        });
+    }
+    remove(key, cb) {
+        setImmediate(() => {
+            delete this.data[key];
+            cb && cb();
         });
     }
 }
@@ -100,10 +108,13 @@ assert.strictEqual(typeof bgContext.__onMessageListener, 'function', 'onMessage 
 
 // --- 2-1. install / update の条件判定テスト ---
 bgChromeMock.storage.local.data = {};
+bgChromeMock.storage.local.data.ocrRemoveRuby = true;
 bgContext.__onInstalledListener({ reason: "install" });
 
 setImmediate(() => {
     assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, undefined, 'install では update_notice_pending が設定されないこと');
+    assert.strictEqual(bgChromeMock.storage.local.data.ocrRemoveRuby, undefined,
+        '廃止したルビ設定をローカルストレージから削除すること');
     console.log(' -> PASSED: install では表示対象にならない');
 
     bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.2.1" });
@@ -112,12 +123,12 @@ setImmediate(() => {
         assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, true, '旧版からの update では update_notice_pending が true になること');
         console.log(' -> PASSED: v1.2.1からのupdateでは表示対象になる');
 
-        // 1.4.1以降の修正版では同じ案内を再登録しない
+        // 1.4.3以降の修正版では同じ案内を再登録しない
         bgChromeMock.storage.local.data.update_notice_pending = false;
-        bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.4.1" });
+        bgContext.__onInstalledListener({ reason: "update", previousVersion: "1.4.3" });
         await new Promise((resolve) => setImmediate(resolve));
         assert.strictEqual(bgChromeMock.storage.local.data.update_notice_pending, false,
-            '1.4.1以降からの更新では通知フラグを再設定しないこと');
+            '1.4.3以降からの更新では通知フラグを再設定しないこと');
         console.log(' -> PASSED: 修正版への更新では同じ案内を再表示しない');
 
         // claim テスト用に、旧版からの更新後と同じ状態へ戻す
@@ -170,11 +181,11 @@ setImmediate(() => {
         console.log(' -> PASSED: storage 失敗時は false\n');
 
         // ==========================================
-        // 3. content.js 実ソースコードの実行検証
+        // 3. 責務別 Content Script 実ソースコードの実行検証
         // ==========================================
-        console.log('[Test 2] content.js 実ソースの UI/deactivate 検証...');
+        console.log('[Test 2] 責務別 Content Script 実ソースの UI/deactivate 検証...');
 
-        const contentSource = fs.readFileSync(contentPath, 'utf8');
+        const contentSource = readContentSource();
 
         let lastSentMessage = null;
         let lastMessageCallback = null;
@@ -197,10 +208,12 @@ setImmediate(() => {
         const documentMock = {
             body: dummyElement,
             documentElement: dummyElement,
+            activeElement: null,
             createElement: () => createDummyElement(),
             addEventListener: () => {},
             removeEventListener: () => {},
-            getElementById: (id) => elementsMock[id] || null
+            getElementById: (id) => elementsMock[id] || null,
+            hasFocus: () => true
         };
 
         const elementsMock = {
@@ -210,8 +223,12 @@ setImmediate(() => {
         const windowMock = {
             self: 1,
             top: 1,
+            innerWidth: 1280,
+            innerHeight: 720,
             addEventListener: () => {},
-            removeEventListener: () => {}
+            removeEventListener: () => {},
+            getSelection: () => ({ toString: () => '' }),
+            open: () => null
         };
         windowMock.window = windowMock;
 
@@ -219,11 +236,12 @@ setImmediate(() => {
             runtime: {
                 id: 'dummy-id',
                 lastError: null,
+                getURL: (p) => p,
                 sendMessage: (msg, cb) => {
                     lastSentMessage = msg;
                     lastMessageCallback = cb;
                 },
-                onMessage: { addListener: () => {} }
+                onMessage: { addListener: () => {}, removeListener: () => {} }
             },
             storage: {
                 local: { get: (k, cb) => cb({}), set: () => {} },
@@ -237,11 +255,12 @@ setImmediate(() => {
             document: documentMock,
             chrome: ctChromeMock,
             setTimeout: setTimeout,
-            clearTimeout: clearTimeout
+            clearTimeout: clearTimeout,
+            requestAnimationFrame: (fn) => fn()
         });
 
-        // content.js を VM 上で実行してクラスおよびインスタンス生成
-        vm.runInContext(contentSource, ctContext);
+        // 責務別 Content Script を VM 上で依存順に実行してインスタンス生成
+        vm.runInContext(contentSource, ctContext, { filename: 'content-modules.js' });
 
         const instance = ctContext.window.__vvRadioReaderInstance;
         assert.ok(instance, 'VVRadioReader インスタンスが生成されていること');

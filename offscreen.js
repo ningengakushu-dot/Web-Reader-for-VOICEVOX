@@ -6,11 +6,21 @@ let isSynthesizing = false;
 let isPlaying = false;
 let currentAudio = null;
 let currentAudioUrl = null;
-// 再生中の音声とは別に、完成済み音声を何件まで先読みするか。
-// 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が
-// 読み上げ終了まで増え続ける。次の1件だけを用意すれば文間の途切れを防ぎつつ、
-// メモリとCPUの使用量を文章量に依存しない一定範囲へ抑えられる。
-const MAX_READY_AUDIO_QUEUE = 1;
+// 再生中の音声とは別に、完成済み音声をどれだけ先読みするか（件数と合計秒数の両方で制限）。
+// 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が読み上げ終了まで
+// 増え続ける。一方で「次の1件だけ」では、短い文（見出し・箇条書きの1行）の直後に長い文が
+// 来ると、その合成（音声長の約0.5〜0.7倍）が短い文の再生中に終わらず無音になる。
+// 実測（音声1秒あたり合成0.5秒）では、再生済みの音声が数十秒分たまっていれば
+// 1件の合成時間（最長で音声30〜60秒＝合成15〜40秒）を吸収できる。
+// 24kHz/16bit の WAV は1分で約2.9MB なので、メモリは文章量に依存しない一定範囲に収まる。
+// ごく短い音声が続いても、件数が先に頭打ちになって必要秒数を蓄えられなくしない。
+// 実音声は45秒を主なメモリ上限とし、件数は異常な長さの応答に対する防御にする。
+const MAX_READY_AUDIO_QUEUE = 256;
+const MAX_READY_AUDIO_SECONDS = 45;
+const MAX_QUERY_LOOKAHEAD_ITEMS = 1024;
+let activeSynthesis = null;
+let synthesisSecondsPerAudioSecond = 0.7;
+let playbackBufferTimer = null;
 // 合成の世代トークン。stopAll() で繰り上げることで、停止前に開始済みの
 // 合成（in-flight）が完了しても、その結果を破棄して状態に反映させない。
 let synthesisGeneration = 0;
@@ -68,36 +78,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // 進行状況の通知先タブ（OCR実行中のみ設定）
 let ocrProgressTabId = null;
-// 1回のOCR要求で recognize は最大6回走る（拡大版・二値化版・融合用の各倍率）。
-// 各回が独立に 0→1 を報告するため、そのまま流すと表示が 100%→0% を何度も繰り返す。
-// 各回に「残りの一定割合」を割り当てて、全体として単調増加になるよう変換する。
-const OCR_PROGRESS_PASS_SHARE = 0.6;
-let ocrProgressBase = 0;
-let ocrProgressPrev = 0;
-
-function resetOcrProgress() {
-    ocrProgressBase = 0;
-    ocrProgressPrev = 0;
-}
-
-// tesseract の1回分の進捗を、通し進捗（単調増加）へ変換する
-function toOverallOcrProgress(passProgress) {
-    const p = Math.min(1, Math.max(0, passProgress || 0));
-    // 前回より大きく戻ったら次の認識に移ったとみなし、その回の持ち分を確定させる
-    if (p < ocrProgressPrev - 0.05) {
-        ocrProgressBase += (1 - ocrProgressBase) * OCR_PROGRESS_PASS_SHARE;
-    }
-    ocrProgressPrev = p;
-    return ocrProgressBase + (1 - ocrProgressBase) * OCR_PROGRESS_PASS_SHARE * p;
-}
+// 表示には主経路（元寸・全文）の認識の進捗だけを使う。方向判定の並行認識や
+// 精錬・局所確認は回数が入力次第で変わるうえ、横書き・縦書きworkerが並行して
+// 交互に 0→1 を報告するため、全部をつなぎ合わせる方式は成り立たない
+// （かつては進捗の後退から回の切り替わりを推定していたが、並行化により
+// 開始直後に表示が100%近くへ張り付いていた）。どの認識が主経路かの判別と
+// ゲージへの変換は ocr-common.js（createPrimaryOcrProgressTracker）に集約している。
+const ocrDisplayProgress = createPrimaryOcrProgressTracker();
 
 // OCRワーカーは組版方向（横書き jpn / 縦書き jpn_vert）ごとに初回利用時に生成し、
 // 以降のOCRで使い回す。この offscreen document が破棄された場合は次回作成時に再生成される。
-const ocrWorkers = createOcrWorkerPool((m) => {
-    if (m.status === "recognizing text" && ocrProgressTabId != null) {
+const ocrWorkers = createOcrWorkerPool((m, source) => {
+    if (ocrProgressTabId == null) return;
+    const progress = ocrDisplayProgress.update(m, source);
+    if (progress != null) {
         notifyBackground("OCR_PROGRESS", {
             tabId: ocrProgressTabId,
-            progress: toOverallOcrProgress(m.progress)
+            progress
         });
     }
 });
@@ -126,10 +123,13 @@ const resetOcrWorkers = ocrWorkers.terminate;
  * rect はビューポートのCSSピクセル座標、キャプチャ画像は物理ピクセルのため、
  * 画像幅とビューポート幅の比率で座標変換する（devicePixelRatio・ズーム両対応）。
  */
-async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby }) {
+async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, requestId }) {
     ocrProgressTabId = tabId ?? null;
-    resetOcrProgress();
+    ocrDisplayProgress.reset();
     cancelOcrWorkerIdleRelease();
+    // requestId は background が古い要求の結果を捨てるための通し番号。そのまま返す。
+    const complete = (payload) => notifyBackground("OCR_COMPLETE",
+        Number.isInteger(requestId) ? { tabId, requestId, ...payload } : { tabId, ...payload });
     try {
         const blob = await (await fetch(dataUrl)).blob();
         const bitmap = await createImageBitmap(blob);
@@ -146,26 +146,24 @@ async function recognizeRegion({ dataUrl, rect, viewportWidth, tabId, removeRuby
         }
 
         // 組版方向（横書き/縦書き）を自動判定して認識する。
-        // ルビ除去設定は offscreen では chrome.storage を参照できないため、
-        // background がメッセージに載せて渡す（既定OFF）。
         // 認識がハングしても進捗トーストが残り続けないよう、タイムアウトで打ち切る。
         const data = await withOcrTimeout(
-            recognizeWithOrientation(canvas, getOcrWorker, { removeRuby: removeRuby === true }),
+            recognizeWithOrientation(canvas, getOcrWorker),
             OCR_RECOGNIZE_TIMEOUT_MS,
             "文字認識に時間がかかりすぎました。範囲を狭めてお試しください。"
         );
         const text = cleanForSpeech(normalizeOcrText(data.text));
 
         if (!text) {
-            notifyBackground("OCR_COMPLETE", { tabId, error: "文字を認識できませんでした。範囲を変えてお試しください。" });
+            complete({ error: "文字を認識できませんでした。範囲を変えてお試しください。" });
             return;
         }
-        notifyBackground("OCR_COMPLETE", { tabId, text });
+        complete({ text });
     } catch (err) {
         console.error("Offscreen: OCR失敗:", err);
         // タイムアウトはワーカーがハングした可能性が高いため破棄して作り直させる
         if (err && err.isOcrTimeout) resetOcrWorkers();
-        notifyBackground("OCR_COMPLETE", { tabId, error: `文字認識に失敗しました: ${err.message}` });
+        complete({ error: `文字認識に失敗しました: ${err.message}` });
     } finally {
         ocrProgressTabId = null;
         scheduleOcrWorkerIdleRelease();
@@ -205,57 +203,398 @@ function enqueueTexts(texts, settings) {
     processSynthesis();
 }
 
+// エンジンが特定の文だけを HTTP エラーで拒否したとき、その文を捨てる前に何回まで
+// 半分に割って試すか（1文が最大8片になる）。
+// エンジンは1回の要求のアクセント句が49を超えると 500 を返し（実測:
+// tools/reading-corpus-check.mjs）、従来はその文が音声から黙って消え、前後の文が
+// つながって聞こえていた＝利用者から見た「読み飛ばし」。分割して出し直せば読める。
+const MAX_SYNTHESIS_SPLIT_DEPTH = 3;
+// これより短い文は、長さが原因ではないので割らずに従来どおり諦める。
+const MIN_SYNTHESIS_SPLIT_CHARS = 8;
+// 続けてこの回数だけ文の合成に失敗したら、残りのキューを捨てて通知を打ち切る。
+// 話者IDが今のエンジンに存在しない（VOICEVOXの入れ替え・キャラ構成の変更）、同じポートを
+// 別のプロセスが使っている、といった原因はどの文でも同じように失敗するため、続けても
+// 利用者は無音のまま待たされ、文の数だけエラー表示が上書きされ続けるだけになる。
+// 1〜2件なら「その文だけ読めなかった」可能性があるので続行する。
+const MAX_CONSECUTIVE_SYNTHESIS_FAILURES = 3;
+let consecutiveSynthesisFailures = 0;
+
+/**
+ * 合成に失敗した文を2つに割る。句読点・閉じ括弧の直後のうち中央にいちばん近い位置で
+ * 切り、区切りが無ければ中央で切る。割れないときは null。
+ * @param {string} text
+ * @returns {[string, string] | null}
+ */
+function splitSynthesisText(text) {
+    const chars = [...(text || "")];
+    if (chars.length < MIN_SYNTHESIS_SPLIT_CHARS) return null;
+    const middle = Math.floor(chars.length / 2);
+    let cut = -1;
+    for (let i = 1; i < chars.length; i++) {
+        if (!/[。．！？!?、，,」』）)]/.test(chars[i - 1])) continue;
+        if (cut < 0 || Math.abs(i - middle) < Math.abs(cut - middle)) cut = i;
+    }
+    if (cut <= 0 || cut >= chars.length) cut = middle;
+    const head = chars.slice(0, cut).join("").trim();
+    const tail = chars.slice(cut).join("").trim();
+    if (!head || !tail) return null;
+    return [head, tail];
+}
+
 /**
  * 合成待ちキューを処理し、音声を生成する
  */
+function readyAudioSeconds() {
+    return audioQueue.reduce((sum, item) => sum + (item.durationSec || 0), 0);
+}
+
+function audioClockMs() {
+    return globalThis.performance?.now?.() ?? Date.now();
+}
+
+// 文の文字数ではなく、エンジンが返したモーラ長で先の合成負荷を予測する。
+// 短文が複数続いてから長文が来る場合も見る必要があるので、次の1件だけにはしない。
+// WAVとは別の上限で軽いクエリを先読みする。音声が短い場合、WAVの件数上限で
+// クエリも打ち切ると、その先にある長い合成を開始前に発見できない。
+async function prepareSynthesisWindow(item, generation) {
+    let seconds = readyAudioSeconds();
+    let count = audioQueue.length;
+    // 再生より少し速いだけのエンジンほど蓄積が遅いので、より遠くまで調べる。
+    // 45〜450秒相当、かつ1024件で上限を固定し、全文分を無制限には保持しない。
+    const headroom = Math.max(0.1, 1 - synthesisSecondsPerAudioSecond * 1.2);
+    const lookaheadSeconds = MAX_READY_AUDIO_SECONDS / headroom;
+    for (let index = -1; index < textQueue.length; index++) {
+        if (index >= 0 && (count >= MAX_QUERY_LOOKAHEAD_ITEMS || seconds >= lookaheadSeconds)) break;
+        const pending = index < 0 ? item : textQueue[index];
+        if (!pending.query && !pending.queryError) {
+            try {
+                const query = await prepareVoiceQuery(pending.text, pending.settings);
+                if (generation !== synthesisGeneration) return false;
+                pending.query = query;
+                pending.durationSec = estimateQueryDurationSec(query, pending.settings.speedScale);
+            } catch (error) {
+                if (generation !== synthesisGeneration) return false;
+                pending.queryError = error;
+            }
+        }
+        // 失敗は元の合成キューの順番で処理し、分割再試行とエラー通知の契約を保つ。
+        // 到達不能のまま後続全件に同じ要求を出さない。
+        if (pending.queryError) break;
+        seconds += pending.durationSec;
+        count++;
+    }
+    return generation === synthesisGeneration;
+}
+
+function requiredPlaybackBufferSeconds() {
+    // 直近の合成実測に20%の余裕を持たせる。実測値は各合成で更新するので、
+    // エンジン起動時の一時的な遅さを以降ずっと引きずらない。
+    const rate = synthesisSecondsPerAudioSecond * 1.2;
+    let synthesisSeconds = 0;
+    let precedingAudioSeconds = 0;
+    let required = 0;
+    const add = (durationSec, elapsed = 0) => {
+        synthesisSeconds += Math.max(0, durationSec * rate - elapsed);
+        required = Math.max(required, synthesisSeconds - precedingAudioSeconds);
+        precedingAudioSeconds += durationSec;
+    };
+    if (activeSynthesis?.durationSec != null) {
+        add(activeSynthesis.durationSec, Math.max(0, audioClockMs() - activeSynthesis.startedAt) / 1000);
+    }
+    for (const pending of textQueue) {
+        if (!pending.query || pending.queryError) break;
+        add(pending.durationSec);
+    }
+    return required > 0 ? required + 0.1 : 0;
+}
+
+function clearPlaybackBufferTimer() {
+    if (playbackBufferTimer !== null) clearTimeout(playbackBufferTimer);
+    playbackBufferTimer = null;
+}
+
 async function processSynthesis() {
     if (isSynthesizing || textQueue.length === 0
-        || audioQueue.length >= MAX_READY_AUDIO_QUEUE) return;
+        || audioQueue.length >= MAX_READY_AUDIO_QUEUE
+        || readyAudioSeconds() >= MAX_READY_AUDIO_SECONDS) return;
 
     isSynthesizing = true;
     const item = textQueue.shift();
     // この合成が属する世代を記録。完了時に世代が進んでいれば stale とみなす。
     const generation = synthesisGeneration;
+    activeSynthesis = { durationSec: null, startedAt: null };
 
     try {
-        const blobUrl = await generateVoiceBlob(item.text, item.settings);
+        if (!await prepareSynthesisWindow(item, generation)) return;
+        if (item.queryError) throw item.queryError;
+        activeSynthesis = { durationSec: item.durationSec, startedAt: audioClockMs() };
+        processPlayback();
+        const { url: blobUrl, durationSec } = await generateVoiceBlob(item.text, item.settings, item.query);
         // 合成中に stopAll() が走った場合、生成済み Blob を破棄して状態を触らない
         if (generation !== synthesisGeneration) {
             URL.revokeObjectURL(blobUrl);
             return;
         }
-        audioQueue.push({ url: blobUrl, text: item.text });
+        const elapsedSec = Math.max(0, audioClockMs() - activeSynthesis.startedAt) / 1000;
+        if (durationSec > 0) synthesisSecondsPerAudioSecond = elapsedSec / durationSec;
+        activeSynthesis = null;
+        consecutiveSynthesisFailures = 0;
+        audioQueue.push({ url: blobUrl, text: item.text, durationSec });
         processPlayback();
     } catch (err) {
         // stale な世代のエラーは通知も状態変更もしない
         if (generation !== synthesisGeneration) return;
         console.error("Offscreen: 合成失敗:", err);
-        notifyBackground("PLAYBACK_ERROR", { error: `合成失敗: ${err.message}` });
+        // エンジンが特定の文だけ拒否した場合（HTTP エラー）は、その文を捨てる前に
+        // 半分に割って積み直す（MAX_SYNTHESIS_SPLIT_DEPTH のコメント参照）。
+        // 割れるあいだは通知しない: まだ文は失われていない。
+        const splitDepth = item.splitDepth || 0;
+        // 割った断片が結局どれも読めなかった場合でも、通知は元の1文につき1回に保つ
+        // （最大8片ぶんのエラー表示を出さない）。
+        const notice = item.notice || { notified: false };
+        if (isVoicevoxRetryableError(err) && splitDepth < MAX_SYNTHESIS_SPLIT_DEPTH) {
+            const parts = splitSynthesisText(item.text);
+            if (parts) {
+                textQueue.unshift(
+                    { text: parts[0], settings: item.settings, splitDepth: splitDepth + 1, notice },
+                    { text: parts[1], settings: item.settings, splitDepth: splitDepth + 1, notice });
+                return;
+            }
+        }
+        if (notice.notified && !isVoicevoxUnreachableError(err)) return;
+        notice.notified = true;
+        consecutiveSynthesisFailures++;
+        // エンジンに届かない・応答が無い失敗では残りの文を合成しない。続けても文の数だけ
+        // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
+        // 到達はできるが毎回同じ理由で拒否される場合も同じなので、連続失敗が続いたら諦める。
+        // 割っても駄目だった文はここで諦め、次の文へ進む（既に合成済みの音声は再生を終える）。
+        if (isVoicevoxUnreachableError(err)
+            || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
+            textQueue = [];
+        }
+        // 利用者へ見せる文言を持つエラー（HTTPステータス・応答形式）はそのまま伝える。
+        // 内部由来の英語メッセージだけ「合成失敗:」を付けて区別できるようにする。
+        notifyBackground("PLAYBACK_ERROR",
+            { error: err?.userFacing ? err.message : `合成失敗: ${err.message}` });
     } finally {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
         // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。
         if (generation === synthesisGeneration) {
+            activeSynthesis = null;
             isSynthesizing = false;
             processSynthesis();
+            processPlayback();
         }
     }
 }
 
+// 文を割って読み直す価値のある失敗か。エンジンは1要求のアクセント句が49を超えると
+// 500 を返すので、5xx のときだけ割り直す意味がある。404/422（話者がこのエンジンに無い等）や
+// 応答形式の異常はどう割っても同じ結果で、1文あたり最大15回の無駄な要求になるだけ。
+function isVoicevoxRetryableError(err) {
+    const status = Number(err?.httpStatus);
+    return Number.isFinite(status) && status >= 500 && status < 600;
+}
+
+// エンジンに接続できない／応答が無い種類の失敗か（fetch の TypeError・タイムアウト）。
+// HTTP ステータス由来の失敗（Query失敗(500) 等）は含めない。
+function isVoicevoxUnreachableError(err) {
+    const message = String(err?.message || "");
+    return (err && err.name === "TypeError")
+        || /Failed to fetch|NetworkError|ERR_CONNECTION|応答しません/i.test(message);
+}
+
 /**
- * VOICEVOX APIを使用して音声を合成し、Blob URLを返す。
- * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
+ * audio_query の結果から音声の長さ（秒）を見積もる。先読み量と再生開始の判断に使い、
+ * 話速・休止設定を含める。フレーム丸めの差は再生開始の余裕で吸収する。
  */
-async function generateVoiceBlob(text, settings) {
+function estimateQueryDurationSec(query, speedScale) {
+    let seconds = (Number(query.prePhonemeLength) || 0) + (Number(query.postPhonemeLength) || 0);
+    const phrases = Array.isArray(query.accent_phrases) ? query.accent_phrases : [];
+    for (const phrase of phrases) {
+        const moras = Array.isArray(phrase?.moras) ? phrase.moras : [];
+        for (const mora of moras) {
+            seconds += (Number(mora?.consonant_length) || 0) + (Number(mora?.vowel_length) || 0);
+        }
+        if (phrase?.pause_mora) {
+            const pause = query.pauseLength == null
+                ? (Number(phrase.pause_mora.vowel_length) || 0) : Number(query.pauseLength);
+            const scale = Number.isFinite(Number(query.pauseLengthScale)) ? Number(query.pauseLengthScale) : 1;
+            seconds += pause * scale;
+        }
+    }
+    const speed = Number(speedScale) > 0 ? Number(speedScale) : 1;
+    return seconds / speed;
+}
+
+/**
+ * VOICEVOX が非2xxを返したときのエラー。HTTPステータスを err.httpStatus に残し、
+ * 「割って読み直すか」の判断をメッセージの文字列一致に頼らずに行えるようにする。
+ * userFacing を立てた文言はそのまま利用者へ表示される。
+ */
+function voicevoxHttpError(status) {
+    const message = status >= 500
+        ? `VOICEVOXエンジンがこの文を処理できませんでした（応答コード${status}）`
+        : `VOICEVOXエンジンが要求を受け付けませんでした（応答コード${status}）。`
+            + "オプション画面で話者を選び直すと直ることがあります";
+    const error = new Error(message);
+    error.httpStatus = status;
+    error.userFacing = true;
+    return error;
+}
+
+/**
+ * VOICEVOX ではない応答（JSONでない・音声合成用クエリの形をしていない）に対するエラー。
+ */
+function voicevoxUnexpectedResponseError() {
+    const error = new Error(
+        "VOICEVOXエンジンから予期しない応答が返りました。"
+        + "ポート50021を別のアプリが使っていないか確認してください");
+    error.userFacing = true;
+    return error;
+}
+
+// ===== 括弧が作る不自然な間を取り除く =====
+//
+// 括弧そのものは読まれないが、開き・閉じの両方が「間」を作り、直後の助詞を別の
+// アクセント句へ切り離す。実測（VOICEVOX 0.25.2 / 話者1）:
+//   彼は「はい」と答えた。  カレワ、ハイ、ト/コタエタ  無音0.94秒・全体3.27秒
+//   括弧を外すと            カレワ/ハイト/コタエタ     無音0秒・全体1.92秒
+//
+// ただし括弧を外すと、隣り合う語がつながって読みが変わることがある。文字の並びからは
+// 判別できない（実測: 「彼は「ええ」と言った」を外すと助詞の「は」が吸収されて
+// カレ/ハエエト になる。「ABC（株）」はカブシキガイシャがカブになる。
+// 「9月1日（月）」はゲツヨオビがツイタチビになる）。
+// そこで**エンジン自身に両方の読みを尋ね、音素列と語の切れ目が変わらないときだけ外す**。
+// 間（pause_mora）と句の結合は比較に含めない。それを減らすことが目的だから。
+// audio_query は実測13ミリ秒で、合成に比べて無視できる。
+const OFFSCREEN_BRACKET_RE = /[「」『』（）()｢｣〈〉《》【】〔〕]/g;
+// 閉じと開きが隣り合う所（「はい」「いいえ」）は、外すと2つの引用が地続きになる。
+// 音素列は変わらないためエンジンには区別できないので、読点1つを残す。
+const OFFSCREEN_BRACKET_JUNCTION_RE = /[」』）)｣〉》】〕]\s*[「『（(｢〈《【〔]/g;
+
+/**
+ * 括弧を外した読み上げ用の候補を作る。外すものが無ければ null。
+ * @param {string} text
+ * @returns {string|null}
+ */
+function bracketFreeCandidate(text) {
+    if (!OFFSCREEN_BRACKET_RE.test(text)) {
+        OFFSCREEN_BRACKET_RE.lastIndex = 0;
+        return null;
+    }
+    OFFSCREEN_BRACKET_RE.lastIndex = 0;
+    const candidate = text
+        .replace(OFFSCREEN_BRACKET_JUNCTION_RE, "、")
+        .replace(OFFSCREEN_BRACKET_RE, "");
+    return candidate && candidate !== text ? candidate : null;
+}
+
+/**
+ * 読みを比べるための情報を取り出す。
+ * - phonemes: 子音＋母音の並び。カナだけの比較では拾えない無声化（「す」の u → U）まで見る。
+ * - boundaries: アクセント句の切れ目（先頭からのモーラ数）。語のまとまりが変わったかを見る。
+ * 間（pause_mora）と句の長さそのものは含めない。間が減ることが目的だから。
+ * @param {object} query
+ * @returns {{phonemes: string, boundaries: number[]}}
+ */
+function queryReadingSignature(query) {
+    const phonemes = [];
+    const boundaries = [];
+    const phrases = Array.isArray(query?.accent_phrases) ? query.accent_phrases : [];
+    let count = 0;
+    for (const phrase of phrases) {
+        const moras = Array.isArray(phrase?.moras) ? phrase.moras : [];
+        for (const mora of moras) {
+            phonemes.push(String(mora?.consonant || "") + String(mora?.vowel || mora?.text || ""));
+            count += 1;
+        }
+        boundaries.push(count);
+    }
+    return { phonemes: phonemes.join(" "), boundaries };
+}
+
+/**
+ * 括弧を外した読みが、元の読みと同じと言えるか。
+ * 許すのは「アクセント句がつながること」だけ。これが括弧を外す目的そのもので、
+ * 直後の助詞が元の句へ戻る（カレワ、ハイ、ト → カレワ/ハイト）。
+ * 逆に**新しい切れ目が生まれた**場合は、語のまとまりが変わっている。
+ * 実測: 「ここで」「はきもの」を脱ぐ。→ ハキモノ が ハキ/モノオ に割れる。
+ * 音素まで一致していても、これは読みが変わったものとして退ける。
+ * @param {object} candidateQuery
+ * @param {object} originalQuery
+ * @returns {boolean}
+ */
+function isSameReading(candidateQuery, originalQuery) {
+    const candidate = queryReadingSignature(candidateQuery);
+    const original = queryReadingSignature(originalQuery);
+    if (candidate.phonemes !== original.phonemes) return false;
+    const originalBoundaries = new Set(original.boundaries);
+    return candidate.boundaries.every((at) => originalBoundaries.has(at));
+}
+
+/**
+ * 括弧を外しても読みが変わらないなら、外したほうのクエリを使う。
+ * 判定できない・取得に失敗したときは元のクエリをそのまま返す（読みを壊さない側に倒す）。
+ * @param {string} text
+ * @param {number} speaker
+ * @param {object} queryJson 元のテキストのクエリ
+ * @returns {Promise<object>}
+ */
+async function preferBracketFreeQuery(text, speaker, queryJson) {
+    const candidate = bracketFreeCandidate(text);
+    if (!candidate) return queryJson;
+    let candidateQuery;
+    try {
+        candidateQuery = await requestAudioQuery(candidate, speaker);
+    } catch (error) {
+        return queryJson;
+    }
+    return isSameReading(candidateQuery, queryJson) ? candidateQuery : queryJson;
+}
+
+/**
+ * 音声合成用クエリを1件取得する。
+ * @param {string} text
+ * @param {number} speaker
+ * @returns {Promise<object>}
+ */
+async function requestAudioQuery(text, speaker) {
+    const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
+    const queryResponse = await fetchWithTimeout(
+        queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
+    if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
+
+    let queryJson;
+    try {
+        queryJson = await readJsonResponseWithLimit(queryResponse);
+    } catch (error) {
+        // 本文がJSONでない（同じポートを別のプロセスが使っている、エラーページが返る等）。
+        // ここで置き換えないと JSON.parse の英語の内部メッセージがそのまま通知へ出る。
+        // realm をまたいで投げられるので instanceof ではなく name で判定する。
+        if (error?.name === "SyntaxError") throw voicevoxUnexpectedResponseError();
+        throw error;
+    }
+    // 応答の形を確かめてから書き込む。null や配列以外が返ったとき、この後の代入が
+    // TypeError になり「Cannot set properties of null」がそのまま利用者へ出ていた。
+    if (!queryJson || typeof queryJson !== "object" || !Array.isArray(queryJson.accent_phrases)) {
+        throw voicevoxUnexpectedResponseError();
+    }
+    return queryJson;
+}
+
+/**
+ * 読みが変わらない場合だけ括弧の間を除き、先読み・合成で共有するクエリを用意する。
+ * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
+ * @returns {Promise<object>}
+ */
+async function prepareVoiceQuery(text, settings) {
     const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
     // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
     const speaker = Number(speakerId);
 
-    const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
-    const queryResponse = await fetchWithTimeout(
-        queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
-    if (!queryResponse.ok) throw new Error(`Query失敗(${queryResponse.status})`);
-
-    const queryJson = await readJsonResponseWithLimit(queryResponse);
+    let queryJson = await requestAudioQuery(text, speaker);
+    queryJson = await preferBracketFreeQuery(text, speaker, queryJson);
 
     queryJson.prePhonemeLength = 0.1 * speedScale;
     queryJson.postPhonemeLength = 0.1 * speedScale;
@@ -264,6 +603,16 @@ async function generateVoiceBlob(text, settings) {
     queryJson.intonationScale = intonationScale;
     queryJson.volumeScale = volumeScale;
     queryJson.pauseLengthScale = pauseLengthScale;
+    return queryJson;
+}
+
+/**
+ * 検証済みのクエリを合成する。先読み済みなら同じクエリを再取得しない。
+ * @returns {Promise<{url: string, durationSec: number}>}
+ */
+async function generateVoiceBlob(text, settings, preparedQuery = null) {
+    const queryJson = preparedQuery || await prepareVoiceQuery(text, settings);
+    const speaker = Number(settings.speakerId);
 
     const synthUrl = `${VOICEVOX_BASE_URL}/synthesis?speaker=${speaker}`;
     const synthResponse = await fetchWithTimeout(synthUrl, {
@@ -271,17 +620,40 @@ async function generateVoiceBlob(text, settings) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(queryJson)
     }, VOICEVOX_SYNTHESIS_TIMEOUT_MS);
-    if (!synthResponse.ok) throw new Error(`Synthesis失敗(${synthResponse.status})`);
+    if (!synthResponse.ok) throw voicevoxHttpError(synthResponse.status);
 
     const audioBlob = await readBlobResponseWithLimit(synthResponse);
-    return URL.createObjectURL(audioBlob);
+    return {
+        url: URL.createObjectURL(audioBlob),
+        durationSec: estimateQueryDurationSec(queryJson, settings.speedScale)
+    };
 }
 
 /**
  * 再生待ちキューを処理する
  */
-async function processPlayback() {
+async function processPlayback(continuePlayback = false) {
     if (isPlaying || audioQueue.length === 0) return;
+
+    clearPlaybackBufferTimer();
+    processSynthesis();
+    const atBufferLimit = audioQueue.length >= MAX_READY_AUDIO_QUEUE
+        || readyAudioSeconds() >= MAX_READY_AUDIO_SECONDS;
+    if (!continuePlayback && !atBufferLimit && activeSynthesis?.durationSec === null) return;
+    // 未準備の次クエリがある間は負荷を判定できない。準備完了・失敗時に再評価される。
+    if (!continuePlayback && !atBufferLimit && !activeSynthesis && textQueue[0]
+        && !textQueue[0].query && !textQueue[0].queryError) return;
+    const waitSeconds = requiredPlaybackBufferSeconds() - readyAudioSeconds();
+    if (!continuePlayback && !atBufferLimit && waitSeconds > 0.001) {
+        const generation = playbackGeneration;
+        // 合成完了時にも再評価する。長い合成の途中でも残り時間がバッファ内に収まれば
+        // 開始でき、全文合成の完了まで待たせない。
+        playbackBufferTimer = setTimeout(() => {
+            playbackBufferTimer = null;
+            if (generation === playbackGeneration) processPlayback();
+        }, Math.max(1, waitSeconds * 1000));
+        return;
+    }
 
     isPlaying = true;
     notifyBackground("PLAYBACK_STARTED");
@@ -315,7 +687,9 @@ async function processPlayback() {
             notifyBackground("PLAYBACK_ENDED");
         }
 
-        processPlayback();
+        // 既に完成している音声はそのまま続ける。予測の更新を理由に途中へ間を挿入しない。
+        // 実際にバッファが空になった場合だけ、再開時に必要量を再び確保する。
+        processPlayback(completedNormally && audioQueue.length > 0);
     };
 
     audio.onended = () => cleanup(true);
@@ -339,8 +713,19 @@ async function processPlayback() {
 }
 
 function stopAll() {
+    // 何も動いていないときの停止（読み上げ開始前の STOP_AUDIO・二度目の停止）では
+    // PLAYBACK_STOPPED を通知しない。開始直前に「停止」が届くと capture.html の
+    // 表示が「停止しました」→「再生中」と往復し、タブのアイコンも一瞬点滅する。
+    const wasActive = isPlaying || isSynthesizing || textQueue.length > 0 || audioQueue.length > 0
+        || currentAudio != null;
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
+    clearPlaybackBufferTimer();
+    activeSynthesis = null;
+    synthesisSecondsPerAudioSecond = 0.7;
+    // 連続失敗の数え上げは1回の読み上げの中だけで意味を持つ。エンジンを起動し直して
+    // やり直したときに、前回の失敗数のせいで1文目で打ち切られないようにする。
+    consecutiveSynthesisFailures = 0;
     // in-flight の再生開始処理を無効化（停止後の AbortError 等を通知しない）
     playbackGeneration++;
 
@@ -364,7 +749,7 @@ function stopAll() {
     isSynthesizing = false;
     isPlaying = false;
 
-    notifyBackground("PLAYBACK_STOPPED");
+    if (wasActive) notifyBackground("PLAYBACK_STOPPED");
 }
 
 function notifyBackground(type, payload = {}) {

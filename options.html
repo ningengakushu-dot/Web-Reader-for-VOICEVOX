@@ -11,9 +11,14 @@
         <header>
             <h1>Web Reader for VOICEVOX Settings</h1>
             <p class="subtitle">VOICEVOX ボイスキャラクター設定</p>
+            <p class="engine-status-line">
+                <span id="engine-status" class="engine-status" role="status" aria-live="polite">接続を確認しています...</span>
+                <button type="button" id="engine-recheck" class="link-btn">再確認</button>
+            </p>
         </header>
 
         <main>
+
             <section class="settings-group">
                 <h2 class="group-title">VOICEVOX 音声設定</h2>
 
@@ -25,7 +30,7 @@
                         </select>
                         <div class="loader" id="loader"></div>
                     </div>
-                    <p class="hint">VOICEVOXエンジンが起動している必要があります。</p>
+                    <p class="hint">VOICEVOXエンジンが起動している必要があります。VOICEVOXは<a href="https://voicevox.hiroshiba.jp/" target="_blank" rel="noopener noreferrer">公式サイト</a>から入手できます。</p>
                 </div>
 
                 <div class="slider-grid">
@@ -97,9 +102,9 @@
                 </div>
 
                 <div class="settings-section">
-                    <label for="iconSize-slider">アイコンサイズ: <span id="iconSize-value">16</span>px</label>
+                    <label for="iconSize-slider">アイコンサイズ: <span id="iconSize-value">32</span>px</label>
                     <div class="slider-wrapper">
-                        <input type="range" id="iconSize-slider" min="16" max="64" step="1" value="16">
+                        <input type="range" id="iconSize-slider" min="16" max="128" step="1" value="32">
                     </div>
                 </div>
 
@@ -112,20 +117,35 @@
                         </select>
                     </div>
                     <p class="hint">「画面OCR読み上げを開始」設定時も、ツールバーの拡張機能アイコンを右クリック→「オプション」からこの画面を開けます。</p>
+                    <p class="hint">画面OCR読み上げは<strong>β版</strong>です。画像やPDFの文字を認識して読み上げますが、文書によっては読み間違い・読み飛ばしが起こり、認識に10〜20秒ほどかかります。文字として選択できるページでは、範囲をドラッグするだけでOCRを介さずに読み上げます。</p>
                 </div>
             </section>
 
-            <section class="settings-group">
-                <h2 class="group-title">画面OCR読み上げ</h2>
+            <details id="engine-setup" class="engine-setup" hidden>
+                <summary>VOICEVOXアプリを起動せずに使う（メモリ節約）</summary>
 
-                <div class="settings-section">
-                    <label class="checkbox-label" for="ocrRemoveRuby-check">
-                        <input type="checkbox" id="ocrRemoveRuby-check">
-                        <span>画面OCR読み上げでルビ（ふりがな）を優先して読む</span>
-                    </label>
-                    <p class="hint">縦書きの小説など、ルビが振られたページ向けの設定です。ふりがなの付いた漢字は、漢字の一般的な読みではなく、ふりがなのとおりに読み上げます（例: 「鯨幕」→「くじらまく」）。ルビをうまく読み取れなかった場合は、そのルビを使わず漢字のまま読み上げます。ルビのないページでは影響しません。</p>
+                <p class="hint"><strong>VOICEVOXのインストールは必要です。</strong>アプリを起動せず、中の音声合成エンジンだけを常駐させます。設定は最初の1回だけで、次からはパソコンを起動するだけで使えます。</p>
+
+                <div class="engine-path-row">
+                    <input type="text" id="engine-path" readonly aria-label="メモ帳に貼り付ける1行">
+                    <button type="button" id="engine-path-copy" class="secondary-btn">この1行をコピー</button>
                 </div>
-            </section>
+
+                <ol class="engine-steps">
+                    <li>VOICEVOXアプリを閉じます。</li>
+                    <li><code>Windows</code>+<code>R</code> → <code>notepad</code> → メモ帳に上の1行を貼り付け。</li>
+                    <li>「ファイル」→「名前を付けて保存」。保存先は<code>shell:startup</code>、種類は「すべてのファイル」、名前は「VOICEVOXエンジン.vbs」。</li>
+                    <li><code>Windows</code>+<code>R</code> → <code>shell:startup</code> → 保存したファイルをダブルクリック。</li>
+                    <li>この画面に戻ります。上の表示が緑になれば成功です（1分ほどかかります）。</li>
+                </ol>
+
+                <ul class="engine-notes">
+                    <li>VOICEVOXアプリとは同時に起動できません。</li>
+                    <li>やめるときは、手順4のフォルダーからファイルを削除します。</li>
+                    <li>うまくいかないときは、1行が途中で切れていないか確かめてください。</li>
+                    <li>VOICEVOXの場所を変えた方は、1行の中のパスを書き換えてください。</li>
+                </ul>
+            </details>
 
             <div class="actions">
                 <button id="save-btn" class="primary-btn">設定を保存</button>
@@ -135,10 +155,12 @@
         </main>
 
         <footer>
-            <p>Web Reader for VOICEVOX v1.4.2</p>
+            <p>キーボードショートカット（既定: 読み上げ Alt+Shift+U / 画面OCR読み上げ Alt+Shift+O）は <code>chrome://extensions/shortcuts</code> で確認・変更できます。</p>
+            <p>Web Reader for VOICEVOX v1.4.4</p>
         </footer>
     </div>
     <script src="constants.js"></script>
+    <script src="runtime-messaging.js"></script>
     <script src="options.js"></script>
 </body>
 </html>
