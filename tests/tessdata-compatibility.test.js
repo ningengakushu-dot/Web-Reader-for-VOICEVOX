@@ -22,6 +22,12 @@ for (const name of ['jpn.traineddata', 'jpn_vert.traineddata']) {
     const configStart = 4 + componentCount * 8;
     const configEnd = Number(data.readBigInt64LE(4 + 17 * 8));
     const config = data.subarray(configStart, configEnd).toString('utf8');
+    assert.doesNotMatch(config, /^language_model_ngram_on(?=\s)/m,
+        `${name}: LSTM専用コアが無視するngram設定を渡さない`);
+    if (name === 'jpn.traineddata') {
+        assert.match(config, /^#anguage_model_ngram_on(?=\s)/m,
+            '横書きモデルのngram設定を同じ長さのコメントとして保持する');
+    }
     for (const parameter of unsupported) {
         assert.doesNotMatch(config, new RegExp(`^${parameter}(?=\\s)`, 'm'),
             `${name}: LSTM専用コアにない設定を有効にしない`);
@@ -49,7 +55,7 @@ assert.equal(createWorkerArgs[0], 'jpn');
 assert.equal(createWorkerArgs[1], 1);
 assert.equal(createWorkerArgs[2].gzip, false);
 assert.match(createWorkerArgs[2].cachePath,
-    /^web-reader-for-voicevox\/tessdata-config-v\d+$/,
+    /^web-reader-for-voicevox\/tessdata-config-v2$/,
     '旧IndexedDBキャッシュと衝突しない世代付きcachePathを使う');
 assert.equal(createWorkerArgs[2].cacheMethod, undefined,
     'キャッシュを無効化せず、世代切替後は既定のwrite方式で再利用する');

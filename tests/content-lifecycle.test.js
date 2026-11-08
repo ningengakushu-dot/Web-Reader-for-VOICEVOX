@@ -102,7 +102,11 @@ assert.equal(second.isPlaying, false);
 assert.equal(uiState, 'idle');
 assert.equal(toastRemoved, 1);
 
+let dragCleanupCount = 0;
+second.indicatorDragCleanup = () => { dragCleanupCount++; };
 second.deactivate();
+assert.equal(dragCleanupCount, 1, '再注入前にドラッグの捕捉・監視を解放する');
+assert.equal(second.indicatorDragCleanup, null);
 assert.equal(runtimeListeners.size, 0);
 assert.equal(documentListeners.count('keydown'), 0);
 assert.equal(windowListeners.count('pageshow'), 0);

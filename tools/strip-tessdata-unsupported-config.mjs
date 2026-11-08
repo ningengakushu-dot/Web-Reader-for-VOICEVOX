@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 // tessdata_best のCJK設定には、Legacy OCR向けでLSTM専用コアには存在しない変数が残る。
 // Tesseractはこれらを無視するが、拡張機能のエラーページへ毎回警告を記録するため、
@@ -37,7 +37,11 @@ for (const file of files) {
     const config = data.subarray(configStart, configEnd).toString("utf8");
     let cleaned = config;
     let changed = 0;
-    for (const name of unsupportedByLstmOnlyCore) {
+    // 横書きモデルだけが持つこのLegacy設定も、同梱LSTMコアでは未実装。
+    const unsupported = basename(file) === "jpn.traineddata"
+        ? [...unsupportedByLstmOnlyCore, "language_model_ngram_on"]
+        : unsupportedByLstmOnlyCore;
+    for (const name of unsupported) {
         const line = new RegExp(`^${name}(?=\\s)`, "m");
         if (line.test(cleaned)) {
             cleaned = cleaned.replace(line, `#${name.slice(1)}`);

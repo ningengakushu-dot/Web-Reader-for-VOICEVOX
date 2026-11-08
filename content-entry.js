@@ -115,6 +115,10 @@ class VVRadioReader {
             this.pageShowListener = null;
         }
         this.clearOcrToastDismiss();
+        if (this.indicatorDragCleanup) {
+            this.indicatorDragCleanup();
+            this.indicatorDragCleanup = null;
+        }
         // OCR選択オーバーレイの window リスナーと、OCRトースト/進捗ガードタイマーも解放する。
         // host を消すだけでは window に張った mousemove/mouseup/keydown と setTimeout が
         // 取り残され、detached ノードを参照し続けてリークする（OCR選択中の再注入で発生）。
