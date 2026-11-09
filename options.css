@@ -44,12 +44,6 @@ h1 {
     color: var(--primary);
 }
 
-.subtitle {
-    font-size: 14px;
-    color: var(--text-muted);
-    margin: 8px 0 0;
-}
-
 .settings-section {
     margin-bottom: 24px;
 }
