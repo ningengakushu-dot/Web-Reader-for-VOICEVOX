@@ -115,7 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // 既定は「画面OCR読み上げを開始」（content.js 側の既定値と揃える）
             iconRightClickSelect.value = result.iconRightClickAction === 'options' ? 'options' : 'capture';
-            if (synthesisModeSelect) synthesisModeSelect.value = result.synthesisMode === 'normal' ? 'normal' : 'auto';
+            if (synthesisModeSelect) synthesisModeSelect.value = result.synthesisMode === 'auto' ? 'auto' : 'normal';
 
             const savedStyle = result.iconStyle;
             iconStyleSelect.value = ICON_STYLE_VALUES.includes(savedStyle)
@@ -586,12 +586,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     saveBtn.addEventListener('click', async () => {
         const speakerId = parseInt(speakerSelect.value, 10);
+        const synthesisMode = synthesisModeSelect?.value === 'auto' ? 'auto' : 'normal';
         if (isNaN(speakerId)) {
-            showStatus('キャラクターを選択してください。', 'error');
+            // ENGINEが停止中でも、次の読み上げに適用する方式だけは変更・保存できる。
+            // speakerIdを推測して既存の話者選択を上書きしない。
+            try {
+                await chrome.storage.local.set({ synthesisMode });
+                showStatus('音声合成方式を保存しました。', 'success');
+            } catch (error) {
+                showStatus('音声合成方式の保存に失敗しました。', 'error');
+            }
             return;
         }
 
-        const settings = { speakerId, synthesisMode: synthesisModeSelect?.value === 'normal' ? 'normal' : 'auto' };
+        const settings = { speakerId, synthesisMode };
         for (const s of sliders) {
             const val = clampSliderValue(s.slider, s.slider.value, s.defaultVal);
             settings[s.key] = val;
