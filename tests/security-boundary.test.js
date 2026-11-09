@@ -69,6 +69,16 @@ function load(file, chrome) {
     assert.strictEqual(result.message.settings.pitchScale, -0.15);
     assert.strictEqual(result.message.settings.volumeScale, 1);
     assert.strictEqual(Object.prototype.hasOwnProperty.call(result.message.settings, 'injected'), false);
+    assert.strictEqual(result.message.settings.synthesisMode, 'normal',
+        'missing mode from old clients must keep the legacy synthesizer');
+    assert.strictEqual(off.validate({
+        type: 'ENQUEUE_TEXTS', texts: ['abc'], settings: { synthesisMode: 'auto' }
+    }).message.settings.synthesisMode, 'auto',
+    'streaming requires an explicit opt-in');
+    assert.strictEqual(off.validate({
+        type: 'ENQUEUE_TEXTS', texts: ['abc'], settings: { synthesisMode: 'unexpected' }
+    }).message.settings.synthesisMode, 'normal',
+    'malformed modes must not enable streaming');
 
     assert.strictEqual(off.validate({
         type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: ['a'.repeat(200001)], settings: {}
