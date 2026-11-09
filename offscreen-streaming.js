@@ -295,7 +295,7 @@
                         offset += count;
                         if (headerUsed === 44) {
                             meta = pcmHeader(header, query, length);
-                            context = new AudioContext();
+                            context = new AudioContext({ sampleRate: meta.sampleRate });
                         }
                     }
                     if (meta && offset < value.length) {
