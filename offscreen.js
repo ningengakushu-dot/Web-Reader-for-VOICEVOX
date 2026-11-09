@@ -533,8 +533,12 @@ function scheduleOcrWorkerIdleRelease() {
  */
 function enqueueTexts(texts, settings) {
     if (!Array.isArray(texts) || texts.length === 0) return;
+    // 連続する文章のストリーミング切替は無音区間の実機検証が未完了。
+    // 音切れ対策が確立している従来の先読み経路を複数文では優先する。
+    const playbackSettings = texts.length > 1
+        ? { ...settings, synthesisMode: "normal" } : settings;
     for (const text of texts) {
-        textQueue.push({ text, settings });
+        textQueue.push({ text, settings: playbackSettings });
     }
     processSynthesis();
 }
