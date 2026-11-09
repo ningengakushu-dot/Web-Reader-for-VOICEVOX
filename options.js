@@ -115,7 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // 既定は「画面OCR読み上げを開始」（content.js 側の既定値と揃える）
             iconRightClickSelect.value = result.iconRightClickAction === 'options' ? 'options' : 'capture';
-            synthesisModeSelect.value = result.synthesisMode === 'normal' ? 'normal' : 'auto';
+            if (synthesisModeSelect) synthesisModeSelect.value = result.synthesisMode === 'normal' ? 'normal' : 'auto';
 
             const savedStyle = result.iconStyle;
             iconStyleSelect.value = ICON_STYLE_VALUES.includes(savedStyle)
@@ -591,7 +591,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const settings = { speakerId, synthesisMode: synthesisModeSelect.value === 'normal' ? 'normal' : 'auto' };
+        const settings = { speakerId, synthesisMode: synthesisModeSelect?.value === 'normal' ? 'normal' : 'auto' };
         for (const s of sliders) {
             const val = clampSliderValue(s.slider, s.slider.value, s.defaultVal);
             settings[s.key] = val;
