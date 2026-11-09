@@ -23,6 +23,8 @@
         for (const [key, [min, max]] of Object.entries(ranges)) {
             result[key] = clamp(Number(source[key]), min, max, defaults[key]);
         }
+        // 通常合成固定の明示指定だけを通す。未指定は従来の設定契約を保つ。
+        if (source.synthesisMode === 'normal') result.synthesisMode = 'normal';
         return result;
     }
 
