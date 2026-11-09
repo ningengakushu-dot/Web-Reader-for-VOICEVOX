@@ -123,7 +123,8 @@ function clearPlaybackBufferTimer() {
 }
 
 async function processSynthesis() {
-    if (isSynthesizing || textQueue.length === 0
+    if (isSynthesizing || currentStreamingPlayer || audioQueue.some(item => item.streaming)
+        || textQueue.length === 0
         || audioQueue.length >= MAX_READY_AUDIO_QUEUE
         || readyAudioSeconds() >= MAX_READY_AUDIO_SECONDS) return;
 
@@ -134,6 +135,22 @@ async function processSynthesis() {
     activeSynthesis = { durationSec: null, startedAt: null };
 
     try {
+        // 先に対応を確認し、streaming_talk では大量のクエリ/WAV先読みを避ける。
+        // 古いENGINE・不明スタイル・音声API未対応では従来の経路を変更しない。
+        const streaming = !item.forceNormal && globalThis.VVRadioStreaming
+            && await globalThis.VVRadioStreaming.supports(
+                item.settings.speakerId, item.settings.synthesisMode === "normal");
+        if (generation !== synthesisGeneration) return;
+        if (streaming) {
+            const query = item.query || await prepareVoiceQuery(item.text, item.settings);
+            if (generation !== synthesisGeneration) return;
+            audioQueue.push({ streaming: true, query, settings: item.settings,
+                text: item.text, durationSec: estimateQueryDurationSec(query, item.settings.speedScale),
+                splitDepth: item.splitDepth || 0, notice: item.notice });
+            activeSynthesis = null;
+            processPlayback();
+            return;
+        }
         if (!await prepareSynthesisWindow(item, generation)) return;
         if (item.queryError) throw item.queryError;
         activeSynthesis = { durationSec: item.durationSec, startedAt: audioClockMs() };
@@ -443,6 +460,50 @@ async function generateVoiceBlob(text, settings, preparedQuery = null) {
  */
 async function processPlayback(continuePlayback = false) {
     if (isPlaying || audioQueue.length === 0) return;
+    if (audioQueue[0].streaming) {
+        clearPlaybackBufferTimer();
+        const item = audioQueue.shift();
+        const generation = playbackGeneration;
+        isPlaying = true;
+        const player = globalThis.VVRadioStreaming.createPlayer(
+            item.query, Number(item.settings.speakerId), () => {
+                if (generation === playbackGeneration) notifyBackground("PLAYBACK_STARTED");
+            });
+        currentStreamingPlayer = player;
+        let completed = false;
+        try {
+            await player.run();
+            completed = true; // readerの終了だけではなく最後のAudioBufferの再生完了まで待つ
+        } catch (error) {
+            if (generation !== playbackGeneration) return;
+            globalThis.VVRadioStreaming.suppress(item.settings.speakerId);
+            if (!player.started) {
+                // まだ音を出していない場合に限り、既存の分割再試行へ戻す。
+                textQueue.unshift({ text: item.text, settings: item.settings,
+                    forceNormal: true, query: item.query, durationSec: item.durationSec,
+                    splitDepth: item.splitDepth, notice: item.notice });
+            } else {
+                // 再生済み音声を先頭から二重に再生しない。途中復旧は安全性未検証。
+                textQueue = [];
+                for (const ready of audioQueue) if (ready.url) URL.revokeObjectURL(ready.url);
+                audioQueue = [];
+                console.error("Offscreen: ストリーミング再生失敗:", error);
+                notifyBackground("PLAYBACK_ERROR",
+                    { error: "ストリーミング再生を中断しました: " + error.message });
+            }
+        } finally {
+            player.stop();
+            if (generation === playbackGeneration) {
+                currentStreamingPlayer = null;
+                isPlaying = false;
+                if (completed && textQueue.length === 0 && audioQueue.length === 0
+                    && !isSynthesizing) notifyBackground("PLAYBACK_ENDED");
+                processSynthesis();
+                processPlayback(true);
+            }
+        }
+        return;
+    }
 
     clearPlaybackBufferTimer();
     processSynthesis();
@@ -526,7 +587,7 @@ function stopAll() {
     // PLAYBACK_STOPPED を通知しない。開始直前に「停止」が届くと capture.html の
     // 表示が「停止しました」→「再生中」と往復し、タブのアイコンも一瞬点滅する。
     const wasActive = isPlaying || isSynthesizing || textQueue.length > 0 || audioQueue.length > 0
-        || currentAudio != null;
+        || currentAudio != null || currentStreamingPlayer != null;
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
     clearPlaybackBufferTimer();
@@ -537,6 +598,10 @@ function stopAll() {
     consecutiveSynthesisFailures = 0;
     // in-flight の再生開始処理を無効化（停止後の AbortError 等を通知しない）
     playbackGeneration++;
+    if (currentStreamingPlayer) {
+        currentStreamingPlayer.stop();
+        currentStreamingPlayer = null;
+    }
 
     if (currentAudio) {
         currentAudio.onended = null;
@@ -552,7 +617,7 @@ function stopAll() {
     }
 
     textQueue = [];
-    audioQueue.forEach(item => URL.revokeObjectURL(item.url));
+    audioQueue.forEach(item => { if (item.url) URL.revokeObjectURL(item.url); });
     audioQueue = [];
 
     isSynthesizing = false;
