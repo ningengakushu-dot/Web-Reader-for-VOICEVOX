@@ -142,6 +142,7 @@ const SETTING_DEFAULTS = {
     intonationScale: 1.0,
     volumeScale: 1.0,
     pauseLengthScale: 1.0,
+    synthesisMode: 'auto',
     iconSize: 32,
     // ページ内アイコンの見た目。dot=従来の半透明の円 / app=本拡張のアイコン /
     // character=読み上げキャラクター / custom=利用者がアップロードした画像
