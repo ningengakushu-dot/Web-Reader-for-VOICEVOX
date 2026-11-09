@@ -114,8 +114,7 @@
             let received = 0;
             let payloadReceived = 0;
             let meta = null;
-            let blockView = null;
-            let pcmLeft = new Uint8Array(4);
+             let pcmLeft = new Uint8Array(4);
             let pcmLeftCount = 0;
             let floats = null;
             let framesInBlock = 0;
@@ -130,17 +129,24 @@
 
             async function timed(promise, timeoutMs) {
                 let timer;
+                let abortListener;
                 try {
                     return await Promise.race([
                         promise,
                         new Promise((_, reject) => {
+                            abortListener = () => reject(abortError());
+                            controller.signal.addEventListener("abort", abortListener, { once: true });
+                            if (controller.signal.aborted) abortListener();
                             timer = setTimeout(() => {
-                                controller.abort();
                                 reject(new Error("VOICEVOXストリームの受信タイムアウト"));
+                                controller.abort();
                             }, timeoutMs);
                         })
                     ]);
-                } finally { clearTimeout(timer); }
+                } finally {
+                    clearTimeout(timer);
+                    if (abortListener) controller.signal.removeEventListener("abort", abortListener);
+                }
             }
 
             function finishIfComplete() {
@@ -208,13 +214,12 @@
                     () => new Float32Array(FRAME_BUFFER));
                 const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 let position = 0;
-                async function frame(frameView, at) {
+                function frame(frameView, at) {
                     for (let channel = 0; channel < meta.channels; channel++) {
                         floats[channel][framesInBlock] =
                             frameView.getInt16(at + channel * 2, true) / 32768;
                     }
                     framesInBlock++;
-                    if (framesInBlock === FRAME_BUFFER) await flushFrames();
                 }
                 if (pcmLeftCount) {
                     const needed = meta.block - pcmLeftCount;
@@ -223,13 +228,15 @@
                     pcmLeftCount += take;
                     position = take;
                     if (pcmLeftCount === meta.block) {
-                        await frame(new DataView(pcmLeft.buffer), 0);
+                        frame(new DataView(pcmLeft.buffer), 0);
                         pcmLeftCount = 0;
+                        if (framesInBlock === FRAME_BUFFER) await flushFrames();
                     }
                 }
                 while (position + meta.block <= bytes.length) {
-                    await frame(view, position);
+                    frame(view, position);
                     position += meta.block;
+                    if (framesInBlock === FRAME_BUFFER) await flushFrames();
                 }
                 if (position < bytes.length) {
                     pcmLeft.set(bytes.subarray(position), 0);
@@ -284,7 +291,6 @@
                         if (headerUsed === 44) {
                             meta = pcmHeader(header, query, length);
                             context = new AudioContext();
-                            blockView = new Uint8Array(meta.block);
                         }
                     }
                     if (meta && offset < value.length) {
