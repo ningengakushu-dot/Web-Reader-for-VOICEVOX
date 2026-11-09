@@ -141,9 +141,9 @@ async function processSynthesis() {
     try {
         // 先に対応を確認し、streaming_talk では大量のクエリ/WAV先読みを避ける。
         // 古いENGINE・不明スタイル・音声API未対応では従来の経路を変更しない。
-        const streaming = !item.forceNormal && globalThis.VVRadioStreaming
-            && await globalThis.VVRadioStreaming.supports(
-                item.settings.speakerId, item.settings.synthesisMode === "normal");
+        const streaming = !item.forceNormal && item.settings.synthesisMode === "auto"
+            && globalThis.VVRadioStreaming
+            && await globalThis.VVRadioStreaming.supports(item.settings.speakerId);
         if (generation !== synthesisGeneration) return;
         if (streaming) {
             const query = item.query || await prepareVoiceQuery(item.text, item.settings);
