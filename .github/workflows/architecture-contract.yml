@@ -21,6 +21,9 @@ jobs:
       - name: バックグラウンド状態遷移の契約検査
         run: node tests/background-state-contract.test.js
 
+      - name: OCR撮影対象タブとページ切り替えの境界検査
+        run: node tests/capture-target.test.js
+
       - name: Content Scriptライフサイクルの契約検査
         run: node tests/content-lifecycle.test.js
 
