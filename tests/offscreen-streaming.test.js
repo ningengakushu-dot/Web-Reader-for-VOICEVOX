@@ -26,9 +26,32 @@ function wav(frames, channels = 1, rate = PCM_RATE) {
 
 function environment({ speakerType = "streaming_talk", feature = true,
     responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {},
-    manifestStatus = 200, onChunk = null } = {}) {
+    manifestStatus = 200, onChunk = null, timeScale = 1 } = {}) {
     let contexts = [];
     let fetchPaths = [];
+    const listenerStats = { active: 0, maxActive: 0, added: 0 };
+    class TrackedAbortController extends AbortController {
+        constructor() {
+            super();
+            const signal = this.signal;
+            const originalAdd = signal.addEventListener.bind(signal);
+            const originalRemove = signal.removeEventListener.bind(signal);
+            const tracked = new Set();
+            signal.addEventListener = (type, listener, options) => {
+                if (type === "abort" && !tracked.has(listener)) {
+                    tracked.add(listener);
+                    listenerStats.added++;
+                    listenerStats.active++;
+                    listenerStats.maxActive = Math.max(listenerStats.active, listenerStats.maxActive);
+                }
+                return originalAdd(type, listener, options);
+            };
+            signal.removeEventListener = (type, listener, options) => {
+                if (type === "abort" && tracked.delete(listener)) listenerStats.active--;
+                return originalRemove(type, listener, options);
+            };
+        }
+    }
     class FakeContext {
         constructor() {
             this.startedAt = Date.now();
@@ -37,7 +60,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
             this.sources = [];
             contexts.push(this);
         }
-        get currentTime() { return (Date.now() - this.startedAt) / 1000; }
+        get currentTime() { return (Date.now() - this.startedAt) / 1000 * timeScale; }
         async resume() { this.state = "running"; }
         createBuffer(channels, frames, rate) {
             const data = Array.from({ length: channels }, () => new Float32Array(frames));
@@ -52,7 +75,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
                     this.at = at;
                     ctx.sources.push(this);
                     this.timer = setTimeout(() => this.onended?.(),
-                        Math.max(1, 1000 * (at + this.buffer.duration - ctx.currentTime)));
+                        Math.max(1, 1000 * (at + this.buffer.duration - ctx.currentTime) / timeScale));
                 },
                 stop() { clearTimeout(this.timer); }
             };
@@ -86,7 +109,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
         };
     }
     const context = vm.createContext({
-        console, setTimeout, clearTimeout, Date, AbortController, Uint8Array, DataView,
+        console, setTimeout, clearTimeout, Date, AbortController: TrackedAbortController, Uint8Array, DataView,
         VOICEVOX_BASE_URL: "http://127.0.0.1:50021",
         AudioContext: noAudioContext ? undefined : FakeContext,
         async fetch(url) {
@@ -107,7 +130,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
     });
     vm.runInContext(fs.readFileSync(path.join(base, "offscreen-streaming.js"), "utf8"),
         context, { filename: "offscreen-streaming.js" });
-    return { api: context.VVRadioStreaming, contexts, fetchPaths, query };
+    return { api: context.VVRadioStreaming, contexts, fetchPaths, query, listenerStats };
 }
 
 async function run() {
@@ -194,6 +217,15 @@ async function run() {
         "test must produce a real scheduling underrun");
     assert.equal(await slowed.api.supports(5), false,
         "underruns temporarily disable streaming for future requests");
+
+    // 5秒先読み上限で待機を繰り返したあとでも、通常終了時にabort listenerは残さない。
+    const backpressure = environment({ responseBytes: wav(24000 * 7),
+        chunkSizes: [44 + 24000 * 7 * 2], timeScale: 25 });
+    await backpressure.api.createPlayer(backpressure.query, 5, () => {}).run();
+    assert.ok(backpressure.listenerStats.maxActive >= 2,
+        "backpressure must exercise both bounded receive and playback wait listeners");
+    assert.equal(backpressure.listenerStats.active, 0,
+        "all abort listeners must be released after normal playback");
 
     const broken = wav(5000);
     broken[0] = 0;
