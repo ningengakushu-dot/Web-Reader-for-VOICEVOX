@@ -182,8 +182,8 @@ async function processSynthesis() {
             const parts = splitSynthesisText(item.text);
             if (parts) {
                 textQueue.unshift(
-                    { text: parts[0], settings: item.settings, splitDepth: splitDepth + 1, notice },
-                    { text: parts[1], settings: item.settings, splitDepth: splitDepth + 1, notice });
+                    { text: parts[0], settings: item.settings, forceNormal: item.forceNormal, splitDepth: splitDepth + 1, notice },
+                    { text: parts[1], settings: item.settings, forceNormal: item.forceNormal, splitDepth: splitDepth + 1, notice });
                 return;
             }
         }
@@ -194,6 +194,7 @@ async function processSynthesis() {
         // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
         // 到達はできるが毎回同じ理由で拒否される場合も同じなので、連続失敗が続いたら諦める。
         // 割っても駄目だった文はここで諦め、次の文へ進む（既に合成済みの音声は再生を終える）。
+        if (isVoicevoxUnreachableError(err)) globalThis.VVRadioStreaming?.invalidate?.();
         if (isVoicevoxUnreachableError(err)
             || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
             textQueue = [];
