@@ -155,7 +155,12 @@
 
             async function scheduleBuffers() {
                 ensureActive();
-                await context.resume();
+                if (context.state !== "running") {
+                    await timed(context.resume(), 3000);
+                    if (context.state !== "running") {
+                        throw new Error("Chromeの音声再生機構を開始できません");
+                    }
+                }
                 for (const buffer of waitingBuffers) {
                     ensureActive();
                     while (started && nextAudioTime - context.currentTime > BUFFER_SECONDS_LIMIT - 0.3) {
