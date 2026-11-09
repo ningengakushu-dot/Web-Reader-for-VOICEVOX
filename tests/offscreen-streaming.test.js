@@ -25,7 +25,8 @@ function wav(frames, channels = 1, rate = PCM_RATE) {
 }
 
 function environment({ speakerType = "streaming_talk", feature = true,
-    responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {} } = {}) {
+    responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {},
+    manifestStatus = 200, onChunk = null } = {}) {
     let contexts = [];
     let fetchPaths = [];
     class FakeContext {
@@ -73,6 +74,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
                     async read() {
                         if (at >= input.length) return { done: true };
                         const size = cuts[count++ % cuts.length];
+                        if (onChunk) await onChunk({ count, at, contexts });
                         const chunk = input.subarray(at, Math.min(input.length, at + size));
                         at += chunk.length;
                         return { done: false, value: chunk };
@@ -91,6 +93,9 @@ function environment({ speakerType = "streaming_talk", feature = true,
             const path = new URL(url).pathname;
             fetchPaths.push(path);
             if (path === "/streaming_synthesis") return streamResponse();
+            if (path === "/engine_manifest" && manifestStatus !== 200) {
+                return { ok: false, status: manifestStatus };
+            }
             const payload = path === "/engine_manifest"
                 ? { uuid: "test", supported_features: { streaming_synthesis: feature } }
                 : path === "/speakers"
@@ -117,6 +122,16 @@ async function run() {
     assert.equal(await environment({ feature: { value: true } }).api.supports(5), false,
         "raw manifest JSON object is not API boolean");
     assert.equal(await environment({ noAudioContext: true }).api.supports(5), false);
+    const oldEngine = environment({ manifestStatus: 404 });
+    assert.equal(await oldEngine.api.supports(5), false);
+    assert.equal(oldEngine.fetchPaths.join(","), "/engine_manifest",
+        "legacy ENGINE must not receive needless /speakers or /version calls");
+    const unsupported = environment({ feature: false });
+    assert.equal(await unsupported.api.supports(5), false);
+    assert.equal(unsupported.fetchPaths.join(","), "/engine_manifest");
+    const offline = environment({ manifestStatus: 500 });
+    assert.equal(await offline.api.supports(5), false);
+    assert.equal(offline.fetchPaths.length, 1);
 
     const valid = wav(10);
     assert.equal(e.api.pcmHeader(valid.subarray(0, 44), e.query, valid.length).dataBytes, 20);
@@ -161,6 +176,24 @@ async function run() {
     stoppedPlayer.stop();
     await assert.rejects(pending, /中断|AbortError/);
     assert.equal(halted.contexts[0].state, "closed", "stop closes audio context");
+
+    // 途中でPCMの供給が止まっても、過去に出した音声を再生し直さず
+    // 残りのサンプルを最後まで再生する（無音期間を完全には消せない）。
+    const slowed = environment({ responseBytes: wav(72000),
+        chunkSizes: [44 + 36000 * 2, 72000],
+        onChunk({ count, contexts }) {
+            if (count === 2) contexts[0].startedAt -= 2300;
+        } });
+    await slowed.api.createPlayer(slowed.query, 5, () => {}).run();
+    const delayedSources = slowed.contexts[0].sources;
+    assert.equal(delayedSources.reduce((sum, source) => sum + source.buffer.data[0].length, 0), 72000,
+        "slow transport must not drop any PCM samples");
+    assert.ok(delayedSources.some((source, index) => index > 0
+        && source.at > delayedSources[index - 1].at
+            + delayedSources[index - 1].buffer.duration + 0.1),
+        "test must produce a real scheduling underrun");
+    assert.equal(await slowed.api.supports(5), false,
+        "underruns temporarily disable streaming for future requests");
 
     const broken = wav(5000);
     broken[0] = 0;
