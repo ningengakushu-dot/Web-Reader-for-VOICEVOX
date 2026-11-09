@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusMsg = document.getElementById('status-msg');
     const loader = document.getElementById('loader');
     const iconRightClickSelect = document.getElementById('iconRightClick-select');
+    const synthesisModeSelect = document.getElementById('synthesisMode-select');
     const iconStyleSelect = document.getElementById('iconStyle-select');
     const iconStylePreview = document.getElementById('iconStyle-preview');
     const iconStyleHintCharacter = document.getElementById('iconStyle-hint-character');
@@ -94,7 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // 保存済み設定の復元はエンジンの起動状態に依存しない。
         // キャラクター一覧の取得失敗でスライダーやアイコン設定まで初期化されないよう、
         // storage の読み出しを先に済ませてから一覧の取得を試みる。
-        const storageKeys = ['speakerId', 'iconRightClickAction', 'iconStyle',
+        const storageKeys = ['speakerId', 'synthesisMode', 'iconRightClickAction', 'iconStyle',
             CHARACTER_ICON_STORAGE_KEY, CUSTOM_ICON_STORAGE_KEY, ...sliders.map(s => s.key)];
         let result = {};
         try {
@@ -114,6 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // 既定は「画面OCR読み上げを開始」（content.js 側の既定値と揃える）
             iconRightClickSelect.value = result.iconRightClickAction === 'options' ? 'options' : 'capture';
+            synthesisModeSelect.value = result.synthesisMode === 'normal' ? 'normal' : 'auto';
 
             const savedStyle = result.iconStyle;
             iconStyleSelect.value = ICON_STYLE_VALUES.includes(savedStyle)
@@ -589,7 +591,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const settings = { speakerId };
+        const settings = { speakerId, synthesisMode: synthesisModeSelect.value === 'normal' ? 'normal' : 'auto' };
         for (const s of sliders) {
             const val = clampSliderValue(s.slider, s.slider.value, s.defaultVal);
             settings[s.key] = val;
