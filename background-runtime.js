@@ -179,10 +179,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ success: false, error: "要求元タブを特定できません" });
                 return false;
             }
-            captureAndRecognizeRegion(request, tab)
+            captureAndRecognizeRegion(request, tab, sender.documentId)
                 .then(() => sendResponse({ success: true }))
                 .catch((err) => {
-                    console.warn("Background: 範囲OCRの開始に失敗:", err.message);
+                    if (err.code !== "CAPTURE_TARGET_CHANGED") {
+                        console.warn("Background: 範囲OCRの開始に失敗:", err.message);
+                    }
                     // captureVisibleTab には毎秒の呼び出し回数制限がある。連続実行で踏んだ場合は
                     // 生のエラー文言だと利用者が対処できないため、原因の分かる案内に差し替える。
                     const message = /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/i.test(err.message)

@@ -143,6 +143,85 @@ chrome.action.onClicked.addListener((tab) => {
     startCaptureOcr(tab);
 });
 
+function captureTargetChangedError() {
+    const error = new Error("タブやページが切り替わったため撮影を中止しました。元のページでもう一度実行してください。");
+    error.code = "CAPTURE_TARGET_CHANGED";
+    return error;
+}
+
+// captureVisibleTab は tab.id ではなく、指定ウィンドウの表示中タブを撮る。
+// 前後の照合だけでは「別タブへ移って戻る」「同じURLを再読み込みする」を見逃すため、
+// 画像をOCR／表示画面へ渡すまで変更イベントも監視し、一度でも変われば破棄する。
+function createCaptureTargetGuard(tab, documentId) {
+    const { id, windowId, url } = tab;
+    let changed = false;
+    const onActivated = info => {
+        if (info.windowId === windowId && info.tabId !== id) changed = true;
+    };
+    const onUpdated = (tabId, info) => {
+        if (tabId === id && (info.status === "loading" || info.url !== undefined)) changed = true;
+    };
+    const onUnavailable = tabId => { if (tabId === id) changed = true; };
+    const listeners = [
+        [chrome.tabs.onActivated, onActivated], [chrome.tabs.onUpdated, onUpdated],
+        [chrome.tabs.onRemoved, onUnavailable], [chrome.tabs.onDetached, onUnavailable]
+    ];
+    for (const [event, listener] of listeners) event.addListener(listener);
+
+    async function check() {
+        if (changed || !Number.isInteger(id) || !Number.isInteger(windowId) || !url) {
+            throw captureTargetChangedError();
+        }
+        try {
+            const active = await chrome.tabs.query({ active: true, windowId });
+            const current = active[0];
+            if (active.length !== 1 || current.id !== id || current.windowId !== windowId
+                || current.url !== url || current.status === "loading" || current.pendingUrl) {
+                throw captureTargetChangedError();
+            }
+            // URLが同じでも、古いContent Scriptから遅れて届いた要求は受け付けない。
+            // documentIds はブラウザが付けた sender.documentId だけを使用する。
+            if (documentId) {
+                const frames = await chrome.scripting.executeScript({
+                    target: { tabId: id, documentIds: [documentId] }, func: () => true
+                });
+                if (frames.length !== 1 || frames[0].documentId !== documentId || frames[0].frameId !== 0) {
+                    throw captureTargetChangedError();
+                }
+            }
+        } catch (error) {
+            changed = true;
+            throw captureTargetChangedError();
+        }
+        if (changed) throw captureTargetChangedError();
+    }
+
+    return {
+        check,
+        async capture() {
+            await check();
+            const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+            await check();
+            return dataUrl;
+        },
+        dispose() {
+            for (const [event, listener] of listeners) event.removeListener(listener);
+        }
+    };
+}
+
+function reportCaptureFailure(tab, error) {
+    if (error.code === "CAPTURE_TARGET_CHANGED") {
+        flashActionBadge(tab.id, "ERR", error.message);
+        return;
+    }
+    console.warn("Background: 画面キャプチャに失敗:", error.message);
+    const isFileUrl = /^file:/i.test(String(tab.url ?? ""));
+    flashActionBadge(tab.id, "ERR", isFileUrl
+        ? "ローカルファイルをキャプチャできません。拡張機能の詳細で「ファイルの URL へのアクセスを許可する」を ON にしてください"
+        : "このページは画面をキャプチャできません（Chromeの設定画面・ウェブストア等）");
+}
+
 // OCR読み上げを開始する。
 // 通常のWebページ: 閲覧中のページの上にオーバーレイを出してその場で範囲選択させる
 // （ページの表示・サイズを一切変えないため。選択後は CAPTURE_OCR_REGION が届く）。
@@ -150,46 +229,51 @@ chrome.action.onClicked.addListener((tab) => {
 // 従来どおり capture.html タブでの範囲選択にフォールバックする。
 async function startCaptureOcr(tab) {
     if (!tab || tab.id == null) return;
-
+    const guard = createCaptureTargetGuard(tab);
     try {
-        // フォールバックの判断材料はここ（注入可否）だけに限る。
-        // 後続の sendMessage の失敗でタブ方式へ落とすと、オーバーレイが出ているのに
-        // capture.html も開いてUIが二重に立ち上がる。
-        await injectContentScripts({ tabId: tab.id });
+        await guard.check();
+        try {
+            // 注入不可ページだけをタブ方式へ切り替える。後続の通信失敗では
+            // フォールバックしない（オーバーレイと別タブの二重表示を防ぐ）。
+            await injectContentScripts({ tabId: tab.id });
+        } catch (err) {
+            await guard.check();
+            await startCaptureOcrInTab(tab, guard);
+            return;
+        }
+        await guard.check();
+        try {
+            await chrome.tabs.sendMessage(tab.id, { type: "START_OCR_SELECTION" }, { frameId: 0 });
+        } catch (err) {
+            console.warn("Background: OCR範囲選択の開始通知に失敗:", err.message);
+        }
+        // 失敗しても本来の経路で改めて生成されるため、先読みは待たない。
+        prewarmOcr();
     } catch (err) {
-        // 注入不可ページ（PDFビューア・chrome:// 等）→ タブ方式へフォールバック
-        startCaptureOcrInTab(tab);
-        return;
+        reportCaptureFailure(tab, err);
+    } finally {
+        guard.dispose();
     }
-
-    try {
-        await chrome.tabs.sendMessage(tab.id, { type: "START_OCR_SELECTION" }, { frameId: 0 });
-    } catch (err) {
-        // 注入は成功しているのでオーバーレイは出ている見込み。ここでの失敗は
-        // 応答チャネルの都合であることが多く、フォールバックの根拠にはしない。
-        console.warn("Background: OCR範囲選択の開始通知に失敗:", err.message);
-    }
-    // 範囲をドラッグしている数秒の間に、文字認識エンジン（同梱の学習データとWASM）を
-    // 先に読み込ませておく。初回だけ発生する待ち時間を利用者に見せないため。
-    // 失敗しても本来の経路で改めて生成されるので無視してよい。
-    prewarmOcr();
 }
 
 // フォールバック: タブをキャプチャし、範囲選択・OCR用の capture.html を開く。
 // 画像データは storage.session 経由で受け渡す（Service Worker の休止に耐えるため）。
 // 固定キーへの上書き保存なので並行実行しても last-write-wins となり、
 // 追い越された側のタブは captureId の不一致で明示的なエラーを表示できる。
-async function startCaptureOcrInTab(tab) {
+async function startCaptureOcrInTab(tab, existingGuard) {
+    const guard = existingGuard || createCaptureTargetGuard(tab);
     let captureStored = false;
+    let captureId;
     try {
-        let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+        let dataUrl = await guard.capture();
         if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
             // captureVisibleTab は毎秒の呼び出し回数制限があるため再キャプチャはせず、
             // 取得済みのPNGをJPEGへ再エンコードしてクォータに収める
             dataUrl = await reencodeCaptureAsJpeg(dataUrl);
         }
 
-        const captureId = typeof crypto?.randomUUID === "function"
+        await guard.check();
+        captureId = typeof crypto?.randomUUID === "function"
             ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         await chrome.storage.session.set({
             [CAPTURE_STORAGE_KEY]: {
@@ -202,21 +286,23 @@ async function startCaptureOcrInTab(tab) {
         });
         captureStored = true;
 
+        await guard.check();
         await chrome.tabs.create({
             url: chrome.runtime.getURL(`capture.html?cid=${captureId}`),
             index: tab.index + 1
         });
     } catch (err) {
         if (captureStored) {
-            try { await chrome.storage.session.remove(CAPTURE_STORAGE_KEY); } catch (error) { /* best effort */ }
+            try {
+                const stored = await chrome.storage.session.get(CAPTURE_STORAGE_KEY);
+                if (stored[CAPTURE_STORAGE_KEY]?.captureId === captureId) {
+                    await chrome.storage.session.remove(CAPTURE_STORAGE_KEY);
+                }
+            } catch (error) { /* best effort */ }
         }
-        // chrome:// ページ等のキャプチャ不可画面ではここに到達する。
-        // ページ内にUIを出せない場面もあるため、ツールバーバッジで簡易通知する。
-        console.warn("Background: 画面キャプチャに失敗:", err.message);
-        const isFileUrl = /^file:/i.test(String(tab.url ?? ""));
-        flashActionBadge(tab.id, "ERR", isFileUrl
-            ? "ローカルファイルをキャプチャできません。拡張機能の詳細で「ファイルの URL へのアクセスを許可する」を ON にしてください"
-            : "このページは画面をキャプチャできません（Chromeの設定画面・ウェブストア等）");
+        reportCaptureFailure(tab, err);
+    } finally {
+        if (!existingGuard) guard.dispose();
     }
 }
 
@@ -237,25 +323,31 @@ function invalidatePendingOcr(tabId) {
 // ページ内オーバーレイで選択された範囲をキャプチャし、offscreen にOCRを依頼する。
 // OCRの完了は offscreen からの OCR_COMPLETE メッセージで受け取り（イベント駆動）、
 // メッセージ応答チャネルを長時間保持しない（Service Worker の休止対策）。
-async function captureAndRecognizeRegion(request, tab) {
-    let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
-        dataUrl = await reencodeCaptureAsJpeg(dataUrl);
+async function captureAndRecognizeRegion(request, tab, documentId) {
+    const guard = createCaptureTargetGuard(tab, documentId);
+    try {
+        let dataUrl = await guard.capture();
+        if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+            dataUrl = await reencodeCaptureAsJpeg(dataUrl);
+        }
+        if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
+            throw new Error("キャプチャ画像が大きすぎます。表示倍率を下げて再度お試しください。");
+        }
+        await setupOffscreen();
+        await guard.check();
+        const requestId = ++ocrRequestSeq;
+        latestOcrRequestByTab.set(tab.id, requestId);
+        await sendToOffscreen({
+            type: "OCR_RECOGNIZE",
+            dataUrl,
+            rect: request.rect,
+            viewportWidth: request.viewportWidth,
+            tabId: tab.id,
+            requestId
+        });
+    } finally {
+        guard.dispose();
     }
-    if (dataUrl.length > CAPTURE_MAX_DATAURL_LENGTH) {
-        throw new Error("キャプチャ画像が大きすぎます。表示倍率を下げて再度お試しください。");
-    }
-    await setupOffscreen();
-    const requestId = ++ocrRequestSeq;
-    latestOcrRequestByTab.set(tab.id, requestId);
-    await sendToOffscreen({
-        type: "OCR_RECOGNIZE",
-        dataUrl,
-        rect: request.rect,
-        viewportWidth: request.viewportWidth,
-        tabId: tab.id,
-        requestId
-    });
 }
 
 // OCR_COMPLETE が今も有効な要求のものかを判定する。無効なら true を返して呼び出し側に

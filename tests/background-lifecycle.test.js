@@ -36,6 +36,19 @@ const session = {
     set(value) { Object.assign(sessionData, value); return Promise.resolve(); },
     remove(key) { delete sessionData[key]; return Promise.resolve(); }
 };
+function tabEvent() {
+    const listeners = new Set();
+    return {
+        addListener(fn) { listeners.add(fn); },
+        removeListener(fn) { listeners.delete(fn); },
+        emit(...args) { for (const fn of listeners) fn(...args); }
+    };
+}
+const removedEvent = tabEvent();
+const updatedEvent = tabEvent();
+onRemoved = (...args) => removedEvent.emit(...args);
+onUpdated = (...args) => updatedEvent.emit(...args);
+const captureTab = { id: 9, windowId: 1, active: true, status: 'complete', url: 'https://example.com/' };
 const chrome = {
     runtime: {
         id: 'ext-id', lastError: null, getURL: (p) => `chrome-extension://ext-id/${p}`,
@@ -57,9 +70,11 @@ const chrome = {
     commands: { onCommand: { addListener() {} } },
     tabs: {
         sendMessage: (tabId, message) => { tabMessages.push({ tabId, message }); return Promise.resolve(); },
-        query: () => Promise.resolve([]), create: () => Promise.resolve(),
+        query: () => Promise.resolve([captureTab]),
+        create: () => Promise.resolve(),
         captureVisibleTab: () => Promise.resolve('data:image/png;base64,AA=='),
-        onRemoved: { addListener(fn) { onRemoved = fn; } }, onUpdated: { addListener(fn) { onUpdated = fn; } }
+        onRemoved: removedEvent, onUpdated: updatedEvent,
+        onActivated: tabEvent(), onDetached: tabEvent()
     },
     offscreen: { createDocument: () => { createDocumentCalls++; offscreenExists = true; return Promise.resolve(); } }
 };
@@ -134,12 +149,12 @@ const send = (message, sender) => new Promise((resolve) => {
     {
         const region = { rect: { x: 0, y: 0, width: 100, height: 50 }, viewportWidth: 1000 };
         // 要求1（タブ9）
-        await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: { id: 9, windowId: 1 }, frameId: 0 });
+        await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: captureTab, frameId: 0 });
         const first = offscreenMessages.find((m) => m.type === 'OCR_RECOGNIZE');
         assert.ok(Number.isInteger(first.requestId), 'OCR要求に通し番号を付ける');
         offscreenMessages.length = 0;
         // 要求2（同じタブで選び直し）
-        await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: { id: 9, windowId: 1 }, frameId: 0 });
+        await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: captureTab, frameId: 0 });
         const second = offscreenMessages.find((m) => m.type === 'OCR_RECOGNIZE');
         assert.ok(second.requestId > first.requestId);
         offscreenMessages.length = 0;
@@ -163,7 +178,7 @@ const send = (message, sender) => new Promise((resolve) => {
         tabMessages.length = 0;
 
         // 要求3の後に、そのタブが別の読み上げ（テキスト選択）を始めた場合
-        await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: { id: 9, windowId: 1 }, frameId: 0 });
+        await send({ type: 'CAPTURE_OCR_REGION', ...region }, { tab: captureTab, frameId: 0 });
         const third = offscreenMessages.find((m) => m.type === 'OCR_RECOGNIZE');
         offscreenMessages.length = 0;
         await send({ type: 'GENERATE_VOICE', text: '選択テキスト。' }, { tab: { id: 9 } });

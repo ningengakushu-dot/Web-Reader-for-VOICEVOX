@@ -68,6 +68,7 @@ Content Script は物理分割後も、再注入時の stale instance 置換、b
 ## 変更対象から見る回帰テスト
 
 - メッセージ認可・数値上限: `tests/security-boundary.test.js`、`tests/security-validation-contract.test.js`
+- OCR撮影対象・タブ切り替え・ページ遷移: `tests/capture-target.test.js`。撮影前後と画像の引き渡し前に対象を照合し、途中の切り替えも監視する。Content Scriptからの要求はブラウザ由来の`sender.documentId`で同じ文書かを確認する。実際の撮影APIは`node tools/test-capture-target-browser.mjs`で検証できる（`tools/ocr-e2e`の依存と`OCR_CHROMIUM`の指定が必要）。
 - Service Worker 状態: `tests/background-state-contract.test.js`、`tests/background-robustness.test.js`、`tests/background-concurrency.test.js`、`tests/background-lifecycle.test.js`
 - 読み上げテキスト整形: `tests/speech-text.test.js`
 - Offscreen 音声処理: `tests/offscreen-buffering.test.js`、`tests/offscreen-prefetch.test.js`、`tests/offscreen-synthesis-failure.test.js`、`tests/offscreen-playback.test.js`、`tests/offscreen-queue.test.js`

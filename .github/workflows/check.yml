@@ -83,6 +83,9 @@ jobs:
       - name: メッセージ境界と入力検証の回帰検査
         run: node tests/security-boundary.test.js
 
+      - name: OCR撮影対象タブとページ切り替えの境界検査
+        run: node tests/capture-target.test.js
+
       - name: 共通入力検証の境界値回帰検査
         run: node tests/security-validation-contract.test.js
 
