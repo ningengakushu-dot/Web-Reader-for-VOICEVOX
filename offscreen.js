@@ -347,7 +347,12 @@ function scheduleOcrWorkerIdleRelease() {
 
             async function scheduleBuffers() {
                 ensureActive();
-                await context.resume();
+                if (context.state !== "running") {
+                    await timed(context.resume(), 3000);
+                    if (context.state !== "running") {
+                        throw new Error("Chromeの音声再生機構を開始できません");
+                    }
+                }
                 for (const buffer of waitingBuffers) {
                     ensureActive();
                     while (started && nextAudioTime - context.currentTime > BUFFER_SECONDS_LIMIT - 0.3) {
@@ -482,7 +487,7 @@ function scheduleOcrWorkerIdleRelease() {
                         offset += count;
                         if (headerUsed === 44) {
                             meta = pcmHeader(header, query, length);
-                            context = new AudioContext();
+                            context = new AudioContext({ sampleRate: meta.sampleRate });
                         }
                     }
                     if (meta && offset < value.length) {
@@ -704,8 +709,8 @@ async function processSynthesis() {
             const parts = splitSynthesisText(item.text);
             if (parts) {
                 textQueue.unshift(
-                    { text: parts[0], settings: item.settings, splitDepth: splitDepth + 1, notice },
-                    { text: parts[1], settings: item.settings, splitDepth: splitDepth + 1, notice });
+                    { text: parts[0], settings: item.settings, forceNormal: item.forceNormal, splitDepth: splitDepth + 1, notice },
+                    { text: parts[1], settings: item.settings, forceNormal: item.forceNormal, splitDepth: splitDepth + 1, notice });
                 return;
             }
         }
@@ -716,6 +721,7 @@ async function processSynthesis() {
         // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
         // 到達はできるが毎回同じ理由で拒否される場合も同じなので、連続失敗が続いたら諦める。
         // 割っても駄目だった文はここで諦め、次の文へ進む（既に合成済みの音声は再生を終える）。
+        if (isVoicevoxUnreachableError(err)) globalThis.VVRadioStreaming?.invalidate?.();
         if (isVoicevoxUnreachableError(err)
             || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
             textQueue = [];
