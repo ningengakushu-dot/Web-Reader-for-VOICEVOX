@@ -25,7 +25,7 @@ function wav(frames, channels = 1, rate = PCM_RATE) {
 }
 
 function environment({ speakerType = "streaming_talk", feature = true,
-    responseBytes = null, chunkSizes = null, noAudioContext = false } = {}) {
+    responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {} } = {}) {
     let contexts = [];
     let fetchPaths = [];
     class FakeContext {
@@ -59,7 +59,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
         }
         async close() { this.state = "closed"; }
     }
-    const query = { outputSamplingRate: PCM_RATE, outputStereo: false };
+    const query = { outputSamplingRate: PCM_RATE, outputStereo: false, ...queryOptions };
     const input = responseBytes || wav(18000);
     const cuts = chunkSizes || [1, 2, 7, 12, 20, 3, 1, 8191, 3, 8192, 65535];
     function streamResponse() {
@@ -108,6 +108,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
 async function run() {
     const e = environment();
     assert.equal(await e.api.supports(5), true);
+    assert.equal(await e.api.supports(5, true), false, "normal-only setting takes precedence");
     assert.equal(await e.api.supports(5), true);
     assert.equal(e.fetchPaths.filter(x => x === "/engine_manifest").length, 1,
         "capability response is cached");
@@ -144,6 +145,22 @@ async function run() {
             "PCM buffers must be scheduled without gaps or overlap");
     }
     assert.equal(e.contexts[0].state, "closed", "AudioContext released after final sample");
+
+    const stereoEnv = environment({ responseBytes: wav(7000, 2, 48000),
+        queryOptions: { outputSamplingRate: 48000, outputStereo: true } });
+    await stereoEnv.api.createPlayer(stereoEnv.query, 5, () => {}).run();
+    const stereoSources = stereoEnv.contexts[0].sources;
+    assert.equal(stereoSources.reduce((sum, x) => sum + x.buffer.data[0].length, 0), 7000);
+    assert.equal(stereoSources[0].buffer.data[0][0], -250 / 32768);
+    assert.equal(stereoSources[0].buffer.data[1][0], -249 / 32768);
+
+    const halted = environment({ responseBytes: wav(72000) });
+    const stoppedPlayer = halted.api.createPlayer(halted.query, 5, () => {});
+    const pending = stoppedPlayer.run();
+    await new Promise(resolve => setTimeout(resolve, 90));
+    stoppedPlayer.stop();
+    await assert.rejects(pending, /中断|AbortError/);
+    assert.equal(halted.contexts[0].state, "closed", "stop closes audio context");
 
     const broken = wav(5000);
     broken[0] = 0;
