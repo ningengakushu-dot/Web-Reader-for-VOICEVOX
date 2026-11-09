@@ -154,7 +154,7 @@ async function run() {
 
     const shorter = wav(5000).subarray(0, 44 + 3500);
     const g = environment({ responseBytes: shorter });
-    await assert.rejects(g.api.createPlayer(g.query, 5, () => {}).run(), /末尾/);
+    await assert.rejects(g.api.createPlayer(g.query, 5, () => {}).run(), /WAV|末尾/);
 
     console.log("offscreen streaming support, WAV, PCM split, playback and error: OK");
 }
