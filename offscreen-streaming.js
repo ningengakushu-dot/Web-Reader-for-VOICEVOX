@@ -7,7 +7,8 @@
     const RESPONSE_IDLE_MS = 20000;
     const RESPONSE_TOTAL_MS = 10 * 60 * 1000;
     const BUFFER_SECONDS_LIMIT = 5;
-    const STARTUP_BUFFER_SECONDS = 0.6;
+    // 受信・合成の揺らぎを吸収するため、0.6秒から余裕を持たせる。
+    const STARTUP_BUFFER_SECONDS = 1.2;
     const FRAME_BUFFER = 4096;
     const MAX_AUDIO_BYTES = 128 * 1024 * 1024;
     const cache = new Map();
@@ -39,16 +40,20 @@
                     if (!res.ok) throw new Error("ENGINE capability status " + res.status);
                     return readJsonResponseWithLimit(res, 1024 * 1024, CAPABILITY_TIMEOUT_MS);
                 });
-            const [manifest, speakers, version] = await Promise.all([
-                get("/engine_manifest"), get("/speakers"), get("/version")
-            ]);
-            const styles = Array.isArray(speakers) ? speakers.flatMap((s) =>
-                Array.isArray(s?.styles) ? s.styles.slice(0, 1000) : []) : [];
-            const style = styles.find((s) => Number(s?.id) === Number(speakerId));
-            supported = manifest?.supported_features?.streaming_synthesis === true
-                && style?.type === "streaming_talk";
-            fingerprint = String(manifest?.uuid || "").slice(0, 100)
-                + ":" + String(version || "").slice(0, 100);
+            // 旧ENGINEでは /engine_manifest 自体が未対応の場合もある。
+            // まず1つだけ問い合わせ、非対応なら /speakers・/version を追加取得しない。
+            const manifest = await get("/engine_manifest");
+            if (manifest?.supported_features?.streaming_synthesis === true) {
+                const [speakers, version] = await Promise.all([
+                    get("/speakers"), get("/version")
+                ]);
+                const styles = Array.isArray(speakers) ? speakers.flatMap((s) =>
+                    Array.isArray(s?.styles) ? s.styles.slice(0, 1000) : []) : [];
+                const style = styles.find((s) => Number(s?.id) === Number(speakerId));
+                supported = style?.type === "streaming_talk";
+                fingerprint = String(manifest?.uuid || "").slice(0, 100)
+                    + ":" + String(version || "").slice(0, 100);
+            }
         } catch (error) {
             supported = false;
         } finally {
@@ -114,7 +119,7 @@
             let received = 0;
             let payloadReceived = 0;
             let meta = null;
-             let pcmLeft = new Uint8Array(4);
+            let pcmLeft = new Uint8Array(4);
             let pcmLeftCount = 0;
             let floats = null;
             let framesInBlock = 0;
@@ -153,6 +158,23 @@
                 if (streamEnded && pendingSources === 0) finishResolve();
             }
 
+            async function waitForPlaybackRoom() {
+                await timed(new Promise((resolve, reject) => {
+                    let timer;
+                    const onAbort = () => {
+                        clearTimeout(timer);
+                        controller.signal.removeEventListener("abort", onAbort);
+                        reject(abortError());
+                    };
+                    timer = setTimeout(() => {
+                        controller.signal.removeEventListener("abort", onAbort);
+                        resolve();
+                    }, 70);
+                    controller.signal.addEventListener("abort", onAbort, { once: true });
+                    if (controller.signal.aborted) onAbort();
+                }), RESPONSE_IDLE_MS);
+            }
+
             async function scheduleBuffers() {
                 ensureActive();
                 if (context.state !== "running") {
@@ -164,19 +186,18 @@
                 for (const buffer of waitingBuffers) {
                     ensureActive();
                     while (started && nextAudioTime - context.currentTime > BUFFER_SECONDS_LIMIT - 0.3) {
-                        await timed(new Promise((resolve) => {
-                            const timer = setTimeout(resolve, 70);
-                            controller.signal.addEventListener("abort", () => {
-                                clearTimeout(timer);
-                                resolve();
-                            }, { once: true });
-                        }), RESPONSE_IDLE_MS);
+                        await waitForPlaybackRoom();
                         ensureActive();
                     }
-                    if (started && nextAudioTime < context.currentTime + 0.01) {
-                        throw new Error("VOICEVOXストリームの再生バッファが不足しました");
+                    // 受信が再生速度に追いつかなくても、残りのサンプルを捨てない。
+                    // 不足分の無音は不可避だが、読み上げ全体を中断するより安全。
+                    const at = started
+                        ? Math.max(nextAudioTime, context.currentTime + 0.02)
+                        : context.currentTime + 0.05;
+                    if (started && at > nextAudioTime) {
+                        // 次回の読み上げは通常合成を優先し、再度の音切れを抑制。
+                        suppress(speaker);
                     }
-                    const at = started ? nextAudioTime : context.currentTime + 0.05;
                     const source = context.createBufferSource();
                     source.buffer = buffer;
                     source.connect(context.destination);
