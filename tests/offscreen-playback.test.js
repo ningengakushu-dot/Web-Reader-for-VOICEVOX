@@ -31,7 +31,8 @@ const chrome = {
     }
 };
 const context = vm.createContext({
-    console, chrome, Audio: MockAudio, setTimeout, clearTimeout, setImmediate, Promise,
+    console, chrome, Audio: MockAudio, AbortController, Uint8Array, DataView,
+    setTimeout, clearTimeout, setImmediate, Promise,
     URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
     VOICEVOX_BASE_URL: 'http://127.0.0.1:50021', VOICEVOX_FETCH_TIMEOUT_MS: 100,
     VOICEVOX_SYNTHESIS_TIMEOUT_MS: 100, OCR_WORKER_IDLE_RELEASE_MS: 1000,
