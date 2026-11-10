@@ -27,7 +27,7 @@ function wav(frames, channels = 1, rate = PCM_RATE) {
 function environment({ speakerType = "streaming_talk", feature = true,
     responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {},
     manifestStatus = 200, onChunk = null, timeScale = 1, timerScale = 1,
-    onContextClose = null, onSourceStop = null } = {}) {
+    onContextClose = null, onSourceStop = null, onReaderCancel = null } = {}) {
     let contexts = [];
     let fetchPaths = [];
     const listenerStats = { active: 0, maxActive: 0, added: 0 };
@@ -112,7 +112,9 @@ function environment({ speakerType = "streaming_talk", feature = true,
                         at += chunk.length;
                         return { done: false, value: chunk };
                     },
-                    async cancel() {},
+                    async cancel() {
+                        if (onReaderCancel) await onReaderCancel({ request, contexts });
+                    },
                     releaseLock() {}
                 };
             } }
@@ -391,6 +393,63 @@ async function run() {
     await freshEnv.api.createPlayer(freshEnv.query, 5, () => {}).run();
     assert.equal(freshEnv.listenerStats.active, 0);
     assert.equal(freshEnv.contexts[0].state, "closed");
+
+    // ① reader.cancel()が返らない場合でもclose()が先に完了し、
+    // 有限時間で失敗を返す。以降の再生は安全性を確認できないため禁止。
+    const stuckCancel = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        timerScale: 40,
+        onChunk({ count }) { if (count === 2) return new Promise(() => {}); },
+        onReaderCancel() { return new Promise(() => {}); }
+    });
+    const cancelPlayer = stuckCancel.api.createPlayer(stuckCancel.query, 5, () => {});
+    const cancelRunning = cancelPlayer.run();
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(stuckCancel.contexts.length, 1);
+    await assert.rejects(cancelPlayer.stop(), /再読み込み/);
+    await assert.rejects(cancelRunning, /再読み込み/);
+    assert.equal(stuckCancel.contexts[0].state, "closed",
+        "AudioContext closes without waiting for a stuck reader.cancel()");
+    assert.equal(stuckCancel.api.cleanupStatus(), "failed");
+    assert.equal(stuckCancel.listenerStats.active, 0);
+    await assert.rejects(stuckCancel.api.createPlayer(stuckCancel.query, 5, () => {}).run(),
+        /再読み込み/, "stuck cancel must not block forever or allow reuse");
+
+    // ② close()が拒否された場合はSTOP失敗を返し、次のAudioContextを作らない。
+    const failedClose = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        onChunk({ count }) { if (count === 2) return new Promise(() => {}); },
+        onContextClose() { throw new Error("audio device close refused"); }
+    });
+    const failurePlayer = failedClose.api.createPlayer(failedClose.query, 5, () => {});
+    const failureRunning = failurePlayer.run();
+    await new Promise(resolve => setTimeout(resolve, 15));
+    await assert.rejects(failurePlayer.stop(), /再読み込み/);
+    await assert.rejects(failureRunning, /再読み込み/);
+    assert.equal(failedClose.api.cleanupStatus(), "failed");
+    assert.equal(failedClose.contexts.length, 1);
+    await assert.rejects(failedClose.api.createPlayer(failedClose.query, 5, () => {}).run(),
+        /再読み込み/);
+    assert.equal(failedClose.contexts.length, 1, "no second AudioContext after close failure");
+    assert.equal(failedClose.listenerStats.active, 0);
+
+    // ③ close()が永久に未解決でも、停止完了応答は期限付きで失敗し再生を禁止。
+    const stuckClose = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        timerScale: 100,
+        onChunk({ count }) { if (count === 2) return new Promise(() => {}); },
+        onContextClose() { return new Promise(() => {}); }
+    });
+    const closingPlayer = stuckClose.api.createPlayer(stuckClose.query, 5, () => {});
+    const closingRun = closingPlayer.run();
+    await new Promise(resolve => setTimeout(resolve, 15));
+    await assert.rejects(closingPlayer.stop(), /再読み込み/);
+    await assert.rejects(closingRun, /再読み込み/);
+    assert.equal(stuckClose.api.cleanupStatus(), "failed");
+    assert.equal(stuckClose.contexts.length, 1);
+    await assert.rejects(stuckClose.api.createPlayer(stuckClose.query, 5, () => {}).run(),
+        /再読み込み/);
+    assert.equal(stuckClose.listenerStats.active, 0);
 
     const broken = wav(5000);
     broken[0] = 0;

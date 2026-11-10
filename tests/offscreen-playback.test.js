@@ -130,6 +130,9 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     context.readJsonResponseWithLimit = async response => response.payload ?? ({
         accent_phrases: [], outputSamplingRate: 24000, outputStereo: false
     });
+    let closeBarrier = null;
+    let rejectClose = false;
+    let holdNextRead = false;
     class IntegratedAudioContext {
         constructor() {
             this.origin = Date.now();
@@ -157,7 +160,11 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
                 stop() { this.cancelled = true; }
             };
         }
-        async close() { this.state = 'closed'; }
+        async close() {
+            if (closeBarrier) await closeBarrier;
+            if (rejectClose) throw new Error('close device rejected');
+            this.state = 'closed';
+        }
     }
     const wavBytes = new Uint8Array(44 + 45000 * 2);
     const view = new DataView(wavBytes.buffer);
@@ -196,6 +203,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
                         if (readCount === 1) {
                             return { done: false, value: wavBytes.subarray(0, 44 + 35000 * 2) };
                         }
+                        if (holdNextRead) return new Promise(() => {});
                         integratedContext.forcedClock =
                             integratedContext.sources[0].at + (integratedStreamRequests === 1 ? -0.005 : 0.005);
                         throw new Error('injected boundary transport failure');
@@ -230,6 +238,61 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     assert.strictEqual(normalSynthesisCalls, synthesisBeforeAudible,
         'once audio start time has passed, never restart from the first PCM');
     assert.ok(notifications.some(m => m.type === 'PLAYBACK_ERROR'));
+
+    // STOP_AUDIO成功を、音声Contextの非同期close終了より前に返さないこと。
+    // 同じOffscreen VM内でSTOP中に到着した通常合成も終了まで保留する。
+    let releaseClose;
+    closeBarrier = new Promise(resolve => { releaseClose = resolve; });
+    holdNextRead = true;
+    context.VVRadioStreaming.invalidate(1);
+    const beforeStopSynth = normalSynthesisCalls;
+    response = await enqueue('stream playing before STOP_AUDIO', 'auto');
+    assert.strictEqual(response.success, true);
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.ok(integratedContext.sources.length > 0);
+    let stopResponse;
+    let stopReturn;
+    const stopReply = new Promise(resolve => {
+        stopReturn = listener({ type: 'STOP_AUDIO', target: 'offscreen' },
+            { id: 'ext-id' }, result => { stopResponse = result; resolve(result); });
+    });
+    assert.strictEqual(stopReturn, true, 'STOP_AUDIO must keep the response port open');
+    let waitingEnqueueResult;
+    const waitingEnqueue = enqueue('queued normal after stop').then(result => {
+        waitingEnqueueResult = result;
+        return result;
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.strictEqual(stopResponse, undefined, 'STOP success before close completion is forbidden');
+    assert.strictEqual(waitingEnqueueResult, undefined,
+        'a new normal synthesis must wait for prior AudioContext close');
+    assert.strictEqual(normalSynthesisCalls, beforeStopSynth);
+    releaseClose();
+    assert.strictEqual((await stopReply).success, true);
+    assert.strictEqual((await waitingEnqueue).success, true);
+    await wait();
+    assert.strictEqual(normalSynthesisCalls, beforeStopSynth + 1);
+    assert.ok(notifications.some(m => m.type === 'PLAYBACK_STOPPED'));
+
+    // close()失敗後はSTOP_AUDIO失敗を返し、通常合成まで禁止する。
+    closeBarrier = null;
+    rejectClose = true;
+    holdNextRead = true;
+    context.VVRadioStreaming.invalidate(1);
+    response = await enqueue('close fails on STOP_AUDIO', 'auto');
+    assert.strictEqual(response.success, true);
+    await new Promise(resolve => setTimeout(resolve, 15));
+    const failedStop = await new Promise(resolve => {
+        const keep = listener({ type: 'STOP_AUDIO', target: 'offscreen' },
+            { id: 'ext-id' }, resolve);
+        assert.strictEqual(keep, true);
+    });
+    assert.strictEqual(failedStop.success, false);
+    assert.match(failedStop.error, /再読み込み/);
+    const beforeBlockedEnqueue = normalSynthesisCalls;
+    const blockedEnqueue = await enqueue('normal must be blocked after failed close');
+    assert.strictEqual(blockedEnqueue.success, false);
+    assert.strictEqual(normalSynthesisCalls, beforeBlockedEnqueue);
 
     console.log('offscreen playback terminal states and stream fallback: PASSED');
 })().catch((error) => { console.error(error); process.exit(1); });
