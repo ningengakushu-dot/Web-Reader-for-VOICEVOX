@@ -271,7 +271,7 @@ async function run() {
     // タイムアウトだけ短縮して実時間では待たない（20ms=20秒相当）。
     const recoverStall = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        timerScale: 1000,
+        timerScale: 1000, timeScale: 1000,
         async onChunk({ count }) {
             if (count === 2) await new Promise(resolve => setTimeout(resolve, 35));
         }
@@ -286,7 +286,7 @@ async function run() {
     // 合計60秒相当の供給停止は無制限に待たず終了する。
     const fatalStall = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        timerScale: 1000,
+        timerScale: 1000, timeScale: 1000,
         async onChunk({ count }) {
             if (count === 2) await new Promise(resolve => setTimeout(resolve, 90));
         }
