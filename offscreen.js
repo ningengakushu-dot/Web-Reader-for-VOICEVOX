@@ -259,6 +259,28 @@ function scheduleOcrWorkerIdleRelease() {
         ]).finally(() => clearTimeout(timer));
     }
 
+    // Promise.reject(undefined/null)やmessage getterの例外が、失敗状態の記録を妨げない。
+    function describeRejection(reason) {
+        try {
+            if (reason == null) return String(reason);
+            const message = reason.message;
+            return typeof message === "string" && message ? message : String(reason);
+        } catch (error) {
+            return "詳細を取得できない終了エラー";
+        }
+    }
+
+    // Fetchのabort後、ReadableStreamはerrored状態になるため、
+    // cancel()が既に報告された読取エラーやAbortErrorで拒否されても正常な場合がある。
+    function isExpectedCancelRejection(reason, previousReadError) {
+        try {
+            return (reason != null && reason.name === "AbortError")
+                || (previousReadError.failed && Object.is(reason, previousReadError.reason));
+        } catch (error) {
+            return false;
+        }
+    }
+
     function invalidate(speakerId) {
         if (speakerId == null) cache.clear();
         else cache.delete(VOICEVOX_BASE_URL + ":" + speakerId);
@@ -346,6 +368,7 @@ function scheduleOcrWorkerIdleRelease() {
         let firstScheduledAt = null;
         let stopPromise = null;
         let cleanupSucceeded = false;
+        const previousReadError = { failed: false, reason: undefined };
         const sources = new Set();
         let startTimer = null;
         const abortError = () => new Error("ストリーミング再生が中断されました");
@@ -382,17 +405,27 @@ function scheduleOcrWorkerIdleRelease() {
                     boundedCleanup(closeRequest, CONTEXT_CLOSE_WAIT_MS, "AudioContext"),
                     boundedCleanup(cancelRequest, CANCEL_WAIT_MS, "ストリーム")
                 ]);
-                const issues = [];
-                if (!cancelledSources) issues.push("予約音源の停止に失敗しました");
-                if (closeResult.status === "rejected") issues.push(closeResult.reason.message);
-                if (cancelResult.status === "rejected") issues.push(cancelResult.reason.message);
-                if (issues.length) {
-                    console.error("Offscreen: ストリーミング終了失敗:", issues.join(" / "));
-                    // 解放されていない可能性があるAudioContextやReaderを使い回さない。
-                    // Offscreenの再生成まで通常合成・ストリーミングとも読み上げを禁止する。
+                const unexpectedCancelFailure = cancelResult.status === "rejected"
+                    && !isExpectedCancelRejection(cancelResult.reason, previousReadError);
+                const unsafe = !cancelledSources || closeResult.status === "rejected"
+                    || unexpectedCancelFailure;
+                if (unsafe) {
+                    // エラー内容の整形・ログ出力より先に必ず安全ロックを確定する。
                     cleanupFailure ||= new Error(
                         "音声再生の安全な終了を確認できません。拡張機能を再読み込みしてください。");
                     if (playbackState === "scheduled") playbackState = "started";
+                    const issues = [];
+                    if (!cancelledSources) issues.push("予約音源の停止に失敗しました");
+                    if (closeResult.status === "rejected") {
+                        issues.push("AudioContext: " + describeRejection(closeResult.reason));
+                    }
+                    if (unexpectedCancelFailure) {
+                        issues.push("Reader: " + describeRejection(cancelResult.reason));
+                    }
+                    try {
+                        console.error("Offscreen: ストリーミング終了失敗:", issues.join(" / "));
+                    } catch (error) {}
+                    // close()失敗や取消し未解決は再開しない。予期されたabort拒否はここに入らない。
                     throw cleanupFailure;
                 }
                 cleanupSucceeded = true;
@@ -479,11 +512,22 @@ function scheduleOcrWorkerIdleRelease() {
                 const remainingTime = deadline - Date.now();
                 if (remainingTime <= 0) throw new Error("ストリーミング受信の時間上限を超えました");
                 // 同じ reader.read() を待ち直す。再度 read() を呼ぶと受信順序が変わる。
-                const readPromise = reader.read();
+                let readPromise;
+                try {
+                    readPromise = Promise.resolve(reader.read()).catch(error => {
+                        previousReadError.failed = true;
+                        previousReadError.reason = error;
+                        throw error;
+                    });
+                } catch (error) {
+                    previousReadError.failed = true;
+                    previousReadError.reason = error;
+                    throw error;
+                }
                 try {
                     return await timed(readPromise, Math.min(RESPONSE_IDLE_MS, remainingTime), false);
                 } catch (error) {
-                    if (!error.streamIdleTimeout) throw error;
+                    if (!error?.streamIdleTimeout) throw error;
                     ensureActive();
                     const graceMs = Math.min(RESPONSE_STALL_GRACE_MS, deadline - Date.now());
                     if (graceMs <= 0) {

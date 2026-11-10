@@ -417,6 +417,105 @@ async function run() {
     await assert.rejects(stuckCancel.api.createPlayer(stuckCancel.query, 5, () => {}).run(),
         /再読み込み/, "stuck cancel must not block forever or allow reuse");
 
+    // 標準Fetchで起こり得るAbortErrorでのreader.cancel()拒否は正常な停止として扱う。
+    // AudioContextが解放済みなら通常合成・次回ストリーミングを利用可能にする。
+    const abortedCancel = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        onChunk({ count }) { if (count === 2) return new Promise(() => {}); },
+        onReaderCancel() {
+            throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+        }
+    });
+    const abortPlayer = abortedCancel.api.createPlayer(abortedCancel.query, 5, () => {});
+    const abortRun = abortPlayer.run();
+    await new Promise(resolve => setTimeout(resolve, 15));
+    await abortPlayer.stop();
+    await assert.rejects(abortRun, /中断|AbortError/);
+    assert.equal(abortedCancel.api.cleanupStatus(), "ready");
+    assert.equal(abortedCancel.contexts[0].state, "closed");
+    assert.equal(abortedCancel.listenerStats.active, 0);
+    assert.equal(await abortedCancel.api.waitForCleanup(), undefined);
+    await abortedCancel.api.createPlayer(abortedCancel.query, 5, () => {}).stop();
+    assert.equal(abortedCancel.api.cleanupStatus(), "ready");
+
+    // 通信エラーでread()とcancel()が同じエラーを返す状態も致命的とは扱わない。
+    const networkError = new TypeError("network connection failed");
+    const erroredStream = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        onChunk({ count }) { if (count === 2) throw networkError; },
+        onReaderCancel() { throw networkError; }
+    });
+    const erroredPlayer = erroredStream.api.createPlayer(erroredStream.query, 5, () => {});
+    await assert.rejects(erroredPlayer.run(), /network connection failed/);
+    assert.equal(erroredStream.api.cleanupStatus(), "ready");
+    assert.equal(erroredStream.contexts[0].state, "closed");
+    assert.equal(erroredPlayer.canFallback, true,
+        "prestart network failure must allow normal synthesis after safe cancellation");
+    assert.equal(erroredStream.listenerStats.active, 0);
+    await erroredStream.api.createPlayer(erroredStream.query, 5, () => {}).stop();
+
+    // 失敗理由がundefined/nullでもTypeErrorで状態設定をスキップしない。
+    for (const rejectedReason of [undefined, null]) {
+        const primitiveClose = environment({
+            responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+            onChunk({ count }) { if (count === 2) return new Promise(() => {}); },
+            onContextClose() { return Promise.reject(rejectedReason); }
+        });
+        const rejectedPlayer = primitiveClose.api.createPlayer(primitiveClose.query, 5, () => {});
+        const rejectedRun = rejectedPlayer.run();
+        await new Promise(resolve => setTimeout(resolve, 15));
+        await assert.rejects(rejectedPlayer.stop(), /再読み込み/);
+        await assert.rejects(rejectedRun, /再読み込み/);
+        assert.equal(primitiveClose.api.cleanupStatus(), "failed",
+            "primitive close rejection must always lock unsafe context");
+        await assert.rejects(primitiveClose.api.createPlayer(primitiveClose.query, 5, () => {}).run(),
+            /再読み込み/);
+        assert.equal(primitiveClose.contexts.length, 1);
+        assert.equal(primitiveClose.listenerStats.active, 0);
+    }
+
+    // 読取エラーが無いのにcancel()がundefined/nullで拒否したら安全と推定しない。
+    for (const rejectedReason of [undefined, null]) {
+        const primitiveCancel = environment({
+            responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+            onChunk({ count }) { if (count === 2) return new Promise(() => {}); },
+            onReaderCancel() { return Promise.reject(rejectedReason); }
+        });
+        const rejectedPlayer = primitiveCancel.api.createPlayer(primitiveCancel.query, 5, () => {});
+        const rejectedRun = rejectedPlayer.run();
+        await new Promise(resolve => setTimeout(resolve, 15));
+        await assert.rejects(rejectedPlayer.stop(), /再読み込み/);
+        await assert.rejects(rejectedRun, /再読み込み/);
+        assert.equal(primitiveCancel.api.cleanupStatus(), "failed");
+        assert.equal(primitiveCancel.contexts[0].state, "closed");
+        assert.equal(primitiveCancel.listenerStats.active, 0);
+    }
+
+    // 停止と再開を50回繰り返しても以前のreader / AudioContextは残さない。
+    const repeated = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        onChunk({ count }) { if (count === 2) return new Promise(() => {}); },
+        onReaderCancel() {
+            throw Object.assign(new Error("aborted"), { name: "AbortError" });
+        }
+    });
+    for (let n = 0; n < 50; n++) {
+        const item = repeated.api.createPlayer(repeated.query, 5, () => {});
+        const running = item.run();
+        for (let spin = 0; repeated.contexts.length <= n
+            || repeated.contexts[n].sources.length === 0; spin++) {
+            assert.ok(spin < 200, "iteration " + n + " must schedule audio");
+            await new Promise(resolve => setTimeout(resolve, 1));
+        }
+        await item.stop();
+        await assert.rejects(running, /中断|AbortError/);
+        assert.equal(repeated.api.cleanupStatus(), "ready");
+        assert.equal(repeated.listenerStats.active, 0);
+        assert.equal(repeated.contexts[n].state, "closed");
+        assert.ok(repeated.contexts[n].sources.every(source => source.stopped));
+    }
+    assert.equal(repeated.contexts.length, 50);
+
     // ② close()が拒否された場合はSTOP失敗を返し、次のAudioContextを作らない。
     const failedClose = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
