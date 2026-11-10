@@ -311,9 +311,11 @@ async function run() {
         onSourceStop() { throw new Error("stop not guaranteed"); }
     });
     const cancelFailPlayer = cancelFail.api.createPlayer(cancelFail.query, 5, () => {});
-    await assert.rejects(cancelFailPlayer.run(), /prestart error/);
+    await assert.rejects(cancelFailPlayer.run(), /再読み込み/,
+        "failed source cancellation must surface fatal cleanup instead of transport error");
     assert.equal(cancelFailPlayer.canFallback, false,
         "failed cancellation must not start potentially duplicated normal synthesis");
+    assert.equal(cancelFail.api.cleanupStatus(), "failed");
 
     // 20秒を超える一時停止から復旧したら、同じ reader.read() で再開できる。
     // タイムアウトだけ短縮して実時間では待たない（20ms=20秒相当）。
