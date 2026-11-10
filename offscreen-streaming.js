@@ -5,7 +5,12 @@
     const CAPABILITY_TTL_MS = 60000;
     const FAILURE_TTL_MS = 30000;
     const RESPONSE_IDLE_MS = 20000;
+    // 20秒の無通信は一時停止の可能性がある。さらに40秒だけ同じreadを待ち、
+    // 合計60秒で打ち切る（際限なく待機しない）。
+    const RESPONSE_STALL_GRACE_MS = 40000;
     const RESPONSE_TOTAL_MS = 10 * 60 * 1000;
+    // 再生予約時刻の境界での重複再生を防ぐため、開始判定は10ms手前から保守的に扱う。
+    const START_BOUNDARY_GUARD_SECONDS = 0.01;
     const BUFFER_SECONDS_LIMIT = 5;
     // 受信・合成の揺らぎを吸収するため、0.6秒から余裕を持たせる。
     const STARTUP_BUFFER_SECONDS = 1.2;
@@ -94,13 +99,20 @@
         let context = null;
         let reader = null;
         let stopped = false;
-        let started = false;
+        let started = false; // Web Audioへの予約済み。実際の音声開始とは区別する。
+        let firstScheduledAt = null;
+        let outputStarted = false;
         const sources = new Set();
         let startTimer = null;
         const abortError = () => new Error("ストリーミング再生が中断されました");
         const ensureActive = () => { if (stopped || controller.signal.aborted) throw abortError(); };
+        const hasOutputStarted = () => outputStarted || (firstScheduledAt !== null
+            && context !== null
+            && context.currentTime >= firstScheduledAt - START_BOUNDARY_GUARD_SECONDS);
         const stop = () => {
             if (stopped) return;
+            // close() 後は音声クロックが参照できないため、キャンセル前に判定を保存。
+            outputStarted = hasOutputStarted();
             stopped = true;
             controller.abort();
             if (startTimer != null) clearTimeout(startTimer);
@@ -132,7 +144,7 @@
             const finished = new Promise((resolve) => { finishResolve = resolve; });
             const deadline = Date.now() + RESPONSE_TOTAL_MS;
 
-            async function timed(promise, timeoutMs) {
+            async function timed(promise, timeoutMs, abortOnTimeout = true) {
                 let timer;
                 let abortListener;
                 try {
@@ -143,8 +155,10 @@
                             controller.signal.addEventListener("abort", abortListener, { once: true });
                             if (controller.signal.aborted) abortListener();
                             timer = setTimeout(() => {
-                                reject(new Error("VOICEVOXストリームの受信タイムアウト"));
-                                controller.abort();
+                                const error = new Error("VOICEVOXストリームの受信タイムアウト");
+                                error.streamIdleTimeout = true;
+                                reject(error);
+                                if (abortOnTimeout) controller.abort();
                             }, timeoutMs);
                         })
                     ]);
@@ -173,6 +187,24 @@
                     controller.signal.addEventListener("abort", onAbort, { once: true });
                     if (controller.signal.aborted) onAbort();
                 }), RESPONSE_IDLE_MS);
+            }
+
+            async function readStreamChunk() {
+                const remainingTime = deadline - Date.now();
+                if (remainingTime <= 0) throw new Error("ストリーミング受信の時間上限を超えました");
+                // 同じ reader.read() を待ち直す。再度 read() を呼ぶと受信順序が変わる。
+                const readPromise = reader.read();
+                try {
+                    return await timed(readPromise, Math.min(RESPONSE_IDLE_MS, remainingTime), false);
+                } catch (error) {
+                    if (!error.streamIdleTimeout) throw error;
+                    ensureActive();
+                    const graceMs = Math.min(RESPONSE_STALL_GRACE_MS, deadline - Date.now());
+                    if (graceMs <= 0) {
+                        throw new Error("ストリーミング受信の時間上限を超えました");
+                    }
+                    return timed(readPromise, graceMs);
+                }
             }
 
             async function scheduleBuffers() {
@@ -212,11 +244,21 @@
                     source.start(at);
                     nextAudioTime = at + buffer.duration;
                     if (!started) {
-                        started = true;  // 出力予約以降は通常合成を先頭から再試行しない
-                        startTimer = setTimeout(() => {
+                        started = true;
+                        firstScheduledAt = at;
+                        const reportActualStart = () => {
                             startTimer = null;
-                            if (!stopped && context.state === "running") onStart();
-                        }, Math.max(0, (at - context.currentTime) * 1000));
+                            if (stopped || context.state !== "running") return;
+                            const remainingMs = (firstScheduledAt - context.currentTime) * 1000;
+                            if (remainingMs > 0) {
+                                startTimer = setTimeout(reportActualStart, Math.max(1, remainingMs));
+                                return;
+                            }
+                            outputStarted = true;
+                            onStart();
+                        };
+                        startTimer = setTimeout(reportActualStart,
+                            Math.max(1, (at - context.currentTime) * 1000));
                     }
                 }
                 waitingBuffers = [];
@@ -295,10 +337,7 @@
                 reader = response.body.getReader();
                 while (true) {
                     ensureActive();
-                    const remainingTime = deadline - Date.now();
-                    if (remainingTime <= 0) throw new Error("ストリーミング受信の時間上限を超えました");
-                    const { done, value } = await timed(reader.read(),
-                        Math.min(RESPONSE_IDLE_MS, remainingTime));
+                    const { done, value } = await readStreamChunk();
                     ensureActive();
                     if (done) break;
                     if (!(value instanceof Uint8Array) || value.byteLength > 2 * 1024 * 1024) {
@@ -349,7 +388,7 @@
                 }
             }
         }
-        return { run, stop, get started() { return started; } };
+        return { run, stop, get started() { return hasOutputStarted(); } };
     }
 
     globalThis.VVRadioStreaming = Object.freeze({ supports, invalidate, suppress, createPlayer, pcmHeader });
