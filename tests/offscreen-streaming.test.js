@@ -27,7 +27,8 @@ function wav(frames, channels = 1, rate = PCM_RATE) {
 function environment({ speakerType = "streaming_talk", feature = true,
     responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {},
     manifestStatus = 200, onChunk = null, timeScale = 1, timerScale = 1,
-    onContextClose = null, onSourceStop = null, onReaderCancel = null } = {}) {
+    onContextClose = null, onSourceStop = null, onReaderCancel = null,
+    makeReader = null } = {}) {
     let contexts = [];
     let fetchPaths = [];
     const listenerStats = { active: 0, maxActive: 0, added: 0 };
@@ -95,7 +96,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
     const input = responseBytes || wav(18000);
     const cuts = chunkSizes || [1, 2, 7, 12, 20, 3, 1, 8191, 3, 8192, 65535];
     let requestNo = 0;
-    function streamResponse() {
+    function streamResponse(signal) {
         const request = ++requestNo;
         let at = 0;
         let count = 0;
@@ -103,6 +104,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
             ok: true,
             headers: { get(name) { return name === "content-length" ? String(input.length) : null; } },
             body: { getReader() {
+                if (makeReader) return makeReader({ request, contexts, bytes: input, signal });
                 return {
                     async read() {
                         if (at >= input.length) return { done: true };
@@ -126,10 +128,10 @@ function environment({ speakerType = "streaming_talk", feature = true,
         clearTimeout, Date, AbortController: TrackedAbortController, Uint8Array, DataView,
         VOICEVOX_BASE_URL: "http://127.0.0.1:50021",
         AudioContext: noAudioContext ? undefined : FakeContext,
-        async fetch(url) {
+        async fetch(url, options = {}) {
             const path = new URL(url).pathname;
             fetchPaths.push(path);
-            if (path === "/streaming_synthesis") return streamResponse();
+            if (path === "/streaming_synthesis") return streamResponse(options.signal);
             if (path === "/engine_manifest" && manifestStatus !== 200) {
                 return { ok: false, status: manifestStatus };
             }
@@ -453,6 +455,61 @@ async function run() {
         "prestart network failure must allow normal synthesis after safe cancellation");
     assert.equal(erroredStream.listenerStats.active, 0);
     await erroredStream.api.createPlayer(erroredStream.query, 5, () => {}).stop();
+
+    // Node標準WHATWG ReadableStreamを使い、実際のerrored stateでcancel()が
+    // 保持エラーを再度rejectする挙動をプレイヤーと結合して確認する。
+    const nativeStreamError = new TypeError("native ReadableStream connection error");
+    const nativeErrored = environment({
+        responseBytes: wav(45000),
+        makeReader({ bytes }) {
+            let pushed = false;
+            return new ReadableStream({
+                pull(controller) {
+                    if (!pushed) {
+                        pushed = true;
+                        controller.enqueue(bytes.subarray(0, 44 + 35000 * 2));
+                    } else {
+                        controller.error(nativeStreamError);
+                    }
+                }
+            }, { highWaterMark: 0 }).getReader();
+        }
+    });
+    const nativeErroredPlayer = nativeErrored.api.createPlayer(nativeErrored.query, 5, () => {});
+    await assert.rejects(nativeErroredPlayer.run(), /native ReadableStream connection error/);
+    assert.equal(nativeErrored.api.cleanupStatus(), "ready");
+    assert.equal(nativeErroredPlayer.canFallback, true);
+    assert.equal(nativeErrored.contexts[0].state, "closed");
+    assert.equal(nativeErrored.listenerStats.active, 0);
+
+    // AbortSignalを実際のReadableStream controller.errorに接続する。
+    // Fetch相当のabort後、同じReader.cancel()がAbortErrorでrejectしても
+    // stop()は成功、次の読み上げは利用できる。
+    const nativeAborted = environment({
+        responseBytes: wav(45000),
+        makeReader({ bytes, signal }) {
+            const streamAbortError = Object.assign(
+                new Error("native stream aborted"), { name: "AbortError" });
+            return new ReadableStream({
+                start(controller) {
+                    controller.enqueue(bytes.subarray(0, 44 + 35000 * 2));
+                    signal.addEventListener("abort", () => controller.error(streamAbortError),
+                        { once: true });
+                }
+            }, { highWaterMark: 0 }).getReader();
+        }
+    });
+    const nativeAbortPlayer = nativeAborted.api.createPlayer(nativeAborted.query, 5, () => {});
+    const nativeAbortRun = nativeAbortPlayer.run();
+    for (let attempts = 0; nativeAborted.contexts[0]?.sources.length !== 1; attempts++) {
+        assert.ok(attempts < 100, "native ReadableStream should reserve a source");
+        await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    await nativeAbortPlayer.stop();
+    await assert.rejects(nativeAbortRun, /中断|AbortError/);
+    assert.equal(nativeAborted.api.cleanupStatus(), "ready");
+    assert.equal(nativeAborted.contexts[0].state, "closed");
+    assert.equal(nativeAborted.listenerStats.active, 0);
 
     // 失敗理由がundefined/nullでもTypeErrorで状態設定をスキップしない。
     for (const rejectedReason of [undefined, null]) {
