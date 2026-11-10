@@ -1203,7 +1203,9 @@ async function processPlayback(continuePlayback = false) {
                 isPlaying = false;
                 if (completed && textQueue.length === 0 && audioQueue.length === 0
                     && !isSynthesizing) notifyBackground("PLAYBACK_ENDED");
-                if (globalThis.VVRadioStreaming.cleanupStatus?.() === "ready") {
+                // テストモックや旧拡張との境界で状態APIが存在しない場合は通常経路を維持。
+                // 実プレイヤーの終了失敗時はfailedとなり、後続の音声を開始しない。
+                if ((globalThis.VVRadioStreaming.cleanupStatus?.() || "ready") === "ready") {
                     processSynthesis();
                     processPlayback(true);
                 }
