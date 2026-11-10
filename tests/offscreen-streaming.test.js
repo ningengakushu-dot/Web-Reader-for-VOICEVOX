@@ -493,8 +493,11 @@ async function run() {
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(bytes.subarray(0, 44 + 35000 * 2));
-                    signal.addEventListener("abort", () => controller.error(streamAbortError),
-                        { once: true });
+                    const onAbort = () => {
+                        signal.removeEventListener("abort", onAbort);
+                        controller.error(streamAbortError);
+                    };
+                    signal.addEventListener("abort", onAbort, { once: true });
                 }
             }, { highWaterMark: 0 }).getReader();
         }
