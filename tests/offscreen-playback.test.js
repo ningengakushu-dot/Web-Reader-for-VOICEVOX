@@ -126,7 +126,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     // 実VVRadioStreamingを結合し、AudioContextの予約時刻5ms前のエラーが
     // processPlaybackの通常合成復帰へ実際につながることを確認する。
     context.VVRadioStreaming = realStreaming;
-    context.readJsonResponseWithLimit = async () => ({
+    context.readJsonResponseWithLimit = async response => response.payload ?? ({
         accent_phrases: [], outputSamplingRate: 24000, outputStereo: false
     });
     class IntegratedAudioContext {
