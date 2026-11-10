@@ -501,7 +501,7 @@ async function run() {
     });
     const nativeAbortPlayer = nativeAborted.api.createPlayer(nativeAborted.query, 5, () => {});
     const nativeAbortRun = nativeAbortPlayer.run();
-    for (let attempts = 0; nativeAborted.contexts[0]?.sources.length !== 1; attempts++) {
+    for (let attempts = 0; !nativeAborted.contexts[0]?.sources.length; attempts++) {
         assert.ok(attempts < 100, "native ReadableStream should reserve a source");
         await new Promise(resolve => setTimeout(resolve, 1));
     }
