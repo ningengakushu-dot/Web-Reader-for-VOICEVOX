@@ -482,8 +482,8 @@ async function processPlayback(continuePlayback = false) {
         } catch (error) {
             if (generation !== playbackGeneration) return;
             globalThis.VVRadioStreaming.suppress(item.settings.speakerId);
-            if (!player.started) {
-                // まだ音を出していない場合に限り、既存の分割再試行へ戻す。
+            if (player.canFallback === true) {
+                // 未予約、または開始前の予約取消し・Context解放が完了した場合のみ再試行。
                 textQueue.unshift({ text: item.text, settings: item.settings,
                     forceNormal: true, query: item.query, durationSec: item.durationSec,
                     splitDepth: item.splitDepth, notice: item.notice });
@@ -497,7 +497,7 @@ async function processPlayback(continuePlayback = false) {
                     { error: "ストリーミング再生を中断しました: " + error.message });
             }
         } finally {
-            player.stop();
+            await player.stop();
             if (generation === playbackGeneration) {
                 currentStreamingPlayer = null;
                 isPlaying = false;

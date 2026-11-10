@@ -81,13 +81,15 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     let checks = 0;
     let streamAttempts = 0;
     let streamStarted = false;
+    const realStreaming = context.VVRadioStreaming;
     context.VVRadioStreaming = {
         supports: async () => { checks++; return true; },
         suppress() {},
         createPlayer: () => ({
             get started() { return streamStarted; },
+            get canFallback() { return !streamStarted; },
             async run() { streamAttempts++; throw new Error('stream transport failed'); },
-            stop() {}
+            async stop() {}
         })
     };
     notifications.length = 0;
@@ -119,6 +121,113 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     assert.strictEqual(streamAttempts, 2);
     assert.strictEqual(normalSynthesisCalls, beforeMidstream,
         'already audible speech must never restart from its beginning');
+    assert.ok(notifications.some(m => m.type === 'PLAYBACK_ERROR'));
+
+    // 実VVRadioStreamingを結合し、AudioContextの予約時刻5ms前のエラーが
+    // processPlaybackの通常合成復帰へ実際につながることを確認する。
+    context.VVRadioStreaming = realStreaming;
+    context.readJsonResponseWithLimit = async () => ({
+        accent_phrases: [], outputSamplingRate: 24000, outputStereo: false
+    });
+    class IntegratedAudioContext {
+        constructor() {
+            this.origin = Date.now();
+            this.state = 'running';
+            this.destination = {};
+            this.sources = [];
+            this.forcedClock = null;
+        }
+        get currentTime() {
+            return this.forcedClock ?? (Date.now() - this.origin) / 1000;
+        }
+        async resume() { this.state = 'running'; }
+        createBuffer(channels, frames, rate) {
+            const channelsData = Array.from({ length: channels }, () => new Float32Array(frames));
+            return {
+                duration: frames / rate,
+                getChannelData(i) { return channelsData[i]; }
+            };
+        }
+        createBufferSource() {
+            const ctx = this;
+            return {
+                buffer: null, onended: null, connect() {}, disconnect() {},
+                start(at) { this.at = at; ctx.sources.push(this); },
+                stop() { this.cancelled = true; }
+            };
+        }
+        async close() { this.state = 'closed'; }
+    }
+    const wavBytes = new Uint8Array(44 + 45000 * 2);
+    const view = new DataView(wavBytes.buffer);
+    const ascii = (at, str) => [...str].forEach((c, i) => wavBytes[at + i] = c.charCodeAt(0));
+    ascii(0, 'RIFF'); view.setUint32(4, wavBytes.length - 8, true);
+    ascii(8, 'WAVEfmt '); view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, 24000, true); view.setUint32(28, 48000, true);
+    view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    ascii(36, 'data'); view.setUint32(40, wavBytes.length - 44, true);
+    context.AudioContext = IntegratedAudioContext;
+    let integratedContext;
+    let integratedStreamRequests = 0;
+    context.AudioContext = class extends IntegratedAudioContext {
+        constructor() { super(); integratedContext = this; }
+    };
+    context.fetch = async url => {
+        const pathName = new URL(url).pathname;
+        if (pathName === '/engine_manifest') {
+            return { ok: true, payload: { supported_features: { streaming_synthesis: true } } };
+        }
+        if (pathName === '/speakers') {
+            return { ok: true, payload: [{ styles: [{ id: 1, type: 'streaming_talk' }] }] };
+        }
+        if (pathName === '/version') return { ok: true, payload: '0.26.0' };
+        if (pathName !== '/streaming_synthesis') throw new Error('unexpected endpoint: ' + pathName);
+        integratedStreamRequests++;
+        let readCount = 0;
+        return {
+            ok: true,
+            headers: { get: () => String(wavBytes.length) },
+            body: { getReader() {
+                return {
+                    async read() {
+                        readCount++;
+                        if (readCount === 1) {
+                            return { done: false, value: wavBytes.subarray(0, 44 + 35000 * 2) };
+                        }
+                        integratedContext.forcedClock =
+                            integratedContext.sources[0].at + (integratedStreamRequests === 1 ? -0.005 : 0.005);
+                        throw new Error('injected boundary transport failure');
+                    },
+                    async cancel() {},
+                    releaseLock() {}
+                };
+            } }
+        };
+    };
+    notifications.length = 0;
+    const synthesisBeforeEdge = normalSynthesisCalls;
+    response = await enqueue('real player prestart 5ms', 'auto');
+    assert.strictEqual(response.success, true);
+    await wait();
+    assert.strictEqual(integratedStreamRequests, 1);
+    assert.strictEqual(normalSynthesisCalls, synthesisBeforeEdge + 1,
+        'real stream player at 5ms before start must retry /synthesis once');
+    assert.ok(integratedContext.sources.every(src => src.cancelled));
+    assert.strictEqual(integratedContext.state, 'closed');
+    assert.ok(notifications.some(m => m.type === 'PLAYBACK_ENDED'));
+    assert.ok(!notifications.some(m => m.type === 'PLAYBACK_ERROR'),
+        'successful boundary cancellation must not cause missing-audio error');
+
+    context.VVRadioStreaming.invalidate(1);
+    notifications.length = 0;
+    const synthesisBeforeAudible = normalSynthesisCalls;
+    response = await enqueue('real player after audio start', 'auto');
+    assert.strictEqual(response.success, true);
+    await wait();
+    assert.strictEqual(integratedStreamRequests, 2);
+    assert.strictEqual(normalSynthesisCalls, synthesisBeforeAudible,
+        'once audio start time has passed, never restart from the first PCM');
     assert.ok(notifications.some(m => m.type === 'PLAYBACK_ERROR'));
 
     console.log('offscreen playback terminal states and stream fallback: PASSED');

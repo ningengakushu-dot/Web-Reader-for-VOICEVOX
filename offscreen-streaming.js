@@ -9,14 +9,17 @@
     // 合計60秒で打ち切る（際限なく待機しない）。
     const RESPONSE_STALL_GRACE_MS = 40000;
     const RESPONSE_TOTAL_MS = 10 * 60 * 1000;
-    // 再生予約時刻の境界での重複再生を防ぐため、開始判定は10ms手前から保守的に扱う。
-    const START_BOUNDARY_GUARD_SECONDS = 0.01;
+    // 予約したAudioBufferSourceNodeの取消し完了を確認してからだけ通常合成へ戻す。
+    // 音声出力時刻より前でも一律「開始済み」とみなす保守的ガードは、
+    // 先頭の音を丸ごと欠落させるため使用しない。
     const BUFFER_SECONDS_LIMIT = 5;
     // 受信・合成の揺らぎを吸収するため、0.6秒から余裕を持たせる。
     const STARTUP_BUFFER_SECONDS = 1.2;
     const FRAME_BUFFER = 4096;
     const MAX_AUDIO_BYTES = 128 * 1024 * 1024;
     const cache = new Map();
+    // 停止直後に次の再生が来ても、前のAudioContext.close()完了を先に待つ。
+    let pendingContextClose = Promise.resolve();
 
     function invalidate(speakerId) {
         if (speakerId == null) cache.clear();
@@ -99,33 +102,60 @@
         let context = null;
         let reader = null;
         let stopped = false;
-        let started = false; // Web Audioへの予約済み。実際の音声開始とは区別する。
+        // idle: 未予約 / scheduled: 予約済みだが開始前 /
+        // started: 音声開始時刻に到達 / cancelled: 予約取消し・Context解放を確認。
+        let playbackState = "idle";
         let firstScheduledAt = null;
-        let outputStarted = false;
+        let stopPromise = null;
         const sources = new Set();
         let startTimer = null;
         const abortError = () => new Error("ストリーミング再生が中断されました");
         const ensureActive = () => { if (stopped || controller.signal.aborted) throw abortError(); };
-        const hasOutputStarted = () => outputStarted || (firstScheduledAt !== null
-            && context !== null
-            && context.currentTime >= firstScheduledAt - START_BOUNDARY_GUARD_SECONDS);
         const stop = () => {
-            if (stopped) return;
-            // close() 後は音声クロックが参照できないため、キャンセル前に判定を保存。
-            outputStarted = hasOutputStarted();
+            if (stopPromise) return stopPromise;
+            // JSタイマーではなく音声クロックを確認する。ただし取消し成功前に
+            // fallback可能とはせず、停止処理が完了して初めてcancelledに遷移する。
+            const beforeStart = playbackState === "scheduled" && context !== null
+                && context.currentTime < firstScheduledAt;
             stopped = true;
             controller.abort();
             if (startTimer != null) clearTimeout(startTimer);
-            if (reader) void reader.cancel().catch(() => {});
+            startTimer = null;
+            let cancelledSources = true;
             for (const source of sources) {
                 source.onended = null;
-                try { source.stop(); } catch (error) {}
-                source.disconnect();
+                try {
+                    source.stop(0);
+                } catch (error) {
+                    cancelledSources = false;
+                }
+                try { source.disconnect(); } catch (error) {}
             }
             sources.clear();
-            if (context) void context.close().catch(() => {});
+            stopPromise = (async () => {
+                let contextClosed = true;
+                try {
+                    if (context) await context.close();
+                } catch (error) {
+                    contextClosed = false;
+                    console.error("Offscreen: AudioContext.close()失敗:", error);
+                }
+                try {
+                    if (reader) await reader.cancel();
+                } catch (error) {}
+                if (playbackState === "scheduled") {
+                    playbackState = beforeStart && cancelledSources && contextClosed
+                        ? "cancelled" : "started";
+                }
+            })();
+            pendingContextClose = Promise.allSettled([pendingContextClose, stopPromise])
+                .then(() => {});
+            return stopPromise;
         };
         async function run() {
+            // 前回停止処理と同じOffscreen環境でのAudioContext作成を直列化する。
+            await pendingContextClose;
+            ensureActive();
             const header = new Uint8Array(44);
             let headerUsed = 0;
             let received = 0;
@@ -217,16 +247,17 @@
                 }
                 for (const buffer of waitingBuffers) {
                     ensureActive();
-                    while (started && nextAudioTime - context.currentTime > BUFFER_SECONDS_LIMIT - 0.3) {
+                    while (playbackState !== "idle"
+                        && nextAudioTime - context.currentTime > BUFFER_SECONDS_LIMIT - 0.3) {
                         await waitForPlaybackRoom();
                         ensureActive();
                     }
                     // 受信が再生速度に追いつかなくても、残りのサンプルを捨てない。
                     // 不足分の無音は不可避だが、読み上げ全体を中断するより安全。
-                    const at = started
+                    const at = playbackState !== "idle"
                         ? Math.max(nextAudioTime, context.currentTime + 0.02)
                         : context.currentTime + 0.05;
-                    if (started && at > nextAudioTime) {
+                    if (playbackState !== "idle" && at > nextAudioTime) {
                         // 次回の読み上げは通常合成を優先し、再度の音切れを抑制。
                         suppress(speaker);
                     }
@@ -241,20 +272,29 @@
                     };
                     sources.add(source);
                     pendingSources++;
-                    source.start(at);
+                    try {
+                        source.start(at);
+                    } catch (error) {
+                        sources.delete(source);
+                        source.onended = null;
+                        source.disconnect();
+                        pendingSources--;
+                        throw error;
+                    }
                     nextAudioTime = at + buffer.duration;
-                    if (!started) {
-                        started = true;
+                    if (playbackState === "idle") {
+                        playbackState = "scheduled";
                         firstScheduledAt = at;
                         const reportActualStart = () => {
                             startTimer = null;
-                            if (stopped || context.state !== "running") return;
+                            if (stopped || context.state !== "running"
+                                || playbackState !== "scheduled") return;
                             const remainingMs = (firstScheduledAt - context.currentTime) * 1000;
                             if (remainingMs > 0) {
                                 startTimer = setTimeout(reportActualStart, Math.max(1, remainingMs));
                                 return;
                             }
-                            outputStarted = true;
+                            playbackState = "started";
                             onStart();
                         };
                         startTimer = setTimeout(reportActualStart,
@@ -274,7 +314,8 @@
                 waitingBuffers.push(buffer);
                 waitingSeconds += buffer.duration;
                 framesInBlock = 0;
-                if (started || waitingSeconds >= STARTUP_BUFFER_SECONDS) await scheduleBuffers();
+                if (playbackState !== "idle" || waitingSeconds >= STARTUP_BUFFER_SECONDS)
+                    await scheduleBuffers();
             }
 
             async function acceptPcm(bytes) {
@@ -375,20 +416,22 @@
                 finishIfComplete();
                 await timed(finished, RESPONSE_TOTAL_MS);
                 ensureActive();
-            } catch (error) {
-                stop();
-                throw error;
             } finally {
                 clearTimeout(headerTimer);
-                reader?.releaseLock?.();
-                if (!stopped) {
-                    stopped = true;
-                    if (startTimer != null) clearTimeout(startTimer);
-                    if (context) await context.close().catch(() => {});
-                }
+                await stop();
+                try { reader?.releaseLock?.(); } catch (error) {}
             }
         }
-        return { run, stop, get started() { return hasOutputStarted(); } };
+        return {
+            run, stop,
+            get started() {
+                return playbackState === "started" || (playbackState === "scheduled"
+                    && context !== null && context.currentTime >= firstScheduledAt);
+            },
+            get canFallback() {
+                return playbackState === "idle" || playbackState === "cancelled";
+            }
+        };
     }
 
     globalThis.VVRadioStreaming = Object.freeze({ supports, invalidate, suppress, createPlayer, pcmHeader });

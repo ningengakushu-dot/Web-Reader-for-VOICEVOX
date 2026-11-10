@@ -26,7 +26,8 @@ function wav(frames, channels = 1, rate = PCM_RATE) {
 
 function environment({ speakerType = "streaming_talk", feature = true,
     responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {},
-    manifestStatus = 200, onChunk = null, timeScale = 1, timerScale = 1 } = {}) {
+    manifestStatus = 200, onChunk = null, timeScale = 1, timerScale = 1,
+    onContextClose = null, onSourceStop = null } = {}) {
     let contexts = [];
     let fetchPaths = [];
     const listenerStats = { active: 0, maxActive: 0, added: 0 };
@@ -77,16 +78,25 @@ function environment({ speakerType = "streaming_talk", feature = true,
                     this.timer = setTimeout(() => this.onended?.(),
                         Math.max(1, 1000 * (at + this.buffer.duration - ctx.currentTime) / timeScale));
                 },
-                stop() { clearTimeout(this.timer); }
+                stop() {
+                    if (onSourceStop) onSourceStop(this);
+                    clearTimeout(this.timer);
+                    this.stopped = true;
+                }
             };
             return src;
         }
-        async close() { this.state = "closed"; }
+        async close() {
+            if (onContextClose) await onContextClose(this);
+            this.state = "closed";
+        }
     }
     const query = { outputSamplingRate: PCM_RATE, outputStereo: false, ...queryOptions };
     const input = responseBytes || wav(18000);
     const cuts = chunkSizes || [1, 2, 7, 12, 20, 3, 1, 8191, 3, 8192, 65535];
+    let requestNo = 0;
     function streamResponse() {
+        const request = ++requestNo;
         let at = 0;
         let count = 0;
         return {
@@ -97,7 +107,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
                     async read() {
                         if (at >= input.length) return { done: true };
                         const size = cuts[count++ % cuts.length];
-                        if (onChunk) await onChunk({ count, at, contexts });
+                        if (onChunk) await onChunk({ count, at, contexts, request });
                         const chunk = input.subarray(at, Math.min(input.length, at + size));
                         at += chunk.length;
                         return { done: false, value: chunk };
@@ -245,6 +255,8 @@ async function run() {
         "must actually schedule source before the failure");
     assert.equal(earlyPlayer.started, false,
         "future scheduled source is not yet audible and may safely fall back");
+    assert.equal(earlyPlayer.canFallback, true, "cancelled prestart source allows normal synthesis");
+    assert.equal(earlyFailure.contexts[0].sources.every(s => s.stopped), true);
     assert.equal(prematureStartNotifications, 0, "canceled source cannot emit PLAYBACK_STARTED");
     assert.equal(earlyFailure.contexts[0].state, "closed");
     assert.equal(earlyFailure.listenerStats.active, 0);
@@ -264,11 +276,12 @@ async function run() {
     await assert.rejects(edgePlayer.run(), /crossed start/);
     assert.equal(edgePlayer.started, true,
         "audio clock past scheduled start must disable duplicate-producing fallback");
+    assert.equal(edgePlayer.canFallback, false);
     assert.equal(edgeFailure.contexts[0].state, "closed");
     assert.equal(edgeFailure.listenerStats.active, 0);
 
-    // 開始時刻まで残り5ms（クロック上は未開始）の場合も、
-    // 実出力との競合を避けるため保守的に再合成を禁止する。
+    // 開始5ms前: 予約音源を確実に停止してから通常合成へ復帰できること。
+    // 従来テストはここを「started=true」として音声欠落を許していた。
     const boundaryGuard = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
         onChunk({ count, contexts }) {
@@ -281,8 +294,24 @@ async function run() {
     });
     const boundaryPlayer = boundaryGuard.api.createPlayer(boundaryGuard.query, 5, () => {});
     await assert.rejects(boundaryPlayer.run(), /inside playback start guard/);
-    assert.equal(boundaryPlayer.started, true, "5ms start boundary forbids duplicate fallback");
+    assert.equal(boundaryPlayer.started, false,
+        "5ms before first output is not audible after cancellation");
+    assert.equal(boundaryPlayer.canFallback, true,
+        "5ms boundary must allow normal synthesis after successful cancellation");
+    assert.equal(boundaryGuard.contexts[0].sources.every(s => s.stopped), true);
+    assert.equal(boundaryGuard.contexts[0].state, "closed");
     assert.equal(boundaryGuard.listenerStats.active, 0);
+
+    // 一つでも予約取消しに失敗したら、安全を証明できないので二重再生を禁止する。
+    const cancelFail = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        onChunk({ count }) { if (count === 2) throw new Error("prestart error"); },
+        onSourceStop() { throw new Error("stop not guaranteed"); }
+    });
+    const cancelFailPlayer = cancelFail.api.createPlayer(cancelFail.query, 5, () => {});
+    await assert.rejects(cancelFailPlayer.run(), /prestart error/);
+    assert.equal(cancelFailPlayer.canFallback, false,
+        "failed cancellation must not start potentially duplicated normal synthesis");
 
     // 20秒を超える一時停止から復旧したら、同じ reader.read() で再開できる。
     // タイムアウトだけ短縮して実時間では待たない（20ms=20秒相当）。
@@ -313,6 +342,37 @@ async function run() {
     assert.equal(fatalStall.contexts[0].state, "closed");
     assert.equal(fatalStall.listenerStats.active, 0);
 
+    // 同一Offscreenの同一APIで再生を停止し、前回AudioContext.close()
+    // のPromiseが完了するまで次のAudioContextを作らない。
+    let releaseContextClose;
+    const closeBlocked = new Promise(resolve => { releaseContextClose = resolve; });
+    const rapidRestart = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        onContextClose(ctx) {
+            if (ctx === rapidRestart.contexts[0]) return closeBlocked;
+        },
+        onChunk({ count, request }) {
+            if (request === 1 && count === 2) return new Promise(() => {});
+        }
+    });
+    const first = rapidRestart.api.createPlayer(rapidRestart.query, 5, () => {});
+    const firstRun = first.run();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(rapidRestart.contexts.length, 1, "first player allocated an AudioContext");
+    const closing = first.stop();
+    const second = rapidRestart.api.createPlayer(rapidRestart.query, 5, () => {});
+    const secondRun = second.run();
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(rapidRestart.contexts.length, 1,
+        "no new AudioContext before prior close Promise resolves");
+    releaseContextClose();
+    await closing;
+    await assert.rejects(firstRun, /中断|AbortError/);
+    await secondRun;
+    assert.equal(rapidRestart.contexts.length, 2);
+    assert.ok(rapidRestart.contexts.every(ctx => ctx.state === "closed"));
+    assert.equal(rapidRestart.listenerStats.active, 0);
+
     // 読み上げ停止の直後に別の読み上げを開始しても、古いタイマーと
     // イベントリスナーが後続の再生へ干渉しない。
     const stopEnv = environment({
@@ -323,7 +383,7 @@ async function run() {
     const oldRun = oldPlayer.run();
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.ok(stopEnv.contexts[0]?.sources.length > 0, "first playback must be scheduled");
-    oldPlayer.stop();
+    await oldPlayer.stop();
     await assert.rejects(oldRun, /中断|AbortError/);
     assert.equal(stopEnv.listenerStats.active, 0);
     assert.equal(stopEnv.contexts[0].state, "closed");
