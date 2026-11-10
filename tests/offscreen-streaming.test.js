@@ -267,6 +267,23 @@ async function run() {
     assert.equal(edgeFailure.contexts[0].state, "closed");
     assert.equal(edgeFailure.listenerStats.active, 0);
 
+    // 開始時刻まで残り5ms（クロック上は未開始）の場合も、
+    // 実出力との競合を避けるため保守的に再合成を禁止する。
+    const boundaryGuard = environment({
+        responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
+        onChunk({ count, contexts }) {
+            if (count === 2) {
+                const ctx = contexts[0];
+                ctx.startedAt = Date.now() - 1000 * (ctx.sources[0].at - 0.005);
+                throw new Error("failure inside playback start guard");
+            }
+        }
+    });
+    const boundaryPlayer = boundaryGuard.api.createPlayer(boundaryGuard.query, 5, () => {});
+    await assert.rejects(boundaryPlayer.run(), /inside playback start guard/);
+    assert.equal(boundaryPlayer.started, true, "5ms start boundary forbids duplicate fallback");
+    assert.equal(boundaryGuard.listenerStats.active, 0);
+
     // 20秒を超える一時停止から復旧したら、同じ reader.read() で再開できる。
     // タイムアウトだけ短縮して実時間では待たない（20ms=20秒相当）。
     const recoverStall = environment({
