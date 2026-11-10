@@ -497,14 +497,18 @@ async function processPlayback(continuePlayback = false) {
                     { error: "ストリーミング再生を中断しました: " + error.message });
             }
         } finally {
-            await player.stop();
+            // stop()失敗はrun()側のcatchで利用者へ通知済み。finallyから二次例外を
+            // 発生させると再生キューの終了処理を妨げるため、ここでは再送しない。
+            await player.stop().catch(() => {});
             if (generation === playbackGeneration) {
                 currentStreamingPlayer = null;
                 isPlaying = false;
                 if (completed && textQueue.length === 0 && audioQueue.length === 0
                     && !isSynthesizing) notifyBackground("PLAYBACK_ENDED");
-                processSynthesis();
-                processPlayback(true);
+                if (globalThis.VVRadioStreaming.cleanupStatus?.() === "ready") {
+                    processSynthesis();
+                    processPlayback(true);
+                }
             }
         }
         return;
@@ -603,10 +607,9 @@ function stopAll() {
     consecutiveSynthesisFailures = 0;
     // in-flight の再生開始処理を無効化（停止後の AbortError 等を通知しない）
     playbackGeneration++;
-    if (currentStreamingPlayer) {
-        currentStreamingPlayer.stop();
-        currentStreamingPlayer = null;
-    }
+    const stoppingPlayer = currentStreamingPlayer;
+    const playerCleanup = stoppingPlayer ? stoppingPlayer.stop() : Promise.resolve();
+    currentStreamingPlayer = null;
 
     if (currentAudio) {
         currentAudio.onended = null;
@@ -628,7 +631,17 @@ function stopAll() {
     isSynthesizing = false;
     isPlaying = false;
 
-    if (wasActive) notifyBackground("PLAYBACK_STOPPED");
+    // 先行stop()がまだ完了していれば、それも含めて待つ。
+    // これにより背景側の STOP_AUDIO → ENQUEUE_TEXTS は後始末完了順になる。
+    return Promise.resolve(playerCleanup)
+        .then(() => globalThis.VVRadioStreaming?.waitForCleanup?.())
+        .then(() => {
+            if (wasActive) notifyBackground("PLAYBACK_STOPPED");
+        })
+        .catch(error => {
+            notifyBackground("PLAYBACK_ERROR", { error: error.message });
+            throw error;
+        });
 }
 
 function notifyBackground(type, payload = {}) {

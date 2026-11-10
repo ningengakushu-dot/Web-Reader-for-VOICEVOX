@@ -9,6 +9,8 @@
     // 合計60秒で打ち切る（際限なく待機しない）。
     const RESPONSE_STALL_GRACE_MS = 40000;
     const RESPONSE_TOTAL_MS = 10 * 60 * 1000;
+    const CANCEL_WAIT_MS = 1200;
+    const CONTEXT_CLOSE_WAIT_MS = 3000;
     // 予約したAudioBufferSourceNodeの取消し完了を確認してからだけ通常合成へ戻す。
     // 音声出力時刻より前でも一律「開始済み」とみなす保守的ガードは、
     // 先頭の音を丸ごと欠落させるため使用しない。
@@ -20,6 +22,29 @@
     const cache = new Map();
     // 停止直後に次の再生が来ても、前のAudioContext.close()完了を先に待つ。
     let pendingContextClose = Promise.resolve();
+    let activeCleanupCount = 0;
+    let cleanupFailure = null;
+
+    function cleanupStatus() {
+        return cleanupFailure ? "failed" : activeCleanupCount > 0 ? "pending" : "ready";
+    }
+
+    async function waitForCleanup() {
+        await pendingContextClose;
+        if (cleanupFailure) throw cleanupFailure;
+    }
+
+    // 終了処理の片方が停止しても、もう片方の終了処理を妨げない。
+    function boundedCleanup(promise, milliseconds, label) {
+        let timer;
+        return Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(label + " の終了がタイムアウトしました")),
+                    milliseconds);
+            })
+        ]).finally(() => clearTimeout(timer));
+    }
 
     function invalidate(speakerId) {
         if (speakerId == null) cache.clear();
@@ -107,6 +132,7 @@
         let playbackState = "idle";
         let firstScheduledAt = null;
         let stopPromise = null;
+        let cleanupSucceeded = false;
         const sources = new Set();
         let startTimer = null;
         const abortError = () => new Error("ストリーミング再生が中断されました");
@@ -132,29 +158,46 @@
                 try { source.disconnect(); } catch (error) {}
             }
             sources.clear();
+            // AudioContext解放とネットワーク取消しは並列に実行し、それぞれ期限を設ける。
+            // reader.cancel()が永遠に返らなくてもclose()を実行し、STOP_AUDIOに有限時間で応答する。
+            const closeRequest = context
+                ? Promise.resolve().then(() => context.close()) : Promise.resolve();
+            const cancelRequest = reader
+                ? Promise.resolve().then(() => reader.cancel()) : Promise.resolve();
             stopPromise = (async () => {
-                let contextClosed = true;
-                try {
-                    if (context) await context.close();
-                } catch (error) {
-                    contextClosed = false;
-                    console.error("Offscreen: AudioContext.close()失敗:", error);
+                const [closeResult, cancelResult] = await Promise.allSettled([
+                    boundedCleanup(closeRequest, CONTEXT_CLOSE_WAIT_MS, "AudioContext"),
+                    boundedCleanup(cancelRequest, CANCEL_WAIT_MS, "ストリーム")
+                ]);
+                const issues = [];
+                if (!cancelledSources) issues.push("予約音源の停止に失敗しました");
+                if (closeResult.status === "rejected") issues.push(closeResult.reason.message);
+                if (cancelResult.status === "rejected") issues.push(cancelResult.reason.message);
+                if (issues.length) {
+                    console.error("Offscreen: ストリーミング終了失敗:", issues.join(" / "));
+                    // 解放されていない可能性があるAudioContextやReaderを使い回さない。
+                    // Offscreenの再生成まで通常合成・ストリーミングとも読み上げを禁止する。
+                    cleanupFailure ||= new Error(
+                        "音声再生の安全な終了を確認できません。拡張機能を再読み込みしてください。");
+                    if (playbackState === "scheduled") playbackState = "started";
+                    throw cleanupFailure;
                 }
-                try {
-                    if (reader) await reader.cancel();
-                } catch (error) {}
+                cleanupSucceeded = true;
                 if (playbackState === "scheduled") {
-                    playbackState = beforeStart && cancelledSources && contextClosed
-                        ? "cancelled" : "started";
+                    playbackState = beforeStart ? "cancelled" : "started";
                 }
             })();
-            pendingContextClose = Promise.allSettled([pendingContextClose, stopPromise])
+            activeCleanupCount++;
+            const tracked = stopPromise.finally(() => { activeCleanupCount--; });
+            // 終了失敗を後続のwaitForCleanupで検知する一方、未待機時のunhandledを防ぐ。
+            void tracked.catch(() => {});
+            pendingContextClose = Promise.allSettled([pendingContextClose, tracked])
                 .then(() => {});
             return stopPromise;
         };
         async function run() {
             // 前回停止処理と同じOffscreen環境でのAudioContext作成を直列化する。
-            await pendingContextClose;
+            await waitForCleanup();
             ensureActive();
             const header = new Uint8Array(44);
             let headerUsed = 0;
@@ -429,10 +472,14 @@
                     && context !== null && context.currentTime >= firstScheduledAt);
             },
             get canFallback() {
-                return playbackState === "idle" || playbackState === "cancelled";
+                return cleanupSucceeded && cleanupFailure === null
+                    && (playbackState === "idle" || playbackState === "cancelled");
             }
         };
     }
 
-    globalThis.VVRadioStreaming = Object.freeze({ supports, invalidate, suppress, createPlayer, pcmHeader });
+    globalThis.VVRadioStreaming = Object.freeze({
+        supports, invalidate, suppress, createPlayer, pcmHeader,
+        cleanupStatus, waitForCleanup
+    });
 })();

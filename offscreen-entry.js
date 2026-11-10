@@ -44,14 +44,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     switch (message.type) {
-        case 'ENQUEUE_TEXTS':
+        case 'ENQUEUE_TEXTS': {
+            const streaming = globalThis.VVRadioStreaming;
+            const status = streaming?.cleanupStatus?.() || "ready";
+            if (status === "failed") {
+                sendResponse({ success: false,
+                    error: "音声再生の安全な終了を確認できません。拡張機能を再読み込みしてください。" });
+                break;
+            }
+            if (status === "pending") {
+                // STOP_AUDIOを待つ間にもう一度STOPされた要求を復活させない。
+                const generation = playbackGeneration;
+                streaming.waitForCleanup().then(() => {
+                    if (generation !== playbackGeneration) {
+                        sendResponse({ success: false, error: "読み上げ開始前に停止されました" });
+                        return;
+                    }
+                    enqueueTexts(message.texts, message.settings);
+                    sendResponse({ success: true });
+                }).catch(error => sendResponse({ success: false, error: error.message }));
+                return true; // 非同期sendResponseのためChromeのメッセージポートを保持
+            }
             enqueueTexts(message.texts, message.settings);
             sendResponse({ success: true });
             break;
+        }
         case 'STOP_AUDIO':
-            stopAll();
-            sendResponse({ success: true });
-            break;
+            stopAll().then(() => sendResponse({ success: true }))
+                .catch(error => sendResponse({ success: false, error: error.message }));
+            return true; // AudioContextとreaderの終了が完了するまで成功を返さない
         case 'PREWARM_OCR':
             // 範囲選択中の先読み。横書きは実測で圧倒的に多いので jpn だけ用意する
             // （縦書きが必要になった場合はそのとき生成される）。
