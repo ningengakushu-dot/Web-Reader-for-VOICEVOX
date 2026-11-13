@@ -7,6 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'offscreen.js'), 'utf8
 let listener;
 let audioMode = 'error';
 let normalSynthesisCalls = 0;
+let failNextNormalSynthesis = false;
 const notifications = [];
 
 class MockAudio {
@@ -38,7 +39,13 @@ const context = vm.createContext({
     VOICEVOX_SYNTHESIS_TIMEOUT_MS: 100, OCR_WORKER_IDLE_RELEASE_MS: 1000,
     OCR_RECOGNIZE_TIMEOUT_MS: 1000,
     fetchWithTimeout: async (url) => {
-        if (url.includes('/synthesis?')) normalSynthesisCalls++;
+        if (url.includes('/synthesis?')) {
+            normalSynthesisCalls++;
+            if (failNextNormalSynthesis) {
+                failNextNormalSynthesis = false;
+                throw new Error('injected normal synthesis failure');
+            }
+        }
         return { ok: true, status: 200, marker: url.includes('audio_query') ? 'json' : 'blob' };
     },
     readJsonResponseWithLimit: async () => ({ accent_phrases: [] }), readBlobResponseWithLimit: async () => ({}),
@@ -47,7 +54,9 @@ const context = vm.createContext({
     recognizeWithOrientation: async () => ({ text: '', confidence: 0 }),
     withOcrTimeout: (p) => p, cleanForSpeech: (s) => s, normalizeOcrText: (s) => s,
     cropToOcrCanvas: () => ({}), createImageBitmap: async () => ({ close() {}, width: 1, height: 1 }),
-    fetch: async () => ({ blob: async () => ({}) })
+    fetch: async (url) => url.includes('/audio_query')
+        ? { ok: true, payload: { accent_phrases: [] } }
+        : { blob: async () => ({}) }
 });
 vm.runInContext(source, context, { filename: 'offscreen.js' });
 assert.strictEqual(typeof listener, 'function');
@@ -133,6 +142,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     let closeBarrier = null;
     let rejectClose = false;
     let holdNextRead = false;
+    let failSourceStartMode = null;
     class IntegratedAudioContext {
         constructor() {
             this.origin = Date.now();
@@ -145,6 +155,9 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
             return this.forcedClock ?? (Date.now() - this.origin) / 1000;
         }
         async resume() { this.state = 'running'; }
+        createAnalyser() {
+            return { fftSize: 16384, connect() {}, getFloatTimeDomainData(data) { data.fill(0); } };
+        }
         createBuffer(channels, frames, rate) {
             const channelsData = Array.from({ length: channels }, () => new Float32Array(frames));
             return {
@@ -156,7 +169,15 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
             const ctx = this;
             return {
                 buffer: null, onended: null, connect() {}, disconnect() {},
-                start(at) { this.at = at; ctx.sources.push(this); },
+                start(at) {
+                    this.at = at;
+                    ctx.sources.push(this);
+                    if (failSourceStartMode && ctx.sources.length === 2) {
+                        ctx.forcedClock = ctx.sources[0].at
+                            + (failSourceStartMode === 'after' ? 0.005 : -0.005);
+                        throw new Error('injected start boundary failure');
+                    }
+                },
                 stop() { this.cancelled = true; }
             };
         }
@@ -178,11 +199,27 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     context.AudioContext = IntegratedAudioContext;
     let integratedContext;
     let integratedStreamRequests = 0;
+    let activeServerRequests = 0;
+    let preparationBlock = null;
+    let streamReaderMode = null;
+    let streamReadCalls = 0;
     context.AudioContext = class extends IntegratedAudioContext {
         constructor() { super(); integratedContext = this; }
     };
-    context.fetch = async url => {
+    context.fetch = async (url, options = {}) => {
         const pathName = new URL(url).pathname;
+        if (preparationBlock?.path === pathName) {
+            preparationBlock.started++;
+            preparationBlock.active++;
+            return new Promise((resolve, reject) => {
+                const onAbort = () => {
+                    options.signal?.removeEventListener('abort', onAbort);
+                    preparationBlock.active--;
+                    reject(Object.assign(new Error('request aborted'), { name: 'AbortError' }));
+                };
+                options.signal?.addEventListener('abort', onAbort, { once: true });
+            });
+        }
         if (pathName === '/engine_manifest') {
             return { ok: true, payload: { supported_features: { streaming_synthesis: true } } };
         }
@@ -190,31 +227,73 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
             return { ok: true, payload: [{ styles: [{ id: 1, type: 'streaming_talk' }] }] };
         }
         if (pathName === '/version') return { ok: true, payload: '0.26.0' };
+        if (pathName === '/audio_query') return { ok: true, payload: {
+            accent_phrases: [], outputSamplingRate: 24000, outputStereo: false
+        } };
         if (pathName !== '/streaming_synthesis') throw new Error('unexpected endpoint: ' + pathName);
         integratedStreamRequests++;
+        if (streamReaderMode === 'null-read') {
+            let firstRead = true;
+            return {
+                ok: true,
+                headers: { get: () => String(wavBytes.length) },
+                body: { getReader() {
+                    return {
+                        read() {
+                            if (firstRead) {
+                                firstRead = false;
+                                return Promise.resolve({ done: false,
+                                    value: wavBytes.subarray(0, 44 + 35000 * 2) });
+                            }
+                            return Promise.reject(null);
+                        },
+                        cancel() { return Promise.reject(null); },
+                        releaseLock() {}
+                    };
+                } }
+            };
+        }
         let readCount = 0;
+        let requestOpen = true;
+        const finishRequest = () => {
+            if (!requestOpen) return;
+            requestOpen = false;
+            activeServerRequests--;
+        };
+        activeServerRequests++;
         return {
             ok: true,
             headers: { get: () => String(wavBytes.length) },
             body: { getReader() {
+                let abortRead = null;
+                const onAbort = () => abortRead?.();
+                options.signal?.addEventListener('abort', onAbort, { once: true });
                 return {
                     async read() {
                         readCount++;
+                        streamReadCalls++;
                         if (readCount === 1) {
-                            return { done: false, value: wavBytes.subarray(0, 44 + 35000 * 2) };
+                            return { done: false, value: wavBytes };
                         }
-                        if (holdNextRead) return new Promise(() => {});
-                        integratedContext.forcedClock =
-                            integratedContext.sources[0].at + (integratedStreamRequests === 1 ? -0.005 : 0.005);
-                        throw new Error('injected boundary transport failure');
+                        if (holdNextRead) return new Promise((resolve, reject) => {
+                            abortRead = () => {
+                                abortRead = null;
+                                finishRequest();
+                                reject(Object.assign(new Error('request aborted'), { name: 'AbortError' }));
+                            };
+                        });
+                        options.signal?.removeEventListener('abort', onAbort);
+                        finishRequest();
+                        return { done: true };
                     },
-                    async cancel() {},
-                    releaseLock() {}
+                    async cancel() { options.signal?.removeEventListener('abort', onAbort); finishRequest(); },
+                    releaseLock() { options.signal?.removeEventListener('abort', onAbort); }
                 };
             } }
         };
     };
     notifications.length = 0;
+    failSourceStartMode = 'before';
     const synthesisBeforeEdge = normalSynthesisCalls;
     response = await enqueue('real player prestart 5ms', 'auto');
     assert.strictEqual(response.success, true);
@@ -222,14 +301,16 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     assert.strictEqual(integratedStreamRequests, 1);
     assert.strictEqual(normalSynthesisCalls, synthesisBeforeEdge + 1,
         'real stream player at 5ms before start must retry /synthesis once');
-    assert.ok(integratedContext.sources.every(src => src.cancelled));
+    assert.ok(integratedContext.sources[0].cancelled);
     assert.strictEqual(integratedContext.state, 'closed');
     assert.ok(notifications.some(m => m.type === 'PLAYBACK_ENDED'));
     assert.ok(!notifications.some(m => m.type === 'PLAYBACK_ERROR'),
         'successful boundary cancellation must not cause missing-audio error');
 
+    failSourceStartMode = null;
     context.VVRadioStreaming.invalidate(1);
     notifications.length = 0;
+    failSourceStartMode = 'after';
     const synthesisBeforeAudible = normalSynthesisCalls;
     response = await enqueue('real player after audio start', 'auto');
     assert.strictEqual(response.success, true);
@@ -239,17 +320,88 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
         'once audio start time has passed, never restart from the first PCM');
     assert.ok(notifications.some(m => m.type === 'PLAYBACK_ERROR'));
 
+    failSourceStartMode = null;
+
+    const waitUntil = async (predicate, message) => {
+        for (let attempts = 0; !predicate(); attempts++) {
+            assert.ok(attempts < 200, message);
+            await new Promise(resolve => setTimeout(resolve, 1));
+        }
+    };
+    const requestStop = () => new Promise(resolve => {
+        const keep = listener({ type: 'STOP_AUDIO', target: 'offscreen' },
+            { id: 'ext-id' }, resolve);
+        assert.strictEqual(keep, true, 'STOP_AUDIO keeps the response port open');
+    });
+    const checkPreparationStop = async pathName => {
+        preparationBlock = { path: pathName, started: 0, active: 0 };
+        context.VVRadioStreaming.invalidate(1);
+        response = await enqueue('stop during ' + pathName, 'auto');
+        assert.strictEqual(response.success, true);
+        await waitUntil(() => preparationBlock.started > 0, pathName + ' request did not start');
+        const stopped = await requestStop();
+        assert.strictEqual(stopped.success, true, pathName + ' stop must finish successfully');
+        assert.strictEqual(preparationBlock.active, 0,
+            pathName + ' communication must be closed before STOP_AUDIO succeeds');
+        preparationBlock = null;
+        const beforeRestart = normalSynthesisCalls;
+        assert.strictEqual((await enqueue('immediate restart after ' + pathName, 'normal')).success, true);
+        await wait();
+        assert.strictEqual(normalSynthesisCalls, beforeRestart + 1,
+            'immediate restart must use the normal path after ' + pathName);
+    };
+
+    await checkPreparationStop('/engine_manifest');
+    await checkPreparationStop('/audio_query');
+
+    // PCM受信中の停止も通信終了を待ってから成功し、直後の読み上げを受け付ける。
+    context.VVRadioStreaming.invalidate(1);
+    integratedContext = null;
+    holdNextRead = true;
+    const beforePcmRead = streamReadCalls;
+    response = await enqueue('stop during PCM receive', 'auto');
+    assert.strictEqual(response.success, true);
+    await waitUntil(() => streamReadCalls >= beforePcmRead + 2,
+        'PCM receive did not reach the pending EOF read');
+    assert.equal(integratedContext.sources.length, 0,
+        'partial PCM stays buffered until the response reaches EOF');
+    assert.strictEqual(activeServerRequests, 1, 'stream request remains open during PCM receive');
+    const pcmStop = await requestStop();
+    assert.strictEqual(pcmStop.success, true);
+    assert.strictEqual(activeServerRequests, 0,
+        'the old stream request must close before STOP_AUDIO succeeds');
+    holdNextRead = false;
+    assert.strictEqual((await enqueue('immediate restart after PCM receive', 'normal')).success, true);
+    await wait();
+
+    // null読取拒否と同じnull cancel拒否は安全な終了理由として扱う。
+    // 通常合成も失敗させ、拒否値を文字列化するエラー通知が一度だけ届くことを確認する。
+    context.VVRadioStreaming.invalidate(1);
+    streamReaderMode = 'null-read';
+    failNextNormalSynthesis = true;
+    notifications.length = 0;
+    const beforeNullFallback = normalSynthesisCalls;
+    assert.strictEqual((await enqueue('null read and cancel reason', 'auto')).success, true);
+    await wait();
+    streamReaderMode = null;
+    assert.strictEqual(normalSynthesisCalls, beforeNullFallback + 1);
+    assert.equal(notifications.filter(message => message.type === 'PLAYBACK_ERROR').length, 1,
+        'null rejection values must produce one PLAYBACK_ERROR');
+    assert.equal(notifications.filter(message => message.type === 'PLAYBACK_ENDED').length, 0,
+        'failed normal fallback must not also report PLAYBACK_ENDED');
+
     // STOP_AUDIO成功を、音声Contextの非同期close終了より前に返さないこと。
     // 同じOffscreen VM内でSTOP中に到着した通常合成も終了まで保留する。
     let releaseClose;
     closeBarrier = new Promise(resolve => { releaseClose = resolve; });
-    holdNextRead = true;
+    holdNextRead = false;
     context.VVRadioStreaming.invalidate(1);
+    integratedContext = null;
     const beforeStopSynth = normalSynthesisCalls;
     response = await enqueue('stream playing before STOP_AUDIO', 'auto');
     assert.strictEqual(response.success, true);
-    await new Promise(resolve => setTimeout(resolve, 15));
-    assert.ok(integratedContext.sources.length > 0);
+    await waitUntil(() => integratedContext?.state === 'running'
+        && integratedContext.sources.length > 0, 'stream playback must begin before STOP_AUDIO');
     let stopResponse;
     let stopReturn;
     const stopReply = new Promise(resolve => {
@@ -277,11 +429,13 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     // close()失敗後はSTOP_AUDIO失敗を返し、通常合成まで禁止する。
     closeBarrier = null;
     rejectClose = true;
-    holdNextRead = true;
+    holdNextRead = false;
     context.VVRadioStreaming.invalidate(1);
+    integratedContext = null;
     response = await enqueue('close fails on STOP_AUDIO', 'auto');
     assert.strictEqual(response.success, true);
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await waitUntil(() => integratedContext?.state === 'running'
+        && integratedContext.sources.length > 0, 'stream playback must begin before close failure');
     const failedStop = await new Promise(resolve => {
         const keep = listener({ type: 'STOP_AUDIO', target: 'offscreen' },
             { id: 'ext-id' }, resolve);

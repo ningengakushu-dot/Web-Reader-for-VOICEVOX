@@ -30,7 +30,33 @@ const MIN_SYNTHESIS_SPLIT_CHARS = 8;
 // 利用者は無音のまま待たされ、文の数だけエラー表示が上書きされ続けるだけになる。
 // 1〜2件なら「その文だけ読めなかった」可能性があるので続行する。
 const MAX_CONSECUTIVE_SYNTHESIS_FAILURES = 3;
+const STREAMING_PREPARATION_CANCEL_WAIT_MS = 1200;
 let consecutiveSynthesisFailures = 0;
+
+function safeErrorMessage(error) {
+    try {
+        if (error == null) return String(error);
+        const message = error.message;
+        if (typeof message === "string" && message) return message;
+        return String(error);
+    } catch (ignored) {
+        return "詳細不明のエラー";
+    }
+}
+
+function waitForStreamingPreparation(preparation) {
+    if (!preparation) return Promise.resolve();
+    let timer;
+    const settled = Promise.resolve(preparation.promise).then(() => undefined, () => undefined);
+    const deadline = new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(
+            "ストリーミング準備通信の終了を確認できませんでした")),
+        STREAMING_PREPARATION_CANCEL_WAIT_MS);
+    });
+    return Promise.race([settled, deadline]).catch(error => {
+        throw globalThis.VVRadioStreaming?.lockCleanup?.(error) || error;
+    }).finally(() => clearTimeout(timer));
+}
 
 /**
  * 合成に失敗した文を2つに割る。句読点・閉じ括弧の直後のうち中央にいちばん近い位置で
@@ -139,17 +165,31 @@ async function processSynthesis() {
     activeSynthesis = { durationSec: null, startedAt: null };
 
     try {
-        // 先に対応を確認し、streaming_talk では大量のクエリ/WAV先読みを避ける。
-        // 古いENGINE・不明スタイル・音声API未対応では従来の経路を変更しない。
-        const streaming = !item.forceNormal && item.settings.synthesisMode === "auto"
-            && globalThis.VVRadioStreaming
-            && await globalThis.VVRadioStreaming.supports(item.settings.speakerId);
+        let streamingQuery = null;
+        // 機能照会とクエリ取得も再生準備の一部として扱い、STOP_AUDIOから同じ要求単位の
+        // AbortSignalを渡す。準備段階で止められた旧要求が次の再生と重ならないよう記録する。
+        if (!item.forceNormal && item.settings.synthesisMode === "auto"
+            && globalThis.VVRadioStreaming) {
+            const preparation = { controller: new AbortController(), promise: null };
+            const signal = preparation.controller.signal;
+            preparation.promise = (async () => {
+                const supported = await globalThis.VVRadioStreaming.supports(
+                    item.settings.speakerId, false, { signal });
+                if (!supported) return null;
+                return item.query || await prepareVoiceQuery(item.text, item.settings, signal);
+            })();
+            activeStreamingPreparation = preparation;
+            try {
+                streamingQuery = await preparation.promise;
+            } finally {
+                if (activeStreamingPreparation === preparation) activeStreamingPreparation = null;
+            }
+        }
         if (generation !== synthesisGeneration) return;
-        if (streaming) {
-            const query = item.query || await prepareVoiceQuery(item.text, item.settings);
+        if (streamingQuery) {
             if (generation !== synthesisGeneration) return;
-            audioQueue.push({ streaming: true, query, settings: item.settings,
-                text: item.text, durationSec: estimateQueryDurationSec(query, item.settings.speedScale),
+            audioQueue.push({ streaming: true, query: streamingQuery, settings: item.settings,
+                text: item.text, durationSec: estimateQueryDurationSec(streamingQuery, item.settings.speedScale),
                 splitDepth: item.splitDepth || 0, notice: item.notice });
             activeSynthesis = null;
             processPlayback();
@@ -372,13 +412,14 @@ function isSameReading(candidateQuery, originalQuery) {
  * @param {object} queryJson 元のテキストのクエリ
  * @returns {Promise<object>}
  */
-async function preferBracketFreeQuery(text, speaker, queryJson) {
+async function preferBracketFreeQuery(text, speaker, queryJson, signal = null) {
     const candidate = bracketFreeCandidate(text);
     if (!candidate) return queryJson;
     let candidateQuery;
     try {
-        candidateQuery = await requestAudioQuery(candidate, speaker);
+        candidateQuery = await requestAudioQuery(candidate, speaker, signal);
     } catch (error) {
+        if (signal?.aborted) throw error;
         return queryJson;
     }
     return isSameReading(candidateQuery, queryJson) ? candidateQuery : queryJson;
@@ -390,28 +431,50 @@ async function preferBracketFreeQuery(text, speaker, queryJson) {
  * @param {number} speaker
  * @returns {Promise<object>}
  */
-async function requestAudioQuery(text, speaker) {
-    const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
-    const queryResponse = await fetchWithTimeout(
-        queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
-    if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
-
+async function parseAudioQueryResponse(queryResponse) {
     let queryJson;
     try {
         queryJson = await readJsonResponseWithLimit(queryResponse);
     } catch (error) {
-        // 本文がJSONでない（同じポートを別のプロセスが使っている、エラーページが返る等）。
-        // ここで置き換えないと JSON.parse の英語の内部メッセージがそのまま通知へ出る。
-        // realm をまたいで投げられるので instanceof ではなく name で判定する。
         if (error?.name === "SyntaxError") throw voicevoxUnexpectedResponseError();
         throw error;
     }
-    // 応答の形を確かめてから書き込む。null や配列以外が返ったとき、この後の代入が
-    // TypeError になり「Cannot set properties of null」がそのまま利用者へ出ていた。
     if (!queryJson || typeof queryJson !== "object" || !Array.isArray(queryJson.accent_phrases)) {
         throw voicevoxUnexpectedResponseError();
     }
     return queryJson;
+}
+
+async function requestAudioQuery(text, speaker, signal = null) {
+    const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
+    let queryResponse;
+    if (signal) {
+        if (signal.aborted) throw new Error("音声クエリ取得が中断されました");
+        const controller = new AbortController();
+        let timedOut = false;
+        const abortFromRequest = () => controller.abort();
+        signal.addEventListener("abort", abortFromRequest, { once: true });
+        const timer = setTimeout(() => { timedOut = true; controller.abort(); }, VOICEVOX_FETCH_TIMEOUT_MS);
+        try {
+            queryResponse = await fetch(queryUrl, { method: "POST", signal: controller.signal });
+            if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
+            return await parseAudioQueryResponse(queryResponse);
+        } catch (error) {
+            if (signal.aborted) throw error;
+            if (timedOut && error?.name === "AbortError") {
+                throw new Error(`VOICEVOXエンジンが応答しません（${Math.round(VOICEVOX_FETCH_TIMEOUT_MS / 1000)}秒）`);
+            }
+            throw error;
+        } finally {
+            clearTimeout(timer);
+            signal.removeEventListener("abort", abortFromRequest);
+            controller.abort();
+        }
+    }
+    queryResponse = await fetchWithTimeout(queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
+    if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
+
+    return parseAudioQueryResponse(queryResponse);
 }
 
 /**
@@ -419,13 +482,13 @@ async function requestAudioQuery(text, speaker) {
  * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
  * @returns {Promise<object>}
  */
-async function prepareVoiceQuery(text, settings) {
+async function prepareVoiceQuery(text, settings, signal = null) {
     const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
     // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
     const speaker = Number(speakerId);
 
-    let queryJson = await requestAudioQuery(text, speaker);
-    queryJson = await preferBracketFreeQuery(text, speaker, queryJson);
+    let queryJson = await requestAudioQuery(text, speaker, signal);
+    queryJson = await preferBracketFreeQuery(text, speaker, queryJson, signal);
 
     queryJson.prePhonemeLength = 0.1 * speedScale;
     queryJson.postPhonemeLength = 0.1 * speedScale;
@@ -494,7 +557,7 @@ async function processPlayback(continuePlayback = false) {
                 audioQueue = [];
                 console.error("Offscreen: ストリーミング再生失敗:", error);
                 notifyBackground("PLAYBACK_ERROR",
-                    { error: "ストリーミング再生を中断しました: " + error.message });
+                    { error: "ストリーミング再生を中断しました: " + safeErrorMessage(error) });
             }
         } finally {
             // stop()失敗はrun()側のcatchで利用者へ通知済み。finallyから二次例外を
@@ -611,6 +674,21 @@ function stopAll() {
     playbackGeneration++;
     const stoppingPlayer = currentStreamingPlayer;
     const playerCleanup = stoppingPlayer ? stoppingPlayer.stop() : Promise.resolve();
+    const stoppingPreparation = activeStreamingPreparation;
+    let preparationAbortError = null;
+    if (stoppingPreparation) {
+        try {
+            stoppingPreparation.controller.abort();
+        } catch (error) {
+            preparationAbortError = error;
+        }
+    }
+    const preparationCleanup = waitForStreamingPreparation(stoppingPreparation).then(() => {
+        if (preparationAbortError) {
+            throw globalThis.VVRadioStreaming?.lockCleanup?.(preparationAbortError)
+                || preparationAbortError;
+        }
+    });
     currentStreamingPlayer = null;
 
     if (currentAudio) {
@@ -635,13 +713,17 @@ function stopAll() {
 
     // 先行stop()がまだ完了していれば、それも含めて待つ。
     // これにより背景側の STOP_AUDIO → ENQUEUE_TEXTS は後始末完了順になる。
-    return Promise.resolve(playerCleanup)
+    return Promise.allSettled([playerCleanup, preparationCleanup])
+        .then(results => {
+            const failed = results.find(result => result.status === "rejected");
+            if (failed) throw failed.reason;
+        })
         .then(() => globalThis.VVRadioStreaming?.waitForCleanup?.())
         .then(() => {
             if (wasActive) notifyBackground("PLAYBACK_STOPPED");
         })
         .catch(error => {
-            notifyBackground("PLAYBACK_ERROR", { error: error.message });
+            notifyBackground("PLAYBACK_ERROR", { error: safeErrorMessage(error) });
             throw error;
         });
 }

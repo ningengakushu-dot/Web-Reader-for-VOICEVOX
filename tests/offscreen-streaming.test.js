@@ -28,9 +28,11 @@ function environment({ speakerType = "streaming_talk", feature = true,
     responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {},
     manifestStatus = 200, onChunk = null, timeScale = 1, timerScale = 1,
     onContextClose = null, onSourceStop = null, onReaderCancel = null,
-    makeReader = null } = {}) {
+    onSourceStart = null, onReaderRelease = null, monotonicScale = 1,
+    freezeAudioClock = false, neverEndSources = false, makeReader = null } = {}) {
     let contexts = [];
     let fetchPaths = [];
+    let readerReleaseCount = 0;
     const listenerStats = { active: 0, maxActive: 0, added: 0 };
     class TrackedAbortController extends AbortController {
         constructor() {
@@ -62,8 +64,13 @@ function environment({ speakerType = "streaming_talk", feature = true,
             this.sources = [];
             contexts.push(this);
         }
-        get currentTime() { return (Date.now() - this.startedAt) / 1000 * timeScale; }
+        get currentTime() {
+            return freezeAudioClock ? 0 : (Date.now() - this.startedAt) / 1000 * timeScale;
+        }
         async resume() { this.state = "running"; }
+        createAnalyser() {
+            return { fftSize: 16384, connect() {}, getFloatTimeDomainData(data) { data.fill(0); } };
+        }
         createBuffer(channels, frames, rate) {
             const data = Array.from({ length: channels }, () => new Float32Array(frames));
             return { duration: frames / rate, getChannelData(channel) { return data[channel]; }, data };
@@ -76,8 +83,11 @@ function environment({ speakerType = "streaming_talk", feature = true,
                 start(at) {
                     this.at = at;
                     ctx.sources.push(this);
-                    this.timer = setTimeout(() => this.onended?.(),
-                        Math.max(1, 1000 * (at + this.buffer.duration - ctx.currentTime) / timeScale));
+                    if (onSourceStart) onSourceStart(this, ctx);
+                    if (!neverEndSources) {
+                        this.timer = setTimeout(() => this.onended?.(),
+                            Math.max(1, 1000 * (at + this.buffer.duration - ctx.currentTime) / timeScale));
+                    }
                 },
                 stop() {
                     if (onSourceStop) onSourceStop(this);
@@ -117,7 +127,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
                     async cancel() {
                         if (onReaderCancel) await onReaderCancel({ request, contexts });
                     },
-                    releaseLock() {}
+                    releaseLock() { readerReleaseCount++; onReaderRelease?.({ request, contexts }); }
                 };
             } }
         };
@@ -125,7 +135,8 @@ function environment({ speakerType = "streaming_talk", feature = true,
     const context = vm.createContext({
         console, setTimeout: (callback, ms, ...args) =>
             setTimeout(callback, Math.max(1, ms / timerScale), ...args),
-        clearTimeout, Date, AbortController: TrackedAbortController, Uint8Array, DataView,
+        clearTimeout, Date, performance: { now: () => Date.now() * monotonicScale },
+        AbortController: TrackedAbortController, Uint8Array, DataView,
         VOICEVOX_BASE_URL: "http://127.0.0.1:50021",
         AudioContext: noAudioContext ? undefined : FakeContext,
         async fetch(url, options = {}) {
@@ -146,7 +157,8 @@ function environment({ speakerType = "streaming_talk", feature = true,
     });
     vm.runInContext(fs.readFileSync(path.join(base, "offscreen-streaming.js"), "utf8"),
         context, { filename: "offscreen-streaming.js" });
-    return { api: context.VVRadioStreaming, contexts, fetchPaths, query, listenerStats };
+    return { api: context.VVRadioStreaming, contexts, fetchPaths, query, listenerStats,
+        get readerReleaseCount() { return readerReleaseCount; } };
 }
 
 async function run() {
@@ -216,35 +228,55 @@ async function run() {
     await assert.rejects(pending, /中断|AbortError/);
     assert.equal(halted.contexts[0].state, "closed", "stop closes audio context");
 
-    // 途中でPCMの供給が止まっても、過去に出した音声を再生し直さず
-    // 残りのサンプルを最後まで再生する（無音期間を完全には消せない）。
+    // 途中でPCMの供給が止まった場合は、本文を検証するまで先頭も出力しない。
+    // 通信が再開したら全PCMを連続予約し、無音区間を作らない。
     const slowed = environment({ responseBytes: wav(72000),
         chunkSizes: [44 + 36000 * 2, 72000],
-        onChunk({ count, contexts }) {
-            if (count === 2) contexts[0].startedAt -= 2300;
+        timeScale: 1000, timerScale: 1000,
+        async onChunk({ count, contexts }) {
+            if (count === 2) {
+                assert.equal(contexts[0].sources.length, 0,
+                    "no PCM is scheduled while the rest of the response is unverified");
+                await new Promise(resolve => setTimeout(resolve, 35));
+            }
         } });
     await slowed.api.createPlayer(slowed.query, 5, () => {}).run();
     const delayedSources = slowed.contexts[0].sources;
     assert.equal(delayedSources.reduce((sum, source) => sum + source.buffer.data[0].length, 0), 72000,
         "slow transport must not drop any PCM samples");
-    assert.ok(delayedSources.some((source, index) => index > 0
-        && source.at > delayedSources[index - 1].at
-            + delayedSources[index - 1].buffer.duration + 0.1),
-        "test must produce a real scheduling underrun");
-    assert.equal(await slowed.api.supports(5), false,
-        "underruns temporarily disable streaming for future requests");
+    assert.ok(delayedSources.every((source, index) => index === 0
+        || Math.abs(source.at - (delayedSources[index - 1].at
+            + delayedSources[index - 1].buffer.duration)) < 1e-6),
+        "a slow network response must not create silence between scheduled PCM blocks");
+    assert.equal(await slowed.api.supports(5), true,
+        "network stalls do not suppress a valid future stream");
 
-    // 5秒先読み上限で待機を繰り返したあとでも、通常終了時にabort listenerは残さない。
-    const backpressure = environment({ responseBytes: wav(24000 * 7),
-        chunkSizes: [44 + 24000 * 7 * 2], timeScale: 25 });
+    const tooLong = environment({ responseBytes: wav(24000 * 6) });
+    const tooLongPlayer = tooLong.api.createPlayer(tooLong.query, 5, () => {});
+    await assert.rejects(tooLongPlayer.run(), /バッファの上限/);
+    assert.equal(tooLong.contexts.length, 0,
+        "oversized streams fall back before any PCM is audible");
+    assert.equal(tooLongPlayer.canFallback, true);
+
+    // 5秒以内の本文は完成後に全てを予約し、終了時にabort listenerを残さない。
+    const backpressure = environment({ responseBytes: wav(24000 * 4),
+        chunkSizes: [44 + 24000 * 4 * 2], timeScale: 25 });
     await backpressure.api.createPlayer(backpressure.query, 5, () => {}).run();
-    assert.ok(backpressure.listenerStats.maxActive >= 2,
-        "backpressure must exercise both bounded receive and playback wait listeners");
     assert.equal(backpressure.listenerStats.active, 0,
         "all abort listeners must be released after normal playback");
+    assert.equal(backpressure.contexts[0].sources.reduce(
+        (sum, source) => sum + source.buffer.data[0].length, 0), 24000 * 4);
 
-    // Web Audioの予約後・出力時刻前に応答が壊れた場合は、予約音源を
-    // キャンセルして通常合成へフォールバックできなければならない。
+    // AudioContextの音声クロックが停止しても、単調時計の共通10分期限で最終再生を終了する。
+    const frozenClock = environment({ responseBytes: wav(24000), chunkSizes: [44 + 24000 * 2],
+        freezeAudioClock: true, neverEndSources: true, timerScale: 1000, monotonicScale: 1000 });
+    const frozenPlayer = frozenClock.api.createPlayer(frozenClock.query, 5, () => {});
+    await assert.rejects(frozenPlayer.run(), /全体の時間上限/);
+    assert.equal(frozenClock.contexts[0].state, "closed");
+    assert.equal(frozenClock.api.cleanupStatus(), "ready");
+    assert.equal(frozenClock.listenerStats.active, 0);
+
+    // 本文の完全検証前に通信が壊れたら、音声を一切予約せず通常合成へ戻す。
     let prematureStartNotifications = 0;
     const earlyFailure = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
@@ -255,24 +287,23 @@ async function run() {
     const earlyPlayer = earlyFailure.api.createPlayer(earlyFailure.query, 5,
         () => prematureStartNotifications++);
     await assert.rejects(earlyPlayer.run(), /before audible/);
-    assert.ok(earlyFailure.contexts[0].sources.length > 0,
-        "must actually schedule source before the failure");
-    assert.equal(earlyPlayer.started, false,
-        "future scheduled source is not yet audible and may safely fall back");
+    assert.equal(earlyFailure.contexts[0].sources.length, 0,
+        "incomplete PCM must never be scheduled");
+    assert.equal(earlyPlayer.started, false, "an incomplete stream has not started playback");
     assert.equal(earlyPlayer.canFallback, true, "cancelled prestart source allows normal synthesis");
     assert.equal(earlyFailure.contexts[0].sources.every(s => s.stopped), true);
     assert.equal(prematureStartNotifications, 0, "canceled source cannot emit PLAYBACK_STARTED");
     assert.equal(earlyFailure.contexts[0].state, "closed");
     assert.equal(earlyFailure.listenerStats.active, 0);
 
-    // 再生時刻を過ぎてから、開始通知のタイマーより先にエラーになっても、
-    // 重複音声の危険があるため先頭から再合成してはならない。
+    // 最初の音源予約直後に音声クロックが開始境界を越えた失敗は、
+    // 通常合成を先頭から再生すると重複するため復帰させない。
     const edgeFailure = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        onChunk({ count, contexts }) {
-            if (count === 2) {
-                contexts[0].startedAt -= 100;
-                throw new Error("network broke after audio clock crossed start");
+        onSourceStart(source, ctx) {
+            if (ctx.sources.length === 2) {
+                ctx.startedAt = Date.now() - 1000 * (ctx.sources[0].at + 0.005);
+                throw new Error("audio clock crossed start");
             }
         }
     });
@@ -284,13 +315,11 @@ async function run() {
     assert.equal(edgeFailure.contexts[0].state, "closed");
     assert.equal(edgeFailure.listenerStats.active, 0);
 
-    // 開始5ms前: 予約音源を確実に停止してから通常合成へ復帰できること。
-    // 従来テストはここを「started=true」として音声欠落を許していた。
+    // 開始5ms前: 音源停止要求後にレンダリング側のPCMが無音と確認できれば復帰できる。
     const boundaryGuard = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        onChunk({ count, contexts }) {
-            if (count === 2) {
-                const ctx = contexts[0];
+        onSourceStart(source, ctx) {
+            if (ctx.sources.length === 2) {
                 ctx.startedAt = Date.now() - 1000 * (ctx.sources[0].at - 0.005);
                 throw new Error("failure inside playback start guard");
             }
@@ -302,14 +331,16 @@ async function run() {
         "5ms before first output is not audible after cancellation");
     assert.equal(boundaryPlayer.canFallback, true,
         "5ms boundary must allow normal synthesis after successful cancellation");
-    assert.equal(boundaryGuard.contexts[0].sources.every(s => s.stopped), true);
+    assert.equal(boundaryGuard.contexts[0].sources[0].stopped, true);
     assert.equal(boundaryGuard.contexts[0].state, "closed");
     assert.equal(boundaryGuard.listenerStats.active, 0);
 
     // 一つでも予約取消しに失敗したら、安全を証明できないので二重再生を禁止する。
     const cancelFail = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        onChunk({ count }) { if (count === 2) throw new Error("prestart error"); },
+        onSourceStart(source, ctx) {
+            if (ctx.sources.length === 2) throw new Error("prestart error");
+        },
         onSourceStop() { throw new Error("stop not guaranteed"); }
     });
     const cancelFailPlayer = cancelFail.api.createPlayer(cancelFail.query, 5, () => {});
@@ -324,8 +355,12 @@ async function run() {
     const recoverStall = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
         timerScale: 1000, timeScale: 1000,
-        async onChunk({ count }) {
-            if (count === 2) await new Promise(resolve => setTimeout(resolve, 35));
+        async onChunk({ count, contexts }) {
+            if (count === 2) {
+                assert.equal(contexts[0].sources.length, 0,
+                    "PCM remains buffered during the 35-second-equivalent network pause");
+                await new Promise(resolve => setTimeout(resolve, 35));
+            }
         }
     });
     const recoveredPlayer = recoverStall.api.createPlayer(recoverStall.query, 5, () => {});
@@ -379,8 +414,8 @@ async function run() {
     assert.ok(rapidRestart.contexts.every(ctx => ctx.state === "closed"));
     assert.equal(rapidRestart.listenerStats.active, 0);
 
-    // 読み上げ停止の直後に別の読み上げを開始しても、古いタイマーと
-    // イベントリスナーが後続の再生へ干渉しない。
+    // 読み上げ停止の直後に別の読み上げを開始しても、古い通信とイベントリスナーが
+    // 後続の再生へ干渉しない。本文の検証中はまだ音源を予約しない。
     const stopEnv = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
         onChunk({ count }) { if (count === 2) return new Promise(() => {}); }
@@ -388,7 +423,7 @@ async function run() {
     const oldPlayer = stopEnv.api.createPlayer(stopEnv.query, 5, () => {});
     const oldRun = oldPlayer.run();
     await new Promise(resolve => setTimeout(resolve, 25));
-    assert.ok(stopEnv.contexts[0]?.sources.length > 0, "first playback must be scheduled");
+    assert.equal(stopEnv.contexts[0]?.sources.length, 0, "incomplete stream is not yet scheduled");
     await oldPlayer.stop();
     await assert.rejects(oldRun, /中断|AbortError/);
     assert.equal(stopEnv.listenerStats.active, 0);
@@ -504,10 +539,12 @@ async function run() {
     });
     const nativeAbortPlayer = nativeAborted.api.createPlayer(nativeAborted.query, 5, () => {});
     const nativeAbortRun = nativeAbortPlayer.run();
-    for (let attempts = 0; !nativeAborted.contexts[0]?.sources.length; attempts++) {
-        assert.ok(attempts < 100, "native ReadableStream should reserve a source");
+    for (let attempts = 0; !nativeAborted.contexts[0]; attempts++) {
+        assert.ok(attempts < 100, "native ReadableStream should start reading");
         await new Promise(resolve => setTimeout(resolve, 1));
     }
+    assert.equal(nativeAborted.contexts[0].sources.length, 0,
+        "partial PCM is not scheduled before EOF");
     await nativeAbortPlayer.stop();
     await assert.rejects(nativeAbortRun, /中断|AbortError/);
     assert.equal(nativeAborted.api.cleanupStatus(), "ready");
@@ -551,6 +588,59 @@ async function run() {
         assert.equal(primitiveCancel.listenerStats.active, 0);
     }
 
+    // WHATWG ReadableStreamのnull読取理由と同じcancel拒否は正常な終了理由として扱う。
+    let nullReasonReader;
+    const nullRead = environment({
+        responseBytes: wav(45000),
+        makeReader({ bytes }) {
+            let sent = false;
+            const stream = new ReadableStream({
+                pull(controller) {
+                    if (!sent) {
+                        sent = true;
+                        controller.enqueue(bytes.subarray(0, 44 + 35000 * 2));
+                    } else {
+                        controller.error(null);
+                    }
+                }
+            }, { highWaterMark: 0 });
+            nullReasonReader = stream;
+            return stream.getReader();
+        }
+    });
+    const nullReadPlayer = nullRead.api.createPlayer(nullRead.query, 5, () => {});
+    let nullReadFailure = "not rejected";
+    try { await nullReadPlayer.run(); } catch (error) { nullReadFailure = error; }
+    assert.equal(nullReadFailure, null, "a null read rejection must remain a handled rejection");
+    assert.equal(nullRead.api.cleanupStatus(), "ready");
+    assert.equal(nullReadPlayer.canFallback, true);
+    assert.equal(nullReasonReader.locked, false, "errored reader lock is released after cleanup");
+
+    // AudioContext.close()の拒否値がundefinedでもReader.releaseLock()は必ず実行する。
+    let nativeLockStream;
+    const closeFailureRelease = environment({
+        responseBytes: wav(45000),
+        makeReader({ bytes }) {
+            nativeLockStream = new ReadableStream({
+                start(controller) { controller.enqueue(bytes.subarray(0, 44 + 35000 * 2)); }
+            }, { highWaterMark: 0 });
+            return nativeLockStream.getReader();
+        },
+        onContextClose() { return Promise.reject(undefined); }
+    });
+    const closeFailurePlayer = closeFailureRelease.api.createPlayer(
+        closeFailureRelease.query, 5, () => {});
+    const closeFailureRun = closeFailurePlayer.run();
+    for (let attempts = 0; !closeFailureRelease.contexts[0]; attempts++) {
+        assert.ok(attempts < 100, "native reader must start before STOP");
+        await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    await assert.rejects(closeFailurePlayer.stop(), /再読み込み/);
+    await assert.rejects(closeFailureRun, /再読み込み/);
+    assert.equal(closeFailureRelease.api.cleanupStatus(), "failed");
+    assert.equal(nativeLockStream.locked, false,
+        "Reader release must run even when AudioContext.close() rejects");
+
     // 停止と再開を50回繰り返しても以前のreader / AudioContextは残さない。
     const repeated = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
@@ -562,9 +652,8 @@ async function run() {
     for (let n = 0; n < 50; n++) {
         const item = repeated.api.createPlayer(repeated.query, 5, () => {});
         const running = item.run();
-        for (let spin = 0; repeated.contexts.length <= n
-            || repeated.contexts[n].sources.length === 0; spin++) {
-            assert.ok(spin < 200, "iteration " + n + " must schedule audio");
+        for (let spin = 0; repeated.contexts.length <= n; spin++) {
+            assert.ok(spin < 200, "iteration " + n + " must start reading");
             await new Promise(resolve => setTimeout(resolve, 1));
         }
         await item.stop();
@@ -572,7 +661,8 @@ async function run() {
         assert.equal(repeated.api.cleanupStatus(), "ready");
         assert.equal(repeated.listenerStats.active, 0);
         assert.equal(repeated.contexts[n].state, "closed");
-        assert.ok(repeated.contexts[n].sources.every(source => source.stopped));
+        assert.equal(repeated.contexts[n].sources.length, 0,
+            "stopped incomplete streams must never schedule PCM");
     }
     assert.equal(repeated.contexts.length, 50);
 
