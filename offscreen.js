@@ -228,7 +228,6 @@ function scheduleOcrWorkerIdleRelease() {
     // 通信中の無音・欠落を出力しないため、検証済みの全文がこの量に収まるときだけ
     // ストリーミング再生する。超過・通信失敗は、出力前に通常合成へ戻す。
     const BUFFER_SECONDS_LIMIT = 5;
-    const FRAME_BUFFER = 4096;
     const MAX_AUDIO_BYTES = 128 * 1024 * 1024;
     const cache = new Map();
     // 停止直後に次の再生が来ても、前のAudioContext.close()完了を先に待つ。
@@ -376,9 +375,10 @@ function scheduleOcrWorkerIdleRelease() {
         let firstScheduledAt = null;
         let stopPromise = null;
         let cleanupSucceeded = false;
+        let exceedsBufferLimit = false;
         let firstOutputAnalyser = null;
         const previousReadError = { failed: false, reason: undefined };
-        const sources = new Set();
+        let source = null;
         let startTimer = null;
         const abortError = () => new Error("ストリーミング再生が中断されました");
         const ensureActive = () => { if (stopped || controller.signal.aborted) throw abortError(); };
@@ -390,7 +390,7 @@ function scheduleOcrWorkerIdleRelease() {
             let cancelledSources = true;
             // abort()は同期処理中に長く停止することがある。出力ノードを先に止め、
             // その後にレンダリング側のPCMと音声クロックで先頭が出ていないことを調べる。
-            for (const source of sources) {
+            if (source) {
                 source.onended = null;
                 try {
                     source.stop(0);
@@ -412,10 +412,10 @@ function scheduleOcrWorkerIdleRelease() {
                 }
             }
             const beforeStart = stopRequestedBeforeStart && !renderedOutput;
-            for (const source of sources) {
+            if (source) {
                 try { source.disconnect(); } catch (error) {}
+                source = null;
             }
-            sources.clear();
             // source.stop()とPCM確認の後で通信をabortする。abort側の遅延中に
             // 予約音源が先頭から鳴り始める競合を避ける。
             let abortFailed = false;
@@ -495,12 +495,9 @@ function scheduleOcrWorkerIdleRelease() {
             let meta = null;
             let pcmLeft = new Uint8Array(4);
             let pcmLeftCount = 0;
-            let floats = null;
-            let framesInBlock = 0;
-            let waitingBuffers = [];
-            let nextAudioTime = 0;
-            let pendingSources = 0;
-            let streamEnded = false;
+            let buffer = null;
+            let channelData = null;
+            let frameIndex = 0;
             let finishResolve;
             const finished = new Promise((resolve) => { finishResolve = resolve; });
             async function timed(promise, timeoutMs, abortOnTimeout = true) {
@@ -533,10 +530,6 @@ function scheduleOcrWorkerIdleRelease() {
                 }
             }
 
-            function finishIfComplete() {
-                if (streamEnded && pendingSources === 0) finishResolve();
-            }
-
             async function readStreamChunk() {
                 const remainingTime = remainingResponseMs();
                 if (remainingTime <= 0) throw new Error("ストリーミング受信の時間上限を超えました");
@@ -566,90 +559,74 @@ function scheduleOcrWorkerIdleRelease() {
                 }
             }
 
-            async function scheduleBuffers() {
+            async function scheduleBuffer() {
                 ensureActive();
                 if (context.state !== "running") {
                     await timed(context.resume(), 3000);
+                    ensureActive();
                     if (context.state !== "running") {
                         throw new Error("Chromeの音声再生機構を開始できません");
                     }
                 }
-                for (const buffer of waitingBuffers) {
-                    ensureActive();
-                    const at = playbackState !== "idle"
-                        ? Math.max(nextAudioTime, context.currentTime + 0.02)
-                        : context.currentTime + 0.05;
-                    const source = context.createBufferSource();
-                    source.buffer = buffer;
-                    if (playbackState === "idle" && typeof context.createAnalyser === "function") {
-                        firstOutputAnalyser = context.createAnalyser();
-                        firstOutputAnalyser.fftSize = 16384;
-                        source.connect(firstOutputAnalyser);
-                        firstOutputAnalyser.connect(context.destination);
-                    } else {
-                        source.connect(context.destination);
-                    }
-                    source.onended = () => {
-                        sources.delete(source);
-                        source.disconnect();
-                        pendingSources--;
-                        finishIfComplete();
-                    };
-                    sources.add(source);
-                    pendingSources++;
-                    try {
-                        source.start(at);
-                    } catch (error) {
-                        sources.delete(source);
-                        source.onended = null;
-                        source.disconnect();
-                        pendingSources--;
-                        throw error;
-                    }
-                    nextAudioTime = at + buffer.duration;
-                    if (playbackState === "idle") {
-                        playbackState = "scheduled";
-                        firstScheduledAt = at;
-                        const reportActualStart = () => {
-                            startTimer = null;
-                            if (stopped || context.state !== "running"
-                                || playbackState !== "scheduled") return;
-                            const remainingMs = (firstScheduledAt - context.currentTime) * 1000;
-                            if (remainingMs > 0) {
-                                startTimer = setTimeout(reportActualStart, Math.max(1, remainingMs));
-                                return;
-                            }
-                            playbackState = "started";
-                            onStart();
-                        };
-                        startTimer = setTimeout(reportActualStart,
-                            Math.max(1, (at - context.currentTime) * 1000));
-                    }
+
+                // 音声クロックが予約処理中に進んでも、PCMの途中に継ぎ目を作らない。
+                source = context.createBufferSource();
+                source.buffer = buffer;
+                if (typeof context.createAnalyser === "function") {
+                    firstOutputAnalyser = context.createAnalyser();
+                    firstOutputAnalyser.fftSize = 16384;
+                    source.connect(firstOutputAnalyser);
+                    firstOutputAnalyser.connect(context.destination);
+                } else {
+                    source.connect(context.destination);
                 }
-                waitingBuffers = [];
+
+                const reportActualStart = () => {
+                    startTimer = null;
+                    if (stopped || context.state !== "running" || playbackState !== "scheduled") return;
+                    const remainingMs = (firstScheduledAt - context.currentTime) * 1000;
+                    if (remainingMs > 0) {
+                        startTimer = setTimeout(reportActualStart, Math.max(1, remainingMs));
+                        return;
+                    }
+                    playbackState = "started";
+                    onStart();
+                };
+                source.onended = () => {
+                    source.disconnect();
+                    source = null;
+                    if (playbackState === "scheduled") {
+                        clearTimeout(startTimer);
+                        startTimer = null;
+                        playbackState = "started";
+                        onStart();
+                    }
+                    finishResolve();
+                };
+
+                firstScheduledAt = context.currentTime + 0.05;
+                try {
+                    source.start(firstScheduledAt);
+                } catch (error) {
+                    source.onended = null;
+                    source.disconnect();
+                    source = null;
+                    throw error;
+                }
+                playbackState = "scheduled";
+                startTimer = setTimeout(reportActualStart,
+                    Math.max(1, (firstScheduledAt - context.currentTime) * 1000));
             }
 
-            async function flushFrames() {
-                if (framesInBlock === 0) return;
-                const buffer = context.createBuffer(meta.channels, framesInBlock, meta.sampleRate);
-                for (let channel = 0; channel < meta.channels; channel++) {
-                    buffer.getChannelData(channel).set(floats[channel].subarray(0, framesInBlock));
-                }
-                waitingBuffers.push(buffer);
-                framesInBlock = 0;
-            }
-
-            async function acceptPcm(bytes) {
-                if (!floats) floats = Array.from({ length: meta.channels },
-                    () => new Float32Array(FRAME_BUFFER));
+            function acceptPcm(bytes) {
                 const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 let position = 0;
                 function frame(frameView, at) {
                     for (let channel = 0; channel < meta.channels; channel++) {
-                        floats[channel][framesInBlock] =
+                        channelData[channel][frameIndex] =
                             frameView.getInt16(at + channel * 2, true) / 32768;
                     }
-                    framesInBlock++;
+                    frameIndex++;
                 }
                 if (pcmLeftCount) {
                     const needed = meta.block - pcmLeftCount;
@@ -660,13 +637,11 @@ function scheduleOcrWorkerIdleRelease() {
                     if (pcmLeftCount === meta.block) {
                         frame(new DataView(pcmLeft.buffer), 0);
                         pcmLeftCount = 0;
-                        if (framesInBlock === FRAME_BUFFER) await flushFrames();
                     }
                 }
                 while (position + meta.block <= bytes.length) {
                     frame(view, position);
                     position += meta.block;
-                    if (framesInBlock === FRAME_BUFFER) await flushFrames();
                 }
                 if (position < bytes.length) {
                     pcmLeft.set(bytes.subarray(position), 0);
@@ -716,26 +691,28 @@ function scheduleOcrWorkerIdleRelease() {
                         if (headerUsed === 44) {
                             meta = pcmHeader(header, query, length);
                             if (meta.dataBytes > BUFFER_SECONDS_LIMIT * meta.sampleRate * meta.block) {
+                                exceedsBufferLimit = true;
                                 throw new Error("音声バッファの上限を超えたため通常合成へ切り替えます");
                             }
                             context = new AudioContext({ sampleRate: meta.sampleRate });
+                            buffer = context.createBuffer(
+                                meta.channels, meta.dataBytes / meta.block, meta.sampleRate);
+                            channelData = Array.from({ length: meta.channels },
+                                (_, channel) => buffer.getChannelData(channel));
                         }
                     }
                     if (meta && offset < value.length) {
                         const part = value.subarray(offset);
                         payloadReceived += part.byteLength;
                         if (payloadReceived > meta.dataBytes) throw new Error("WAVデータの過剰受信");
-                        await acceptPcm(part);
+                        acceptPcm(part);
                     }
                 }
                 if (!meta || received !== meta.fileBytes || payloadReceived !== meta.dataBytes
                     || (length != null && received !== length) || pcmLeftCount !== 0) {
                     throw new Error("VOICEVOXストリームの音声末尾が欠損しています");
                 }
-                await flushFrames();
-                if (waitingBuffers.length) await scheduleBuffers();
-                streamEnded = true;
-                finishIfComplete();
+                await scheduleBuffer();
                 await timed(finished, RESPONSE_TOTAL_MS);
                 ensureActive();
             } finally {
@@ -748,6 +725,7 @@ function scheduleOcrWorkerIdleRelease() {
                 return playbackState === "started" || (playbackState === "scheduled"
                     && context !== null && context.currentTime >= firstScheduledAt);
             },
+            get exceedsBufferLimit() { return exceedsBufferLimit; },
             get canFallback() {
                 return cleanupSucceeded && cleanupFailure === null
                     && (playbackState === "idle" || playbackState === "cancelled");
@@ -1314,8 +1292,11 @@ async function processPlayback(continuePlayback = false) {
             completed = true; // readerの終了だけではなく最後のAudioBufferの再生完了まで待つ
         } catch (error) {
             if (generation !== playbackGeneration) return;
-            globalThis.VVRadioStreaming.suppress(item.settings.speakerId);
-            if (player.canFallback === true) {
+            const canFallback = player.canFallback === true;
+            if (!canFallback || !player.exceedsBufferLimit) {
+                globalThis.VVRadioStreaming.suppress(item.settings.speakerId);
+            }
+            if (canFallback) {
                 // 未予約、または開始前の予約取消し・Context解放が完了した場合のみ再試行。
                 textQueue.unshift({ text: item.text, settings: item.settings,
                     forceNormal: true, query: item.query, durationSec: item.durationSec,

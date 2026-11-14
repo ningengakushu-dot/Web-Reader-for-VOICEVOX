@@ -28,7 +28,7 @@ function environment({ speakerType = "streaming_talk", feature = true,
     responseBytes = null, chunkSizes = null, noAudioContext = false, queryOptions = {},
     manifestStatus = 200, onChunk = null, timeScale = 1, timerScale = 1,
     onContextClose = null, onSourceStop = null, onReaderCancel = null,
-    onSourceStart = null, onReaderRelease = null, monotonicScale = 1,
+    onStartTimer = null, onReaderRelease = null, monotonicScale = 1,
     freezeAudioClock = false, neverEndSources = false, makeReader = null } = {}) {
     let contexts = [];
     let fetchPaths = [];
@@ -83,7 +83,6 @@ function environment({ speakerType = "streaming_talk", feature = true,
                 start(at) {
                     this.at = at;
                     ctx.sources.push(this);
-                    if (onSourceStart) onSourceStart(this, ctx);
                     if (!neverEndSources) {
                         this.timer = setTimeout(() => this.onended?.(),
                             Math.max(1, 1000 * (at + this.buffer.duration - ctx.currentTime) / timeScale));
@@ -133,8 +132,10 @@ function environment({ speakerType = "streaming_talk", feature = true,
         };
     }
     const context = vm.createContext({
-        console, setTimeout: (callback, ms, ...args) =>
-            setTimeout(callback, Math.max(1, ms / timerScale), ...args),
+        console, setTimeout: (callback, ms, ...args) => {
+            if (callback.name === "reportActualStart") onStartTimer?.(contexts[0]);
+            return setTimeout(callback, Math.max(1, ms / timerScale), ...args);
+        },
         clearTimeout, Date, performance: { now: () => Date.now() * monotonicScale },
         AbortController: TrackedAbortController, Uint8Array, DataView,
         VOICEVOX_BASE_URL: "http://127.0.0.1:50021",
@@ -199,16 +200,12 @@ async function run() {
     assert.equal(started, 1);
     assert.equal(player.started, true);
     const sources = e.contexts[0].sources;
-    const samples = sources.flatMap(s => Array.from(s.buffer.data[0]));
+    assert.equal(sources.length, 1, "all verified PCM is scheduled in one start() call");
+    const samples = sources[0].buffer.data[0];
     assert.equal(samples.length, 18000);
     for (const sampleIndex of [0, 1, 4095, 4096, 8191, 8192, 17999]) {
         assert.ok(Math.abs(samples[sampleIndex] -
             ((sampleIndex % 500) - 250) / 32768) < 1e-7);
-    }
-    for (let i = 1; i < sources.length; i++) {
-        assert.ok(Math.abs(sources[i].at -
-            (sources[i - 1].at + sources[i - 1].buffer.duration)) < 1e-6,
-            "PCM buffers must be scheduled without gaps or overlap");
     }
     assert.equal(e.contexts[0].state, "closed", "AudioContext released after final sample");
 
@@ -229,7 +226,7 @@ async function run() {
     assert.equal(halted.contexts[0].state, "closed", "stop closes audio context");
 
     // 途中でPCMの供給が止まった場合は、本文を検証するまで先頭も出力しない。
-    // 通信が再開したら全PCMを連続予約し、無音区間を作らない。
+    // 通信が再開したら全PCMを一度に予約し、無音区間を作らない。
     const slowed = environment({ responseBytes: wav(72000),
         chunkSizes: [44 + 36000 * 2, 72000],
         timeScale: 1000, timerScale: 1000,
@@ -244,10 +241,7 @@ async function run() {
     const delayedSources = slowed.contexts[0].sources;
     assert.equal(delayedSources.reduce((sum, source) => sum + source.buffer.data[0].length, 0), 72000,
         "slow transport must not drop any PCM samples");
-    assert.ok(delayedSources.every((source, index) => index === 0
-        || Math.abs(source.at - (delayedSources[index - 1].at
-            + delayedSources[index - 1].buffer.duration)) < 1e-6),
-        "a slow network response must not create silence between scheduled PCM blocks");
+    assert.equal(delayedSources.length, 1, "delayed PCM still plays as a single buffer");
     assert.equal(await slowed.api.supports(5), true,
         "network stalls do not suppress a valid future stream");
 
@@ -300,11 +294,9 @@ async function run() {
     // 通常合成を先頭から再生すると重複するため復帰させない。
     const edgeFailure = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        onSourceStart(source, ctx) {
-            if (ctx.sources.length === 2) {
-                ctx.startedAt = Date.now() - 1000 * (ctx.sources[0].at + 0.005);
-                throw new Error("audio clock crossed start");
-            }
+        onStartTimer(ctx) {
+            ctx.startedAt = Date.now() - 1000 * (ctx.sources[0].at + 0.005);
+            throw new Error("audio clock crossed start");
         }
     });
     const edgePlayer = edgeFailure.api.createPlayer(edgeFailure.query, 5, () => {});
@@ -318,11 +310,9 @@ async function run() {
     // 開始5ms前: 音源停止要求後にレンダリング側のPCMが無音と確認できれば復帰できる。
     const boundaryGuard = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        onSourceStart(source, ctx) {
-            if (ctx.sources.length === 2) {
-                ctx.startedAt = Date.now() - 1000 * (ctx.sources[0].at - 0.005);
-                throw new Error("failure inside playback start guard");
-            }
+        onStartTimer(ctx) {
+            ctx.startedAt = Date.now() - 1000 * (ctx.sources[0].at - 0.005);
+            throw new Error("failure inside playback start guard");
         }
     });
     const boundaryPlayer = boundaryGuard.api.createPlayer(boundaryGuard.query, 5, () => {});
@@ -338,9 +328,7 @@ async function run() {
     // 一つでも予約取消しに失敗したら、安全を証明できないので二重再生を禁止する。
     const cancelFail = environment({
         responseBytes: wav(45000), chunkSizes: [44 + 35000 * 2, 100000],
-        onSourceStart(source, ctx) {
-            if (ctx.sources.length === 2) throw new Error("prestart error");
-        },
+        onStartTimer() { throw new Error("prestart error"); },
         onSourceStop() { throw new Error("stop not guaranteed"); }
     });
     const cancelFailPlayer = cancelFail.api.createPlayer(cancelFail.query, 5, () => {});

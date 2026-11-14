@@ -37,7 +37,8 @@ try {
     await page.evaluate(({ baseUrl, wavBytes }) => {
         const bytes = Uint8Array.from(wavBytes);
         const probe = globalThis.streamingProbe = {
-            analyserReads: [], context: null, startAt: null, stopPromise: null, player: null
+            analyserReads: [], context: null, startAt: null, stopPromise: null, player: null,
+            mode: 'stop', scheduledFrames: [], clockAfterSchedulingDelay: null
         };
         globalThis.VOICEVOX_BASE_URL = baseUrl;
 
@@ -75,11 +76,18 @@ try {
         const start = AudioBufferSourceNode.prototype.start;
         AudioBufferSourceNode.prototype.start = function (at) {
             const result = start.call(this, at);
+            probe.scheduledFrames.push(this.buffer.length);
             if (probe.startAt === null) {
                 probe.startAt = at;
-                queueMicrotask(() => {
-                    if (!probe.stopPromise) probe.stopPromise = probe.player.stop();
-                });
+                if (probe.mode === 'stop') {
+                    queueMicrotask(() => {
+                        if (!probe.stopPromise) probe.stopPromise = probe.player.stop();
+                    });
+                } else {
+                    const until = performance.now() + 320;
+                    while (performance.now() < until) {}
+                    probe.clockAfterSchedulingDelay = probe.context.currentTime;
+                }
             }
             return result;
         };
@@ -115,7 +123,9 @@ try {
                     audioClockBeforeAbort: probe.audioClockBeforeAbort,
                     audioClockAfterAbort: probe.audioClockAfterAbort,
                     abortDelayMs: probe.abortDelayMs,
-                    analyserReads: probe.analyserReads
+                    analyserReads: probe.analyserReads,
+                    scheduledFrames: probe.scheduledFrames,
+                    clockAfterSchedulingDelay: probe.clockAfterSchedulingDelay
                 };
             })();
         });
@@ -138,6 +148,20 @@ try {
     assert.equal(result.canFallback, true,
         'fallback is safe only after source stop and a silent render-side check');
     console.log(`Chromium ${browser.version()}: delayed abort crossed start; no PCM rendered; fallback safe`);
+
+    await page.evaluate(() => Object.assign(streamingProbe, {
+        mode: 'delay', startAt: null, stopPromise: null, playbackStarted: false,
+        scheduledFrames: []
+    }));
+    await page.click('#start');
+    const delayed = await page.evaluate(() => streamingProbe.done);
+    assert.equal(delayed.run.resolved, true);
+    assert.equal(delayed.playbackStarted, true);
+    assert.ok(delayed.clockAfterSchedulingDelay > delayed.startAt + 4096 / 24000,
+        'the Web Audio clock must pass the former first buffer boundary during the stall');
+    assert.deepEqual(delayed.scheduledFrames, [frames],
+        'the entire PCM must be scheduled once even when the main thread stalls');
+    console.log(`Chromium ${browser.version()}: scheduled all ${frames} PCM frames once across the 320 ms stall`);
 } finally {
     await browser?.close();
     await new Promise(resolve => server.close(resolve));

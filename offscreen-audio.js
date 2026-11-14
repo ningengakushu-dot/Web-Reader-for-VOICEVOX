@@ -546,8 +546,11 @@ async function processPlayback(continuePlayback = false) {
             completed = true; // readerの終了だけではなく最後のAudioBufferの再生完了まで待つ
         } catch (error) {
             if (generation !== playbackGeneration) return;
-            globalThis.VVRadioStreaming.suppress(item.settings.speakerId);
-            if (player.canFallback === true) {
+            const canFallback = player.canFallback === true;
+            if (!canFallback || !player.exceedsBufferLimit) {
+                globalThis.VVRadioStreaming.suppress(item.settings.speakerId);
+            }
+            if (canFallback) {
                 // 未予約、または開始前の予約取消し・Context解放が完了した場合のみ再試行。
                 textQueue.unshift({ text: item.text, settings: item.settings,
                     forceNormal: true, query: item.query, durationSec: item.durationSec,

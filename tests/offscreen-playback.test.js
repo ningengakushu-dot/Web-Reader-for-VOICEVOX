@@ -199,7 +199,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     let closeBarrier = null;
     let rejectClose = false;
     let holdNextRead = false;
-    let failSourceStartMode = null;
+    let failStartTimerMode = null;
     class IntegratedAudioContext {
         constructor() {
             this.origin = Date.now();
@@ -229,10 +229,8 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
                 start(at) {
                     this.at = at;
                     ctx.sources.push(this);
-                    if (failSourceStartMode && ctx.sources.length === 2) {
-                        ctx.forcedClock = ctx.sources[0].at
-                            + (failSourceStartMode === 'after' ? 0.005 : -0.005);
-                        throw new Error('injected start boundary failure');
+                    if (streamReaderMode === 'short') {
+                        setTimeout(() => this.onended?.(), 70);
                     }
                 },
                 stop() { this.cancelled = true; }
@@ -263,6 +261,14 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     context.AudioContext = class extends IntegratedAudioContext {
         constructor() { super(); integratedContext = this; }
     };
+    context.setTimeout = (callback, ms, ...args) => {
+        if (failStartTimerMode && callback.name === 'reportActualStart') {
+            integratedContext.forcedClock = integratedContext.sources[0].at
+                + (failStartTimerMode === 'after' ? 0.005 : -0.005);
+            throw new Error('injected start boundary failure');
+        }
+        return setTimeout(callback, ms, ...args);
+    };
     context.fetch = async (url, options = {}) => {
         const pathName = new URL(url).pathname;
         if (preparationBlock?.path === pathName) {
@@ -289,20 +295,22 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
         } };
         if (pathName !== '/streaming_synthesis') throw new Error('unexpected endpoint: ' + pathName);
         integratedStreamRequests++;
-        if (streamReaderMode === 'empty') {
-            const header = wavBytes.slice(0, 44);
-            const headerView = new DataView(header.buffer);
-            headerView.setUint32(4, 36, true);
-            headerView.setUint32(40, 0, true);
+        if (['empty', 'long', 'short'].includes(streamReaderMode)) {
+            const frames = { empty: 0, long: 24000 * 6, short: 240 }[streamReaderMode];
+            const wave = new Uint8Array(44 + frames * 2);
+            wave.set(wavBytes.subarray(0, 44));
+            const headerView = new DataView(wave.buffer);
+            headerView.setUint32(4, wave.length - 8, true);
+            headerView.setUint32(40, frames * 2, true);
             let sent = false;
             return {
                 ok: true,
-                headers: { get: () => '44' },
+                headers: { get: () => String(wave.length) },
                 body: { getReader: () => ({
                     async read() {
                         if (sent) return { done: true };
                         sent = true;
-                        return { done: false, value: header };
+                        return { done: false, value: wave };
                     },
                     async cancel() {},
                     releaseLock() {}
@@ -370,7 +378,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
         };
     };
     notifications.length = 0;
-    failSourceStartMode = 'before';
+    failStartTimerMode = 'before';
     const synthesisBeforeEdge = normalSynthesisCalls;
     response = await enqueue('real player prestart 5ms', 'auto');
     assert.strictEqual(response.success, true);
@@ -384,10 +392,10 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     assert.ok(!notifications.some(m => m.type === 'PLAYBACK_ERROR'),
         'successful boundary cancellation must not cause missing-audio error');
 
-    failSourceStartMode = null;
+    failStartTimerMode = null;
     context.VVRadioStreaming.invalidate(1);
     notifications.length = 0;
-    failSourceStartMode = 'after';
+    failStartTimerMode = 'after';
     const synthesisBeforeAudible = normalSynthesisCalls;
     response = await enqueue('real player after audio start', 'auto');
     assert.strictEqual(response.success, true);
@@ -397,7 +405,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
         'once audio start time has passed, never restart from the first PCM');
     assert.ok(notifications.some(m => m.type === 'PLAYBACK_ERROR'));
 
-    failSourceStartMode = null;
+    failStartTimerMode = null;
 
     const waitUntil = async (predicate, message) => {
         for (let attempts = 0; !predicate(); attempts++) {
@@ -464,6 +472,26 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     assert.strictEqual(integratedContext, null, 'empty PCM must be rejected before AudioContext creation');
     assert.deepStrictEqual(notifications.map(m => m.type), ['PLAYBACK_STARTED', 'PLAYBACK_ENDED'],
         'only the normal fallback may emit playback events');
+    streamReaderMode = null;
+
+    notifications.length = 0;
+    context.VVRadioStreaming.invalidate(1);
+    const beforeLong = normalSynthesisCalls;
+    const beforeLongStream = integratedStreamRequests;
+    streamReaderMode = 'long';
+    assert.strictEqual((await enqueue('over five seconds', 'auto')).success, true);
+    await waitUntil(() => notifications.some(m => m.type === 'PLAYBACK_ENDED'), 'long fallback must end');
+    assert.strictEqual(normalSynthesisCalls, beforeLong + 1);
+    assert.strictEqual(integratedStreamRequests, beforeLongStream + 1);
+
+    notifications.length = 0;
+    streamReaderMode = 'short';
+    assert.strictEqual((await enqueue('short after long', 'auto')).success, true);
+    await waitUntil(() => notifications.some(m => m.type === 'PLAYBACK_ENDED'), 'short stream must end');
+    assert.strictEqual(integratedStreamRequests, beforeLongStream + 2,
+        'the preceding length limit must not disable streaming for the same speaker');
+    assert.strictEqual(normalSynthesisCalls, beforeLong + 1);
+    assert.deepStrictEqual(notifications.map(m => m.type), ['PLAYBACK_STARTED', 'PLAYBACK_ENDED']);
     streamReaderMode = null;
 
     // null読取拒否と同じnull cancel拒否は安全な終了理由として扱う。
