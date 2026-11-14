@@ -277,6 +277,7 @@
     let playbackRevision = 0;
     let pendingStop;
 
+    sendRuntimeMessage({ type: "PLAYBACK_PAGE_READY" }, () => { void chrome.runtime.lastError; });
     window.addEventListener("pagehide", () => {
         sendRuntimeMessage({ type: "PLAYBACK_PAGE_HIDDEN" }, () => { void chrome.runtime.lastError; });
     });

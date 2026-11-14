@@ -46,6 +46,17 @@ function load(file, chrome) {
 
     assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_STARTED', target: 'background' }, tabSender).ok, false);
     assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_STARTED', target: 'background' }, offscreenSender).ok, true);
+    assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_STARTED', target: 'background' },
+        { ...offscreenSender, tab: tabSender.tab }).ok, false, 'an extension tab is not an Offscreen Document');
+    const child = { ...tabSender, frameId: 3, documentId: 'child-document' };
+    for (const type of ['PLAYBACK_PAGE_HIDDEN', 'PLAYBACK_PAGE_READY', 'TOGGLE_READING_REQUEST', 'PLAYBACK_STOP_FAILED', 'GET_PLAYBACK_STATE']) {
+        assert.strictEqual(bg.validateRequest({ type, tabId: 2, frameId: 0 }, child).ok, false);
+    }
+    for (const type of ['GENERATE_VOICE', 'STOP_ALL']) {
+        assert.strictEqual(bg.validateRequest({ type, text: '本文' }, { ...child, id: 'other' }).ok, false);
+    }
+    assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_PAGE_HIDDEN' },
+        { ...tabSender, documentId: 'main-document' }).ok, true);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_PROGRESS', target: 'background', tabId: 1, progress: Infinity }, offscreenSender).ok, false);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_PROGRESS', target: 'background', tabId: 1, progress: 0.5 }, offscreenSender).ok, true);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_COMPLETE', target: 'background', tabId: 1, error: {} }, offscreenSender).ok, false);

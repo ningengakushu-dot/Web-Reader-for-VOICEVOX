@@ -23,6 +23,7 @@ let started = 0;
 let closed = 0;
 let normal = 0;
 let streamResponse = 'partial';
+let normalStatus = 200;
 const server = http.createServer((request, response) => {
     const { pathname } = new URL(request.url, 'http://127.0.0.1');
     request.resume();
@@ -35,6 +36,8 @@ const server = http.createServer((request, response) => {
     } else if (pathname === '/streaming_synthesis') {
         started++;
         response.on('close', () => closed++);
+        if (streamResponse === 'http500') return response.writeHead(500).end();
+        if (streamResponse === 'complete') return response.writeHead(200, { 'Content-Type': 'audio/wav' }).end(wav);
         if (streamResponse === 'truncated') {
             response.writeHead(200, { 'Content-Type': 'audio/wav' });
             response.end(wav.subarray(0, 4096));
@@ -42,16 +45,20 @@ const server = http.createServer((request, response) => {
         }
         response.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length });
         response.write(wav.subarray(0, 4096));
+        if (streamResponse === 'recover') {
+            const timer = setTimeout(() => response.end(wav.subarray(4096)), 35000);
+            response.on('close', () => clearTimeout(timer));
+        }
     } else if (pathname === '/synthesis') {
         normal++;
-        response.writeHead(200, { 'Content-Type': 'audio/wav' }).end(wav);
+        response.writeHead(normalStatus, { 'Content-Type': 'audio/wav' }).end(wav);
     } else {
         response.writeHead(404).end();
     }
 });
 
-async function waitFor(check, description) {
-    const deadline = Date.now() + 8000;
+async function waitFor(check, description, timeout = 8000) {
+    const deadline = Date.now() + timeout;
     while (!await check()) {
         assert.ok(Date.now() < deadline, description);
         await new Promise(resolve => setTimeout(resolve, 25));
@@ -62,13 +69,26 @@ let context;
 try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const port = server.address().port;
+    const loadViaCdp = process.env.OCR_LOAD_VIA_CDP === '1';
+    const extensionArgs = loadViaCdp ? ['--enable-unsafe-extension-debugging']
+        : [`--disable-extensions-except=${root}`, `--load-extension=${root}`];
     context = await chromium.launchPersistentContext('', {
         executablePath: process.env.OCR_CHROMIUM || chromium.executablePath(),
-        headless: true,
-        args: [`--disable-extensions-except=${root}`, `--load-extension=${root}`,
+        headless: process.env.OCR_HEADED !== '1',
+        ignoreDefaultArgs: loadViaCdp ? ['--disable-extensions'] : undefined,
+        args: [...extensionArgs,
             `--proxy-server=http://127.0.0.1:${port}`, '--proxy-bypass-list=<-loopback>']
     });
-    const worker = context.serviceWorkers()[0]
+    if (loadViaCdp) {
+        const session = await context.browser().newBrowserCDPSession();
+        const { id } = await session.send('Extensions.loadUnpacked', { path: root });
+        await session.detach();
+        const wake = await context.newPage();
+        await wake.goto(`chrome-extension://${id}/capture.html`);
+        await wake.evaluate(() => chrome.runtime.sendMessage({ type: 'CHECK_CONNECTION' }));
+        await wake.close();
+    }
+    let worker = context.serviceWorkers()[0]
         || await context.waitForEvent('serviceworker', { timeout: 8000 });
     await worker.evaluate(async () => {
         await chrome.storage.local.set({ synthesisMode: 'auto', speakerId: 1 });
@@ -89,6 +109,11 @@ try {
                 return send(tabId, message, context);
             };
         }
+    });
+    const runtimeIssues = [];
+    context.on('weberror', error => runtimeIssues.push(error.error().message));
+    context.on('console', message => {
+        if (/Content Security Policy|violates.*CSP/i.test(message.text())) runtimeIssues.push(message.text());
     });
     const page = await context.newPage();
     await page.goto(`http://127.0.0.1:${port}/probe-page`);
@@ -236,7 +261,7 @@ try {
                 if (message.type !== 'STOP_AUDIO') return send(message);
                 sendToOffscreen = send;
                 return new Promise((resolve, reject) => {
-                    globalThis.rejectStop = () => reject(new Error('停止応答のテストエラー'));
+                    globalThis.rejectStop = () => reject(new Error('停止応答のテストエラー <b>文字列</b>'));
                 });
             };
         });
@@ -258,6 +283,8 @@ try {
         assert.match(whileStopping, /停止中/);
         await waitFor(async () => /停止応答のテストエラー/.test(await status.textContent()),
             'capture must present the stop failure reason');
+        assert.match(await status.textContent(), /<b>文字列<\/b>/);
+        assert.equal(await status.locator('b').count(), 0, 'untrusted error text must stay text');
         assert.equal(closed, closeCount);
         assert.equal(await stopButton.isEnabled(), true);
         await stopButton.click();
@@ -313,8 +340,192 @@ try {
         await select();
         await clickIndicator();
         await waitFor(() => started === startCount + 3, 'first tab can start again');
+        await worker.evaluate(() => chrome.scripting.executeScript({
+            target: { tabId: playbackOwner.tabId, frameIds: [0] },
+            func: () => {
+                const listener = window.__vvRadioReaderInstance.pageHideListener;
+                if (listener) window.removeEventListener('pagehide', listener);
+            }
+        }));
         await page.reload();
-        await waitFor(() => closed === closeCount + 3, 'reloading the owner document must stop playback');
+        await waitFor(() => closed === closeCount + 3, 'replacement document must stop playback without pagehide');
+    };
+
+    const offscreenDestroyed = async () => {
+        await capture.bringToFront();
+        const startCount = started;
+        const closeCount = closed;
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === startCount + 1, 'stream should be open before Offscreen destruction');
+        await worker.evaluate(() => chrome.offscreen.closeDocument());
+        await waitFor(() => closed === closeCount + 1, 'Offscreen destruction must close the stream');
+        await waitFor(async () => /音声処理画面/.test(await status.textContent()), 'loss must reach the owning UI');
+        assert.equal(await stopButton.isDisabled(), true);
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === startCount + 2, 'retry should create a fresh Offscreen document');
+        await stopButton.click();
+        await waitFor(() => closed === closeCount + 2, 'new stream should stop');
+        await waitFor(async () => (await status.textContent()) === '停止しました。', 'new stop should complete');
+
+        // Offscreen が実際の音声停止処理を待っている間に文書を破棄する。
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === startCount + 3, 'stream should open before pending stop');
+        const client = await context.newCDPSession(capture);
+        const offscreen = (await client.send('Target.getTargets')).targetInfos.find(t => t.url.endsWith('/offscreen.html'));
+        const session = await client.send('Target.attachToTarget', { targetId: offscreen.targetId, flatten: false });
+        const evaluateOffscreen = async (id, expression) => {
+            const reply = new Promise(resolve => {
+                const receive = event => {
+                    if (event.sessionId !== session.sessionId) return;
+                    const message = JSON.parse(event.message);
+                    if (message.id !== id) return;
+                    client.off('Target.receivedMessageFromTarget', receive);
+                    resolve(message.result?.result?.value);
+                };
+                client.on('Target.receivedMessageFromTarget', receive);
+            });
+            await client.send('Target.sendMessageToTarget', { sessionId: session.sessionId, message: JSON.stringify({
+                id, method: 'Runtime.evaluate', params: { expression, returnByValue: true }
+            }) });
+            return reply;
+        };
+        await evaluateOffscreen(1, 'stopAll = () => { globalThis.waitingForStop = true; return new Promise(() => {}); }');
+        await stopButton.click();
+        let poll = 2;
+        await waitFor(() => evaluateOffscreen(poll++, 'globalThis.waitingForStop === true'), 'stop should reach Offscreen');
+        assert.match(await status.textContent(), /停止中/);
+        await worker.evaluate(() => chrome.offscreen.closeDocument());
+        await waitFor(() => closed === closeCount + 3, 'closing Offscreen during stop must close the stream');
+        await waitFor(async () => (await status.textContent()) === '停止しました。', 'discarded document counts as stopped');
+        await client.detach();
+
+        streamResponse = 'complete';
+        await capture.locator('#speak-btn').click();
+        await waitFor(async () => (await status.textContent()) === '再生中...', 'audio must begin before Offscreen destruction');
+        await worker.evaluate(() => chrome.offscreen.closeDocument());
+        await waitFor(async () => /音声処理画面/.test(await status.textContent()), 'active playback loss must reach UI');
+        assert.equal(await stopButton.isDisabled(), true);
+        streamResponse = 'partial';
+    };
+
+    const restartWorker = async () => {
+        const startCount = started;
+        const closeCount = closed;
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === startCount + 1, 'stream should be open before restarting worker');
+        const before = await worker.evaluate(async () => (await getPlaybackOwner()).requestId);
+        const devtools = await context.newCDPSession(capture);
+        await devtools.send('ServiceWorker.enable');
+        await devtools.send('ServiceWorker.stopAllWorkers');
+        const restored = await capture.evaluate(async () => {
+            await chrome.runtime.sendMessage({ type: 'CHECK_CONNECTION' });
+            const state = await chrome.storage.session.get('vv_playback_tab_id');
+            return state.vv_playback_tab_id.requestId;
+        });
+        assert.equal(restored, before);
+        worker = context.serviceWorkers().find(candidate => candidate.url().endsWith('/background-entry.js'));
+        assert.equal(await worker.evaluate(async () => (await getPlaybackOwner()).requestId), before);
+        assert.equal(closed, closeCount, 'worker restart must preserve Offscreen playback');
+        await stopButton.click();
+        await waitFor(() => closed === closeCount + 1, 'restored worker must stop the same request');
+        await waitFor(async () => (await status.textContent()) === '停止しました。', 'stop must complete after worker restart');
+        await devtools.detach();
+    };
+
+    const engineFailure = async () => {
+        await capture.bringToFront();
+        await worker.evaluate(async () => {
+            await chrome.storage.local.set({ synthesisMode: 'auto' });
+            if ((await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })).length) {
+                await chrome.offscreen.closeDocument();
+            }
+        });
+        streamResponse = 'http500';
+        normalStatus = 500;
+        const streamStart = started;
+        const normalStart = normal;
+        await capture.locator('#result-text').fill('短文。');
+        await capture.locator('#speak-btn').click();
+        await waitFor(async () => /再生エラー.*500/.test(await status.textContent()), 'Engine failure must reach UI');
+        assert.equal(started - streamStart, 1);
+        assert.equal(normal - normalStart, 1);
+        assert.equal(await stopButton.isDisabled(), true);
+        normalStatus = 200;
+        await capture.locator('#speak-btn').click();
+        await waitFor(async () => (await status.textContent()) === '再生が完了しました。', 'normal synthesis retry must finish');
+    };
+
+    const frameRace = async () => {
+        await page.bringToFront();
+        const startCount = started;
+        const closeCount = closed;
+        await select();
+        await clickIndicator();
+        await waitFor(() => started === startCount + 1, 'stream should open before frame race');
+        // 別オリジンの子を挿入し、ページ側の合成イベントでは再生状態が変わらないことを確認。
+        await page.evaluate(port => {
+            const frame = document.createElement('iframe');
+            frame.id = 'race-frame';
+            frame.src = 'http://localhost:' + port + '/probe-page';
+            document.body.append(frame);
+        }, port);
+        await page.frameLocator('#race-frame').locator('#sample').evaluate(element => {
+            window.focus();
+            element.dispatchEvent(new KeyboardEvent('keydown', { altKey: true, shiftKey: true, code: 'KeyU', bubbles: true }));
+        });
+        assert.equal(closed, closeCount);
+        assert.equal(started, startCount + 1);
+        await delayStop();
+        await page.keyboard.press('Alt+Shift+u');
+        await page.locator('#race-frame').evaluate(frame => { frame.remove(); window.focus(); });
+        await page.keyboard.press('Alt+Shift+u');
+        await page.keyboard.press('Alt+Shift+u');
+        await waitFor(() => worker.evaluate(() => typeof globalThis.rejectStop === 'function'), 'first shortcut must stop');
+        await worker.evaluate(() => { rejectStop(); delete globalThis.rejectStop; });
+        await waitFor(async () => !(await indicator()).stopping, 'failure should settle');
+        assert.equal(closed, closeCount);
+        assert.equal(started, startCount + 1);
+        await page.keyboard.press('Alt+Shift+u');
+        await waitFor(() => closed === closeCount + 1, 'top-frame retry must stop after iframe removal');
+        await waitFor(() => worker.evaluate(() => pendingVoiceStops.size === 0), 'stop queue must drain');
+    };
+
+    const concurrentTabs = async () => {
+        const second = await context.newPage();
+        await second.goto(new URL('capture.html', worker.url()).href);
+        const startCount = started;
+        const closeCount = closed;
+        await Promise.all([capture, second].map(tab => tab.evaluate(() =>
+            chrome.runtime.sendMessage({ type: 'GENERATE_VOICE', text: '同時に開始する短文。' }))));
+        await waitFor(() => started > startCount, 'at least the latest stream must open');
+        const active = [capture, second];
+        await waitFor(async () => (await Promise.all(active.map(tab => tab.locator('#stop-btn').isEnabled())))
+            .filter(Boolean).length === 1, 'exactly one tab owns the stop button');
+        const liveTab = await capture.locator('#stop-btn').isEnabled() ? capture : second;
+        const otherTab = liveTab === capture ? second : capture;
+        await otherTab.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_ALL' }));
+        assert.equal(await liveTab.locator('#stop-btn').isEnabled(), true, 'other tab must not own this stop');
+        await liveTab.locator('#stop-btn').click();
+        await waitFor(() => started - startCount === closed - closeCount, 'all opened streams close');
+        await waitFor(async () => (await liveTab.locator('#playback-status').textContent()) === '停止しました。', 'last owner stopped');
+        await second.close();
+    };
+
+    const networkStall = async () => {
+        await capture.bringToFront();
+        for (const scenario of ['recover', 'partial']) {
+            streamResponse = scenario;
+            const streamStart = started;
+            const normalStart = normal;
+            const t = performance.now();
+            await capture.locator('#speak-btn').click();
+            await waitFor(() => started === streamStart + 1, 'stream should begin');
+            await waitFor(async () => (await status.textContent()) === '再生が完了しました。', 'stall must settle', 72000);
+            const elapsed = performance.now() - t;
+            assert.ok(elapsed >= (scenario === 'recover' ? 35000 : 60000));
+            assert.equal(normal - normalStart, scenario === 'recover' ? 0 : 1);
+            console.log(JSON.stringify({ scenario, finishMs: Math.round(elapsed), normal: normal - normalStart }));
+        }
     };
 
     const synthesisPaths = async () => {
@@ -338,14 +549,16 @@ try {
     };
 
     const regressions = { 'late-frame': lateFrameShortcut, 'capture-rejection': rejectedCaptureStop,
-        'icon-rejection': rejectedIconStop, 'tab-switch': switchTabs, synthesis: synthesisPaths };
-    const selected = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(regressions);
+        'icon-rejection': rejectedIconStop, 'tab-switch': switchTabs, 'offscreen-destroyed': offscreenDestroyed,
+        'worker-restart': restartWorker, 'frame-race': frameRace, 'tab-race': concurrentTabs,
+        'network-stall': networkStall, synthesis: synthesisPaths, 'engine-error': engineFailure };
+    const selected = process.argv.length > 2 ? process.argv.slice(2)
+        : Object.keys(regressions).filter(name => name !== 'network-stall');
     for (const name of selected) {
         await regressions[name]();
     }
-    const product = await worker.evaluate(async () =>
-        (await navigator.userAgentData.getHighEntropyValues(['fullVersionList'])).fullVersionList
-            .find(brand => brand.brand === 'Chromium')?.version);
+    const product = context.browser().version();
+    assert.deepEqual(runtimeIssues, [], 'no uncaught page exception or CSP warning');
     console.log(`Chromium ${product}: Offscreen setup, partial WAV stop, ${selected.join(', ')}`);
 } finally {
     await context?.close();

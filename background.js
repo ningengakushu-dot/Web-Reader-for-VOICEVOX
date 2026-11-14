@@ -577,7 +577,14 @@ async function setPlaybackOwner(owner) {
 // 停止のために Offscreen を新規作成しない。存在確認の失敗は停止結果に反映する。
 async function stopOffscreenAudioIfPresent() {
     const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-    if (contexts.length > 0) await sendToOffscreen({ type: "STOP_AUDIO" });
+    if (contexts.length === 0) return;
+    try {
+        await sendToOffscreen({ type: "STOP_AUDIO" });
+    } catch (error) {
+        // 停止応答の前に文書自体が破棄された場合は、音源も通信も文書とともに終了する。
+        const remaining = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+        if (remaining.some(context => context.documentId === contexts[0].documentId)) throw error;
+    }
 }
 
 function stopPlaybackForTab(tabId, documentId) {
@@ -602,6 +609,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status !== "loading" || changeInfo.url === undefined) return;
     stopPlaybackForTab(tabId);
 });
+
+// pagehide のメッセージは再読み込みで応答ポートごと消えることがある。
+// 新しいメイン文書の初期化時にも、古い文書の要求だけを終了する。
+async function stopPlaybackFromPreviousDocument(tabId, documentId) {
+    const pending = pendingVoiceStarts.get(tabId);
+    const owner = await getPlaybackOwner();
+    const oldDocument = pending?.documentId || (owner?.tabId === tabId ? owner.documentId : null);
+    if (!oldDocument || oldDocument === documentId) return;
+    // 遅れて届いた旧文書の READY が、新しい文書の音声を止めないようにする。
+    const frames = await chrome.scripting.executeScript({
+        target: { tabId, documentIds: [documentId] }, func: () => true
+    }).catch(() => []);
+    const [frame] = frames;
+    if (frame?.frameId === 0 && frame.documentId === documentId) await stopPlaybackForTab(tabId, oldDocument);
+}
 
 // --- Offscreen Document 管理 ---
 let offscreenCreating = null;
@@ -731,7 +753,7 @@ function enqueueVoiceOperation(operation) {
 
 // Content Scriptからのメッセージを処理するリスナー
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.target && request.target !== 'background') return;
+    if (request?.target && request.target !== 'background') return;
     const security = globalThis.VVRadioBackgroundSecurity;
     if (security) {
         const checked = security.validateRequest(request, sender);
@@ -837,6 +859,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             respondWith(Promise.resolve(stopPlaybackForTab(sender.tab.id, sender.documentId)), sendResponse);
             return true;
 
+        case "PLAYBACK_PAGE_READY":
+            respondWith(stopPlaybackFromPreviousDocument(sender.tab.id, sender.documentId), sendResponse);
+            return true;
+
         case "CAPTURE_OCR_REGION": {
             // ページ内オーバーレイで選択された範囲のキャプチャ→OCR開始要求
             const tab = sender.tab;
@@ -901,6 +927,31 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
 });
 
+chrome.runtime.onConnect?.addListener(port => {
+    if (!port.name.startsWith("playback-lifetime:") || port.sender?.id !== chrome.runtime.id
+        || port.sender.url !== chrome.runtime.getURL("offscreen.html") || port.sender.tab) return;
+    // Chrome は Offscreen からの Port の sender に documentId を付けない。
+    // URLで送信元を確認し、Chromeが列挙した文書IDと照合する。
+    const documentId = port.name.slice("playback-lifetime:".length);
+    if (!documentId) return;
+    port.onDisconnect.addListener(() => {
+        enqueueVoiceOperation(async () => {
+            const owner = await getPlaybackOwner();
+            if (!owner || owner.offscreenDocumentId !== documentId) return;
+            if (owner.stopFailed) return;
+            // SW 再起動やポート切断だけでは、再生中の Offscreen を失ったと判断しない。
+            const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+            if (contexts.some(context => context.documentId === documentId)) return;
+            await setPlaybackOwner(null);
+            if (!pendingVoiceStarts.has(owner.tabId) && !pendingVoiceStops.has(owner.tabId)) {
+                notifyVoiceRequest(owner, "PLAYBACK_ERROR", {
+                    terminal: true, error: "音声処理画面が閉じました。もう一度読み上げを開始してください。"
+                });
+            }
+        }).catch(warn("音声処理画面の終了確認失敗"));
+    });
+});
+
 async function forwardPlaybackEvent(message) {
     const owner = await getPlaybackOwner();
     if (!owner || owner.requestId !== message.requestId || owner.stopFailed) return;
@@ -962,9 +1013,14 @@ function queueVoiceStart(text, tabId, documentId) {
             if (!isCurrent()) return cancelled;
 
             // Offscreen が応答前に再生通知を送っても、この要求の宛先を復元できるようにする。
-            await setPlaybackOwner({ tabId, requestId: start.requestId, documentId: start.documentId });
+            const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
             if (!isCurrent()) return cancelled;
-            await sendToOffscreen({ type: "ENQUEUE_TEXTS", texts: chunks, settings, requestId: start.requestId });
+            const offscreenDocumentId = contexts[0]?.documentId;
+            await setPlaybackOwner({ tabId, requestId: start.requestId, documentId: start.documentId,
+                offscreenDocumentId });
+            if (!isCurrent()) return cancelled;
+            await sendToOffscreen({ type: "ENQUEUE_TEXTS", texts: chunks, settings, requestId: start.requestId,
+                offscreenDocumentId });
             return isCurrent() ? { success: true } : cancelled;
         } catch (err) {
             if (playbackOwner?.requestId === start.requestId) await setPlaybackOwner(null);

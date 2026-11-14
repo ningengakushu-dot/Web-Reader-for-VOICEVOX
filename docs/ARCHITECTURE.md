@@ -41,7 +41,9 @@ manifest の `content_scripts[0].js` が production の読み込み順の正本�
 
 読み上げの受付時に Service Worker が要求 ID を採番し、準備中からタブに紐づける。既存の直列キューで前の音声の停止を待ち、要求 ID・タブ・メイン文書の宛先を `storage.session` に保存してから Offscreen へ渡す。Offscreen の開始・終了・エラーは一致する要求 ID だけを転送する。停止中・停止完了・停止失敗は Service Worker が `STOP_AUDIO` の結果から確定する。停止に失敗した要求の所有権は再試行まで保持する。トップフレームと `capture.html` は現在の要求への通知を反映し、古い応答による表示の巻き戻りを防ぐ。
 
-メイン文書の `pagehide` は送信元の文書 ID を照合して停止する。タブの削除とメイン URL が変わる遷移も停止の契機になる。iframe の遷移でも発生する URL 変更なしのタブ読み込み通知は音声停止に使わない。
+メイン文書の `pagehide` は送信元の文書 ID を照合して停止する。離脱通知が失われた場合は、新しいメイン文書の初期化通知で古い文書の要求を停止する。タブの削除とメイン URL が変わる遷移も停止の契機になる。iframe の遷移でも発生する URL 変更なしのタブ読み込み通知は音声停止に使わない。
+
+Offscreen は音声要求を受け取ると寿命監視用のポートを開く。Service Worker はポート切断時に対象の Offscreen 文書が消えたことを Chrome のコンテキスト一覧で確認し、現行の要求だけを終了する。Worker の再起動後は Offscreen が監視ポートを再接続し、再生先は `storage.session` から復元する。明示停止中に文書が破棄された場合は、対象文書が消えた時点で停止完了とする。
 
 `tests/content-source.js` は責務別 Content Script を VM テスト向けに同じ順序で連結するテスト補助であり、拡張機能には同梱しない。旧 `content.js` は production・提出物ともに使用しない。
 

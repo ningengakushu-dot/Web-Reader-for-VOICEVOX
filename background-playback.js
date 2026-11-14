@@ -30,7 +30,14 @@ async function setPlaybackOwner(owner) {
 // 停止のために Offscreen を新規作成しない。存在確認の失敗は停止結果に反映する。
 async function stopOffscreenAudioIfPresent() {
     const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-    if (contexts.length > 0) await sendToOffscreen({ type: "STOP_AUDIO" });
+    if (contexts.length === 0) return;
+    try {
+        await sendToOffscreen({ type: "STOP_AUDIO" });
+    } catch (error) {
+        // 停止応答の前に文書自体が破棄された場合は、音源も通信も文書とともに終了する。
+        const remaining = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+        if (remaining.some(context => context.documentId === contexts[0].documentId)) throw error;
+    }
 }
 
 function stopPlaybackForTab(tabId, documentId) {
@@ -55,6 +62,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status !== "loading" || changeInfo.url === undefined) return;
     stopPlaybackForTab(tabId);
 });
+
+// pagehide のメッセージは再読み込みで応答ポートごと消えることがある。
+// 新しいメイン文書の初期化時にも、古い文書の要求だけを終了する。
+async function stopPlaybackFromPreviousDocument(tabId, documentId) {
+    const pending = pendingVoiceStarts.get(tabId);
+    const owner = await getPlaybackOwner();
+    const oldDocument = pending?.documentId || (owner?.tabId === tabId ? owner.documentId : null);
+    if (!oldDocument || oldDocument === documentId) return;
+    // 遅れて届いた旧文書の READY が、新しい文書の音声を止めないようにする。
+    const frames = await chrome.scripting.executeScript({
+        target: { tabId, documentIds: [documentId] }, func: () => true
+    }).catch(() => []);
+    const [frame] = frames;
+    if (frame?.frameId === 0 && frame.documentId === documentId) await stopPlaybackForTab(tabId, oldDocument);
+}
 
 // --- Offscreen Document 管理 ---
 let offscreenCreating = null;

@@ -64,6 +64,14 @@ class VVRadioReader {
         this.setupMessageListener();
         this.setupKeyboardShortcutFallback();
         this.setupPageShowReset();
+        if (this.isTopFrame) this.sendPlaybackPageEvent("PLAYBACK_PAGE_READY");
+    }
+
+    sendPlaybackPageEvent(type) {
+        if (!this.active) return;
+        try {
+            chrome.runtime.sendMessage({ type }, () => { void chrome.runtime.lastError; });
+        } catch (error) { /* 拡張機能の更新直後 */ }
     }
 
     // 読み上げ中にページを離れると background が再生を止めるが、離れたページには
@@ -72,12 +80,7 @@ class VVRadioReader {
     // 復帰時に待機状態へ戻す（実際の再生は遷移時に必ず止まっている）。
     setupPageShowReset() {
         if (this.isTopFrame) {
-            this.pageHideListener = () => {
-                if (!this.active) return;
-                try {
-                    chrome.runtime.sendMessage({ type: "PLAYBACK_PAGE_HIDDEN" }, () => { void chrome.runtime.lastError; });
-                } catch (error) { /* 拡張機能の更新直後 */ }
-            };
+            this.pageHideListener = () => this.sendPlaybackPageEvent("PLAYBACK_PAGE_HIDDEN");
             window.addEventListener("pagehide", this.pageHideListener);
         }
         this.pageShowListener = (event) => {

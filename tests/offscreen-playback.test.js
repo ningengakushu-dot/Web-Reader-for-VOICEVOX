@@ -93,6 +93,11 @@ function enqueue(text, mode) {
 const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 (async () => {
+    for (const sender of [{ id: 'other' }, { id: 'ext-id', tab: { id: 1 }, frameId: 2 },
+        { id: 'ext-id', documentId: 'extension-page' }]) {
+        assert.equal(listener({ type: 'STOP_AUDIO', target: 'offscreen' }, sender,
+            () => assert.fail('untrusted stop must be ignored')), undefined);
+    }
     let response = await enqueue('error case');
     assert.strictEqual(response.success, true);
     await wait();

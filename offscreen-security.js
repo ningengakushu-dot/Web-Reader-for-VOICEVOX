@@ -48,6 +48,8 @@
                 texts,
                 requestId: typeof message.requestId === "string" && message.requestId.length <= 64
                     ? message.requestId : undefined,
+                offscreenDocumentId: typeof message.offscreenDocumentId === "string" && message.offscreenDocumentId.length <= 64
+                    ? message.offscreenDocumentId : undefined,
                 settings: sanitizeSettings(message.settings)
             } };
         }

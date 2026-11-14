@@ -29,12 +29,27 @@ let synthesisGeneration = 0;
 // 再生の世代トークン。stopAll() 直後に古い audio.play() の reject が届いても無視する。
 let playbackGeneration = 0;
 let playbackRequestId;
+let playbackLifetimePort;
+
+function watchPlaybackLifetime(documentId) {
+    if (!playbackRequestId || !documentId || playbackLifetimePort || !chrome.runtime.connect) return;
+    const port = chrome.runtime.connect({ name: "playback-lifetime:" + documentId });
+    playbackLifetimePort = port;
+    port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+        if (playbackLifetimePort !== port) return;
+        playbackLifetimePort = null;
+        // SW の休止後も、再生中の文書に新しい SW を監視役として接続する。
+        setTimeout(() => watchPlaybackLifetime(documentId), 250);
+    });
+}
 
 // メッセージリスナー
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.target !== 'offscreen') return;
+    if (message?.target !== 'offscreen') return;
     // 拡張自身（background）からのメッセージに限る（多層防御）
-    if (sender.id !== chrome.runtime.id) return;
+    if (sender.id !== chrome.runtime.id || sender.tab || sender.documentId
+        || sender.url !== undefined && sender.url !== chrome.runtime.getURL("background-entry.js")) return;
     const security = globalThis.VVRadioOffscreenSecurity;
     if (security) {
         const checked = security.validate(message);
@@ -49,6 +64,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'ENQUEUE_TEXTS': {
             const enqueue = () => {
                 playbackRequestId = message.requestId;
+                watchPlaybackLifetime(message.offscreenDocumentId);
                 enqueueTexts(message.texts, message.settings);
                 sendResponse({ success: true });
             };

@@ -670,6 +670,7 @@ async function processPlayback(continuePlayback = false) {
 
 async function stopAll() {
     // 停止結果は STOP_AUDIO の応答だけで返す。SW が対象要求へ結果を通知する。
+    playbackRequestId = undefined;
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
     clearPlaybackBufferTimer();
@@ -734,5 +735,6 @@ function notifyBackground(type, payload = {}) {
     // 拒否は無視する（放置すると未処理の Promise 拒否でコンソールが埋まる）。
     const message = { type, target: 'background', ...payload };
     if (type.startsWith("PLAYBACK_")) message.requestId = playbackRequestId;
+    if (type === "PLAYBACK_ENDED" || payload.terminal === true) playbackRequestId = undefined;
     chrome.runtime.sendMessage(message).catch(() => {});
 }
