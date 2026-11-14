@@ -273,6 +273,14 @@
     }
 
     // --- 読み上げ ---
+    let playbackRequestId;
+    let playbackRevision = 0;
+    let pendingStop;
+
+    sendRuntimeMessage({ type: "PLAYBACK_PAGE_READY" }, () => { void chrome.runtime.lastError; });
+    window.addEventListener("pagehide", () => {
+        sendRuntimeMessage({ type: "PLAYBACK_PAGE_HIDDEN" }, () => { void chrome.runtime.lastError; });
+    });
 
     speakBtn.addEventListener("click", () => {
         const text = cleanForSpeech(resultText.value);
@@ -281,9 +289,12 @@
             return;
         }
 
+        const revision = ++playbackRevision;
         const sent = sendRuntimeMessage({ type: "GENERATE_VOICE", text }, (response) => {
-            if (chrome.runtime.lastError || !response || !response.success) {
-                const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
+            const lastError = chrome.runtime.lastError;
+            if (revision !== playbackRevision || response?.reported) return;
+            if (lastError || !response?.success) {
+                const reason = lastError?.message || response?.error || "応答なし";
                 setPlaybackStatus(`読み上げの開始に失敗しました: ${reason}`, "error");
             }
         });
@@ -291,42 +302,89 @@
     });
 
     stopBtn.addEventListener("click", () => {
-        const sent = sendRuntimeMessage({ type: "STOP_ALL" }, () => { void chrome.runtime.lastError; });
-        setPlayingState(false);
-        setPlaybackStatus(sent ? "停止しました。" : "拡張機能が更新されました。このタブを再読み込みしてください。",
-            sent ? "" : "error");
-    });
-
-    // background から転送される再生状態（target:'tab'）を反映する。
-    // offscreen が全拡張ページへブロードキャストする通知（target:'background'）は
-    // background 経由の転送と二重になるため、ここでは処理しない。
-    chrome.runtime.onMessage.addListener((request, sender) => {
-        // 拡張機能内部（background）からの転送のみ扱う（他コンテキストからの偽装を排除）
-        if (sender?.id !== chrome.runtime.id) return;
-        if (!request || request.target !== "tab") return;
-
-        switch (request.type) {
-            case "PLAYBACK_STARTED":
-                setPlayingState(true);
-                setPlaybackStatus("再生中...", "playing");
-                break;
-            case "PLAYBACK_ENDED":
-                setPlayingState(false);
-                setPlaybackStatus("再生が完了しました。");
-                break;
-            case "PLAYBACK_STOPPED":
-                setPlayingState(false);
+        playbackRevision++;
+        const stop = {};
+        pendingStop = stop;
+        showPlaybackStopping();
+        const sent = sendRuntimeMessage({ type: "STOP_ALL" }, (response) => {
+            const lastError = chrome.runtime.lastError;
+            if (pendingStop !== stop) return;
+            pendingStop = undefined;
+            if (lastError || !response?.success) {
+                showPlaybackStopFailure(lastError?.message || response?.error || "応答なし");
+            } else {
+                stopBtn.disabled = true;
+                speakBtn.disabled = false;
                 setPlaybackStatus("停止しました。");
-                break;
-            case "PLAYBACK_ERROR":
-                setPlayingState(false);
-                setPlaybackStatus(`再生エラー: ${request.error || "不明なエラー"}`, "error");
-                break;
+            }
+        });
+        if (!sent) {
+            pendingStop = undefined;
+            showPlaybackStopFailure("拡張機能が更新されました。このタブを再読み込みしてください。");
         }
     });
 
-    function setPlayingState(playing) {
-        stopBtn.disabled = !playing;
+    // 宛先と読み上げ要求を照合した Service Worker の通知だけを反映する。
+    chrome.runtime.onMessage.addListener((request, sender) => {
+        if (sender?.id !== chrome.runtime.id) return;
+        if (!request || request.target !== "tab" || !request.type?.startsWith("PLAYBACK_")) return;
+        if (request.type === "PLAYBACK_PREPARING") {
+            playbackRequestId = request.requestId;
+        } else if (playbackRequestId != null && request.requestId !== playbackRequestId) {
+            return;
+        }
+        playbackRevision++;
+        if (request.type !== "PLAYBACK_STOPPING") pendingStop = undefined;
+        speakBtn.disabled = false;
+
+        switch (request.type) {
+            case "PLAYBACK_PREPARING":
+                stopBtn.disabled = false;
+                setPlaybackStatus("読み上げを準備中...", "playing");
+                break;
+            case "PLAYBACK_STARTED":
+                stopBtn.disabled = false;
+                setPlaybackStatus("再生中...", "playing");
+                break;
+            case "PLAYBACK_STOPPING":
+                showPlaybackStopping();
+                break;
+            case "PLAYBACK_ENDED":
+                stopBtn.disabled = true;
+                setPlaybackStatus("再生が完了しました。");
+                break;
+            case "PLAYBACK_STOPPED":
+                stopBtn.disabled = true;
+                setPlaybackStatus("停止しました。");
+                break;
+            case "PLAYBACK_STOP_FAILED":
+                showPlaybackStopFailure(request.error);
+                break;
+            case "PLAYBACK_START_FAILED":
+                stopBtn.disabled = !request.oldVoiceActive;
+                setPlaybackStatus(`読み上げの開始に失敗しました: ${request.error}`, "error");
+                break;
+            case "PLAYBACK_ERROR": {
+                stopBtn.disabled = request.terminal !== false;
+                const message = `再生エラー: ${request.error || "不明なエラー"}`;
+                if (!request.alreadyReported || playbackStatus.textContent !== message) {
+                    setPlaybackStatus(message, "error");
+                }
+                break;
+            }
+        }
+    });
+
+    function showPlaybackStopping() {
+        stopBtn.disabled = true;
+        speakBtn.disabled = true;
+        setPlaybackStatus("停止中...", "playing");
+    }
+
+    function showPlaybackStopFailure(reason) {
+        stopBtn.disabled = false;
+        speakBtn.disabled = false;
+        setPlaybackStatus(`停止できませんでした: ${reason} 停止ボタンで再試行できます。`, "error");
     }
 
     function setPlaybackStatus(message, state = "") {

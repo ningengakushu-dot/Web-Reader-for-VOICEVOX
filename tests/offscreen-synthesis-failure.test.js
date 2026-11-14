@@ -148,17 +148,38 @@ const settings = { speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 
             '割って読めたならエラーは通知しない');
     }
 
-    // --- 割っても読めない文は有限回で諦め、通知は元の1文につき1回だけ ---
+    // --- 全断片が失敗しても、エラーを重ねずに要求を終了する ---
     {
         notifications.length = 0;
         synthesisAttempts = 0;
         synthesizedTexts.length = 0;
         synthesisPlan = () => 'http';
-        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: ['前半の文です、後半の文です。'], settings });
+        const requestId = 'split-failure';
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen', requestId,
+            texts: ['前半の文です、後半の文です。'], settings });
         await wait(300);
         assert.equal(synthesisAttempts, 3, '断片が分割下限より短くなればそこで打ち切る');
-        assert.equal(notifications.filter((m) => m.type === 'PLAYBACK_ERROR').length, 1,
-            '断片ごとにエラーを連発しない');
+        const errors = notifications.filter(m => m.type === 'PLAYBACK_ERROR');
+        assert.deepEqual(errors.map(m => m.terminal), [false, true], '最後の失敗で要求を終了する');
+        assert.ok(errors.every(m => m.requestId === requestId));
+        assert.equal(errors.filter(m => !m.alreadyReported).length, 1, '利用者への通知は1回');
+        assert.equal(errors[1].error, errors[0].error);
+        assert.ok(!notifications.some(m => m.type === 'PLAYBACK_STARTED' || m.type === 'PLAYBACK_ENDED'));
+    }
+
+    // --- 全断片が失敗しても、後続の文が残っていれば処理を続ける ---
+    {
+        notifications.length = 0;
+        synthesisAttempts = 0;
+        synthesisPlan = n => n <= 3 ? 'http' : 'ok';
+        const requestId = 'split-failure-with-audio';
+        await send({ type: 'ENQUEUE_TEXTS', target: 'offscreen', requestId,
+            texts: ['前半の文です、後半の文です。', '次。'], settings });
+        await wait(200);
+        assert.equal(synthesisAttempts, 4);
+        assert.deepEqual(notifications.map(m => m.type), ['PLAYBACK_ERROR', 'PLAYBACK_STARTED', 'PLAYBACK_ENDED']);
+        assert.equal(notifications[0].terminal, false);
+        assert.ok(notifications.every(m => m.requestId === requestId));
     }
 
     // --- 短い文は長さが原因ではないので割らない（従来どおり次の文へ進む） ---

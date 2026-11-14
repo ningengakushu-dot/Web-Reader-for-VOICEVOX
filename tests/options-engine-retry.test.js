@@ -12,7 +12,7 @@ const constants = fs.readFileSync(path.join(root, 'constants.js'), 'utf8');
 const source = fs.readFileSync(path.join(root, 'options.js'), 'utf8');
 
 const ELEMENT_IDS = [
-    'speaker-select', 'save-btn', 'reset-btn', 'status-msg', 'loader',
+    'speaker-select', 'save-btn', 'reset-btn', 'status-msg', 'loader', 'synthesisMode-select',
     'iconRightClick-select', 'iconStyle-select', 'iconStyle-preview', 'iconStyle-hint-character',
     'customIcon-row', 'customIcon-file', 'customIcon-clear',
     'speed-slider', 'speed-value', 'pitch-slider', 'pitch-value', 'intonation-slider',
@@ -68,7 +68,7 @@ class MockElement {
  * engineUp を true にすると、以降の問い合わせが成功するようになる。
  */
 function openOptionsPage() {
-    const page = { engineUp: false };
+    const page = { engineUp: false, stored: {} };
     const elements = Object.fromEntries(ELEMENT_IDS.map((id) => [id, new MockElement(id)]));
     for (const id of ['speed-slider', 'pitch-slider', 'intonation-slider', 'volume-slider', 'pause-slider']) {
         Object.assign(elements[id], { min: '0', max: '2', value: '1' });
@@ -121,7 +121,11 @@ function openOptionsPage() {
                 callback({ success: true });
             }
         },
-        storage: { local: { async get() { return {}; }, async set() {}, async remove() {} } }
+        storage: { local: {
+            async get() { return { ...page.stored }; },
+            async set(value) { Object.assign(page.stored, value); },
+            async remove() {}
+        } }
     };
 
     const context = vm.createContext({
@@ -160,6 +164,18 @@ async function main() {
         await page.settle();
         assert.ok(page.status().classList.values.has('ng'),
             'a stopped engine must be reported when the page opens');
+        assert.strictEqual(page.elements['synthesisMode-select'].value, 'normal',
+            'an existing installation must default to normal synthesis');
+        page.elements['synthesisMode-select'].value = 'auto';
+        await page.elements['save-btn'].listeners.click();
+        assert.strictEqual(page.stored.synthesisMode, 'auto',
+            'changing synthesis mode must be possible while the ENGINE is stopped');
+        assert.strictEqual(page.stored.speakerId, undefined,
+            'offline mode-only save must preserve the previous speaker selection');
+        page.elements['synthesisMode-select'].value = 'normal';
+        await page.elements['save-btn'].listeners.click();
+        assert.strictEqual(page.stored.synthesisMode, 'normal',
+            'the user can always return to the legacy synthesis mode');
         assert.ok(page.pendingRetries() > 0,
             'opening the page while the engine is starting must keep checking');
 

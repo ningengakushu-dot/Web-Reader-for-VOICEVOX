@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusMsg = document.getElementById('status-msg');
     const loader = document.getElementById('loader');
     const iconRightClickSelect = document.getElementById('iconRightClick-select');
+    const synthesisModeSelect = document.getElementById('synthesisMode-select');
     const iconStyleSelect = document.getElementById('iconStyle-select');
     const iconStylePreview = document.getElementById('iconStyle-preview');
     const iconStyleHintCharacter = document.getElementById('iconStyle-hint-character');
@@ -94,7 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // 保存済み設定の復元はエンジンの起動状態に依存しない。
         // キャラクター一覧の取得失敗でスライダーやアイコン設定まで初期化されないよう、
         // storage の読み出しを先に済ませてから一覧の取得を試みる。
-        const storageKeys = ['speakerId', 'iconRightClickAction', 'iconStyle',
+        const storageKeys = ['speakerId', 'synthesisMode', 'iconRightClickAction', 'iconStyle',
             CHARACTER_ICON_STORAGE_KEY, CUSTOM_ICON_STORAGE_KEY, ...sliders.map(s => s.key)];
         let result = {};
         try {
@@ -114,6 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // 既定は「画面OCR読み上げを開始」（content.js 側の既定値と揃える）
             iconRightClickSelect.value = result.iconRightClickAction === 'options' ? 'options' : 'capture';
+            if (synthesisModeSelect) synthesisModeSelect.value = result.synthesisMode === 'auto' ? 'auto' : 'normal';
 
             const savedStyle = result.iconStyle;
             iconStyleSelect.value = ICON_STYLE_VALUES.includes(savedStyle)
@@ -584,12 +586,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     saveBtn.addEventListener('click', async () => {
         const speakerId = parseInt(speakerSelect.value, 10);
+        const synthesisMode = synthesisModeSelect?.value === 'auto' ? 'auto' : 'normal';
         if (isNaN(speakerId)) {
-            showStatus('キャラクターを選択してください。', 'error');
+            // ENGINEが停止中でも、次の読み上げに適用する方式だけは変更・保存できる。
+            // speakerIdを推測して既存の話者選択を上書きしない。
+            try {
+                await chrome.storage.local.set({ synthesisMode });
+                showStatus('音声合成方式を保存しました。', 'success');
+            } catch (error) {
+                showStatus('音声合成方式の保存に失敗しました。', 'error');
+            }
             return;
         }
 
-        const settings = { speakerId };
+        const settings = { speakerId, synthesisMode };
         for (const s of sliders) {
             const val = clampSliderValue(s.slider, s.slider.value, s.defaultVal);
             settings[s.key] = val;

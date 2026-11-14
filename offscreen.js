@@ -6,6 +6,9 @@ let isSynthesizing = false;
 let isPlaying = false;
 let currentAudio = null;
 let currentAudioUrl = null;
+let currentStreamingPlayer = null;
+let activeStreamingPreparation = null;
+let pendingNormalRequest = null;
 // 再生中の音声とは別に、完成済み音声をどれだけ先読みするか（件数と合計秒数の両方で制限）。
 // 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が読み上げ終了まで
 // 増え続ける。一方で「次の1件だけ」では、短い文（見出し・箇条書きの1行）の直後に長い文が
@@ -26,12 +29,28 @@ let playbackBufferTimer = null;
 let synthesisGeneration = 0;
 // 再生の世代トークン。stopAll() 直後に古い audio.play() の reject が届いても無視する。
 let playbackGeneration = 0;
+let playbackRequestId;
+let playbackLifetimePort;
+
+function watchPlaybackLifetime(documentId) {
+    if (!playbackRequestId || !documentId || playbackLifetimePort || !chrome.runtime.connect) return;
+    const port = chrome.runtime.connect({ name: "playback-lifetime:" + documentId });
+    playbackLifetimePort = port;
+    port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+        if (playbackLifetimePort !== port) return;
+        playbackLifetimePort = null;
+        // SW の休止後も、再生中の文書に新しい SW を監視役として接続する。
+        setTimeout(() => watchPlaybackLifetime(documentId), 250);
+    });
+}
 
 // メッセージリスナー
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.target !== 'offscreen') return;
+    if (message?.target !== 'offscreen') return;
     // 拡張自身（background）からのメッセージに限る（多層防御）
-    if (sender.id !== chrome.runtime.id) return;
+    if (sender.id !== chrome.runtime.id || sender.tab || sender.documentId
+        || sender.url !== undefined && sender.url !== chrome.runtime.getURL("background-entry.js")) return;
     const security = globalThis.VVRadioOffscreenSecurity;
     if (security) {
         const checked = security.validate(message);
@@ -43,14 +62,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     switch (message.type) {
-        case 'ENQUEUE_TEXTS':
-            enqueueTexts(message.texts, message.settings);
-            sendResponse({ success: true });
+        case 'ENQUEUE_TEXTS': {
+            const enqueue = () => {
+                playbackRequestId = message.requestId;
+                watchPlaybackLifetime(message.offscreenDocumentId);
+                enqueueTexts(message.texts, message.settings);
+                sendResponse({ success: true });
+            };
+            const streaming = globalThis.VVRadioStreaming;
+            const status = streaming?.cleanupStatus?.() || "ready";
+            if (status === "failed") {
+                sendResponse({ success: false,
+                    error: "音声再生の安全な終了を確認できません。拡張機能を再読み込みしてください。" });
+                break;
+            }
+            if (status === "pending") {
+                // STOP_AUDIOを待つ間にもう一度STOPされた要求を復活させない。
+                const generation = playbackGeneration;
+                streaming.waitForCleanup().then(() => {
+                    if (generation !== playbackGeneration) {
+                        sendResponse({ success: false, error: "読み上げ開始前に停止されました" });
+                        return;
+                    }
+                    enqueue();
+                }).catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
+                return true; // 非同期sendResponseのためChromeのメッセージポートを保持
+            }
+            enqueue();
             break;
+        }
         case 'STOP_AUDIO':
-            stopAll();
-            sendResponse({ success: true });
-            break;
+            stopAll().then(() => sendResponse({ success: true }))
+                .catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
+            return true; // AudioContextとreaderの終了が完了するまで成功を返さない
         case 'PREWARM_OCR':
             // 範囲選択中の先読み。横書きは実測で圧倒的に多いので jpn だけ用意する
             // （縦書きが必要になった場合はそのとき生成される）。
@@ -189,6 +233,539 @@ function scheduleOcrWorkerIdleRelease() {
     }, OCR_WORKER_IDLE_RELEASE_MS);
 }
 
+// Offscreen 専用: VOICEVOX ENGINE 0.26.0 の固定44-byte PCM16 WAVストリーム。
+// 通常合成は offscreen-audio.js に残し、使えない環境では一切この再生経路に入らない。
+(() => {
+    const CAPABILITY_TIMEOUT_MS = 1800;
+    const CAPABILITY_TTL_MS = 60000;
+    const FAILURE_TTL_MS = 30000;
+    const RESPONSE_IDLE_MS = 20000;
+    // 20秒の無通信は一時停止の可能性がある。さらに40秒だけ同じreadを待ち、
+    // 合計60秒で打ち切る（際限なく待機しない）。
+    const RESPONSE_STALL_GRACE_MS = 40000;
+    const RESPONSE_TOTAL_MS = 10 * 60 * 1000;
+    const CANCEL_WAIT_MS = 1200;
+    const CONTEXT_CLOSE_WAIT_MS = 3000;
+    // 通信中の無音・欠落を出力しないため、検証済みの全文がこの量に収まるときだけ
+    // ストリーミング再生する。超過・通信失敗は、出力前に通常合成へ戻す。
+    const BUFFER_SECONDS_LIMIT = 5;
+    const MAX_AUDIO_BYTES = 128 * 1024 * 1024;
+    const cache = new Map();
+    // 停止直後に次の再生が来ても、前のAudioContext.close()完了を先に待つ。
+    let pendingContextClose = Promise.resolve();
+    let activeCleanupCount = 0;
+    let cleanupFailure = null;
+
+    function cleanupStatus() {
+        return cleanupFailure ? "failed" : activeCleanupCount > 0 ? "pending" : "ready";
+    }
+
+    async function waitForCleanup() {
+        await pendingContextClose;
+        if (cleanupFailure) throw cleanupFailure;
+    }
+
+    // 終了処理の片方が停止しても、もう片方の終了処理を妨げない。
+    function boundedCleanup(promise, milliseconds, label) {
+        let timer;
+        return Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(label + " の終了がタイムアウトしました")),
+                    milliseconds);
+            })
+        ]).finally(() => clearTimeout(timer));
+    }
+
+    // Promise.reject(undefined/null)やmessage getterの例外が、失敗状態の記録を妨げない。
+    function describeRejection(reason) {
+        try {
+            if (reason == null) return String(reason);
+            const message = reason.message;
+            return typeof message === "string" && message ? message : String(reason);
+        } catch (error) {
+            return "詳細を取得できない終了エラー";
+        }
+    }
+
+    function monotonicNow() {
+        return globalThis.performance?.now?.() ?? Date.now();
+    }
+
+    // Fetchのabort後、ReadableStreamはerrored状態になるため、
+    // cancel()が既に報告された読取エラーやAbortErrorで拒否されても正常な場合がある。
+    function isExpectedCancelRejection(reason, previousReadError) {
+        try {
+            return (reason != null && reason.name === "AbortError")
+                || (previousReadError.failed && Object.is(reason, previousReadError.reason));
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function invalidate(speakerId) {
+        if (speakerId == null) cache.clear();
+        else cache.delete(VOICEVOX_BASE_URL + ":" + speakerId);
+    }
+
+    function suppress(speakerId) {
+        cache.set(VOICEVOX_BASE_URL + ":" + speakerId,
+            { supported: false, until: Date.now() + FAILURE_TTL_MS, reason: "stream-error" });
+    }
+
+    // 0.26.0 の /engine_manifest API は supported_features の各値を bool に平坦化する。
+    // engine_manifest.json 自体の {value:true} と混同しない。
+    async function supports(speakerId, forceNormal = false, options = {}) {
+        if (forceNormal || typeof globalThis.AudioContext !== "function") return false;
+        const signal = options?.signal;
+        if (signal?.aborted) throw new Error("ストリーミング準備が中断されました");
+        const key = VOICEVOX_BASE_URL + ":" + speakerId;
+        const saved = cache.get(key);
+        if (saved && saved.until > Date.now()) return saved.supported;
+        const controller = new AbortController();
+        const abortFromRequest = () => controller.abort();
+        signal?.addEventListener?.("abort", abortFromRequest, { once: true });
+        const timer = setTimeout(() => controller.abort(), CAPABILITY_TIMEOUT_MS);
+        let supported = false;
+        let fingerprint = null;
+        try {
+            const get = (path) => fetch(VOICEVOX_BASE_URL + path, { signal: controller.signal })
+                .then(async (res) => {
+                    if (!res.ok) throw new Error("ENGINE capability status " + res.status);
+                    return readJsonResponseWithLimit(res, 1024 * 1024, CAPABILITY_TIMEOUT_MS);
+                });
+            // 旧ENGINEでは /engine_manifest 自体が未対応の場合もある。
+            // まず1つだけ問い合わせ、非対応なら /speakers・/version を追加取得しない。
+            const manifest = await get("/engine_manifest");
+            if (manifest?.supported_features?.streaming_synthesis === true) {
+                const [speakers, version] = await Promise.all([
+                    get("/speakers"), get("/version")
+                ]);
+                const styles = Array.isArray(speakers) ? speakers.flatMap((s) =>
+                    Array.isArray(s?.styles) ? s.styles.slice(0, 1000) : []) : [];
+                const style = styles.find((s) => Number(s?.id) === Number(speakerId));
+                supported = style?.type === "streaming_talk";
+                fingerprint = String(manifest?.uuid || "").slice(0, 100)
+                    + ":" + String(version || "").slice(0, 100);
+            }
+        } catch (error) {
+            if (signal?.aborted) throw error;
+            supported = false;
+        } finally {
+            clearTimeout(timer);
+            signal?.removeEventListener?.("abort", abortFromRequest);
+            controller.abort();
+        }
+        cache.set(key, { supported, fingerprint, until: Date.now()
+            + (supported ? CAPABILITY_TTL_MS : FAILURE_TTL_MS) });
+        return supported;
+    }
+
+    function pcmHeader(bytes, query, contentLength) {
+        if (bytes.byteLength !== 44) throw new Error("WAV header length");
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const ascii = (at, size) => String.fromCharCode(...bytes.subarray(at, at + size));
+        const channels = view.getUint16(22, true);
+        const sampleRate = view.getUint32(24, true);
+        const block = view.getUint16(32, true);
+        const dataBytes = view.getUint32(40, true);
+        const fileBytes = 44 + dataBytes;
+        if (ascii(0, 4) !== "RIFF" || ascii(8, 8) !== "WAVEfmt "
+            || ascii(36, 4) !== "data" || view.getUint32(16, true) !== 16
+            || view.getUint16(20, true) !== 1 || view.getUint16(34, true) !== 16
+            || (channels !== 1 && channels !== 2) || sampleRate < 8000 || sampleRate > 192000
+            || block !== channels * 2 || view.getUint32(28, true) !== sampleRate * block
+            || view.getUint32(4, true) !== fileBytes - 8
+            || dataBytes === 0 || dataBytes > MAX_AUDIO_BYTES - 44 || dataBytes % block !== 0
+            || sampleRate !== Number(query.outputSamplingRate)
+            || channels !== (query.outputStereo ? 2 : 1)
+            || (contentLength != null && contentLength !== fileBytes)) {
+            throw new Error("VOICEVOXストリームのWAV形式が不正です");
+        }
+        return { channels, sampleRate, dataBytes, block, fileBytes };
+    }
+
+    function createPlayer(query, speaker, onStart) {
+        const controller = new AbortController();
+        let context = null;
+        let reader = null;
+        let stopped = false;
+        // idle: 未予約 / scheduled: 予約済みだが開始前 /
+        // started: 音声開始時刻に到達 / cancelled: 予約取消し・Context解放を確認。
+        let playbackState = "idle";
+        let firstScheduledAt = null;
+        let stopPromise = null;
+        let cleanupSucceeded = false;
+        let exceedsBufferLimit = false;
+        let firstOutputAnalyser = null;
+        const previousReadError = { failed: false, reason: undefined };
+        let source = null;
+        let startTimer = null;
+        const abortError = () => new Error("ストリーミング再生が中断されました");
+        const ensureActive = () => { if (stopped || controller.signal.aborted) throw abortError(); };
+        const stop = () => {
+            if (stopPromise) return stopPromise;
+            stopped = true;
+            if (startTimer != null) clearTimeout(startTimer);
+            startTimer = null;
+            let cancelledSources = true;
+            // abort()は同期処理中に長く停止することがある。出力ノードを先に止め、
+            // その後にレンダリング側のPCMと音声クロックで先頭が出ていないことを調べる。
+            if (source) {
+                source.onended = null;
+                try {
+                    source.stop(0);
+                } catch (error) {
+                    cancelledSources = false;
+                }
+            }
+            const stopRequestedBeforeStart = playbackState === "scheduled" && context !== null
+                && context.currentTime < firstScheduledAt;
+            let renderedOutput = playbackState === "started";
+            if (firstOutputAnalyser) {
+                try {
+                    const samples = new Float32Array(firstOutputAnalyser.fftSize);
+                    firstOutputAnalyser.getFloatTimeDomainData(samples);
+                    renderedOutput ||= samples.some(sample => sample !== 0);
+                } catch (error) {
+                    // 出力を確認できない場合は再合成を許可しない。
+                    renderedOutput = true;
+                }
+            }
+            const beforeStart = stopRequestedBeforeStart && !renderedOutput;
+            if (source) {
+                try { source.disconnect(); } catch (error) {}
+                source = null;
+            }
+            // source.stop()とPCM確認の後で通信をabortする。abort側の遅延中に
+            // 予約音源が先頭から鳴り始める競合を避ける。
+            let abortFailed = false;
+            let abortFailure;
+            try { controller.abort(); } catch (error) { abortFailed = true; abortFailure = error; }
+            // AudioContext解放とネットワーク取消しは並列に実行し、それぞれ期限を設ける。
+            // reader.cancel()が永遠に返らなくてもclose()を実行し、STOP_AUDIOに有限時間で応答する。
+            const closeRequest = context
+                ? Promise.resolve().then(() => context.close()) : Promise.resolve();
+            const cancelRequest = reader
+                ? Promise.resolve().then(() => reader.cancel()) : Promise.resolve();
+            stopPromise = (async () => {
+                const [closeResult, cancelResult] = await Promise.allSettled([
+                    boundedCleanup(closeRequest, CONTEXT_CLOSE_WAIT_MS, "AudioContext"),
+                    boundedCleanup(cancelRequest, CANCEL_WAIT_MS, "ストリーム")
+                ]);
+                let readerReleaseFailed = false;
+                try {
+                    if (reader && typeof reader.releaseLock !== "function") {
+                        throw new Error("Reader.releaseLock() がありません");
+                    }
+                    reader?.releaseLock();
+                    reader = null;
+                } catch (error) {
+                    readerReleaseFailed = true;
+                }
+                const unexpectedCancelFailure = cancelResult.status === "rejected"
+                    && !isExpectedCancelRejection(cancelResult.reason, previousReadError);
+                const unsafe = !cancelledSources || closeResult.status === "rejected"
+                    || unexpectedCancelFailure || readerReleaseFailed || abortFailed;
+                if (unsafe) {
+                    // エラー内容の整形・ログ出力より先に必ず安全ロックを確定する。
+                    cleanupFailure ||= new Error(
+                        "音声再生の安全な終了を確認できません。拡張機能を再読み込みしてください。");
+                    if (playbackState === "scheduled") playbackState = "started";
+                    const issues = [];
+                    if (!cancelledSources) issues.push("予約音源の停止に失敗しました");
+                    if (closeResult.status === "rejected") {
+                        issues.push("AudioContext: " + describeRejection(closeResult.reason));
+                    }
+                    if (unexpectedCancelFailure) {
+                        issues.push("Reader: " + describeRejection(cancelResult.reason));
+                    }
+                    if (readerReleaseFailed) issues.push("Readerロックの解放に失敗しました");
+                    if (abortFailed) {
+                        issues.push("通信中断: " + describeRejection(abortFailure));
+                    }
+                    try {
+                        console.error("Offscreen: ストリーミング終了失敗:", issues.join(" / "));
+                    } catch (error) {}
+                    // close()失敗や取消し未解決は再開しない。予期されたabort拒否はここに入らない。
+                    throw cleanupFailure;
+                }
+                cleanupSucceeded = true;
+                if (playbackState === "scheduled") {
+                    playbackState = beforeStart ? "cancelled" : "started";
+                }
+            })();
+            activeCleanupCount++;
+            const tracked = stopPromise.finally(() => { activeCleanupCount--; });
+            // 終了失敗を後続のwaitForCleanupで検知する一方、未待機時のunhandledを防ぐ。
+            void tracked.catch(() => {});
+            pendingContextClose = Promise.allSettled([pendingContextClose, tracked])
+                .then(() => {});
+            return stopPromise;
+        };
+        async function run() {
+            const deadline = monotonicNow() + RESPONSE_TOTAL_MS;
+            const remainingResponseMs = () => deadline - monotonicNow();
+            // 前回停止処理と同じOffscreen環境でのAudioContext作成を直列化する。
+            await waitForCleanup();
+            ensureActive();
+            const header = new Uint8Array(44);
+            let headerUsed = 0;
+            let received = 0;
+            let payloadReceived = 0;
+            let meta = null;
+            let pcmLeft = new Uint8Array(4);
+            let pcmLeftCount = 0;
+            let buffer = null;
+            let channelData = null;
+            let frameIndex = 0;
+            let finishResolve;
+            const finished = new Promise((resolve) => { finishResolve = resolve; });
+            async function timed(promise, timeoutMs, abortOnTimeout = true) {
+                let timer;
+                let abortListener;
+                try {
+                    const remaining = remainingResponseMs();
+                    if (remaining <= 0) throw new Error("ストリーミング全体の時間上限を超えました");
+                    const effectiveTimeout = Math.min(timeoutMs, remaining);
+                    const overallDeadlineFirst = remaining <= timeoutMs;
+                    return await Promise.race([
+                        promise,
+                        new Promise((_, reject) => {
+                            abortListener = () => reject(abortError());
+                            controller.signal.addEventListener("abort", abortListener, { once: true });
+                            if (controller.signal.aborted) abortListener();
+                            timer = setTimeout(() => {
+                                const error = new Error(overallDeadlineFirst
+                                    ? "ストリーミング全体の時間上限を超えました"
+                                    : "VOICEVOXストリームの受信タイムアウト");
+                                if (!overallDeadlineFirst) error.streamIdleTimeout = true;
+                                reject(error);
+                                if (abortOnTimeout) controller.abort();
+                            }, effectiveTimeout);
+                        })
+                    ]);
+                } finally {
+                    clearTimeout(timer);
+                    if (abortListener) controller.signal.removeEventListener("abort", abortListener);
+                }
+            }
+
+            async function readStreamChunk() {
+                const remainingTime = remainingResponseMs();
+                if (remainingTime <= 0) throw new Error("ストリーミング受信の時間上限を超えました");
+                // 同じ reader.read() を待ち直す。再度 read() を呼ぶと受信順序が変わる。
+                let readPromise;
+                try {
+                    readPromise = Promise.resolve(reader.read()).catch(error => {
+                        previousReadError.failed = true;
+                        previousReadError.reason = error;
+                        throw error;
+                    });
+                } catch (error) {
+                    previousReadError.failed = true;
+                    previousReadError.reason = error;
+                    throw error;
+                }
+                try {
+                    return await timed(readPromise, Math.min(RESPONSE_IDLE_MS, remainingTime), false);
+                } catch (error) {
+                    if (!error?.streamIdleTimeout) throw error;
+                    ensureActive();
+                    const graceMs = Math.min(RESPONSE_STALL_GRACE_MS, remainingResponseMs());
+                    if (graceMs <= 0) {
+                        throw new Error("ストリーミング受信の時間上限を超えました");
+                    }
+                    return timed(readPromise, graceMs);
+                }
+            }
+
+            async function scheduleBuffer() {
+                ensureActive();
+                if (context.state !== "running") {
+                    await timed(context.resume(), 3000);
+                    ensureActive();
+                    if (context.state !== "running") {
+                        throw new Error("Chromeの音声再生機構を開始できません");
+                    }
+                }
+
+                // 音声クロックが予約処理中に進んでも、PCMの途中に継ぎ目を作らない。
+                source = context.createBufferSource();
+                source.buffer = buffer;
+                if (typeof context.createAnalyser === "function") {
+                    firstOutputAnalyser = context.createAnalyser();
+                    firstOutputAnalyser.fftSize = 16384;
+                    source.connect(firstOutputAnalyser);
+                    firstOutputAnalyser.connect(context.destination);
+                } else {
+                    source.connect(context.destination);
+                }
+
+                const reportActualStart = () => {
+                    startTimer = null;
+                    if (stopped || context.state !== "running" || playbackState !== "scheduled") return;
+                    const remainingMs = (firstScheduledAt - context.currentTime) * 1000;
+                    if (remainingMs > 0) {
+                        startTimer = setTimeout(reportActualStart, Math.max(1, remainingMs));
+                        return;
+                    }
+                    playbackState = "started";
+                    onStart();
+                };
+                source.onended = () => {
+                    source.disconnect();
+                    source = null;
+                    if (playbackState === "scheduled") {
+                        clearTimeout(startTimer);
+                        startTimer = null;
+                        playbackState = "started";
+                        onStart();
+                    }
+                    finishResolve();
+                };
+
+                firstScheduledAt = context.currentTime + 0.05;
+                try {
+                    source.start(firstScheduledAt);
+                } catch (error) {
+                    source.onended = null;
+                    source.disconnect();
+                    source = null;
+                    throw error;
+                }
+                playbackState = "scheduled";
+                startTimer = setTimeout(reportActualStart,
+                    Math.max(1, (firstScheduledAt - context.currentTime) * 1000));
+            }
+
+            function acceptPcm(bytes) {
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                let position = 0;
+                function frame(frameView, at) {
+                    for (let channel = 0; channel < meta.channels; channel++) {
+                        channelData[channel][frameIndex] =
+                            frameView.getInt16(at + channel * 2, true) / 32768;
+                    }
+                    frameIndex++;
+                }
+                if (pcmLeftCount) {
+                    const needed = meta.block - pcmLeftCount;
+                    const take = Math.min(needed, bytes.length);
+                    pcmLeft.set(bytes.subarray(0, take), pcmLeftCount);
+                    pcmLeftCount += take;
+                    position = take;
+                    if (pcmLeftCount === meta.block) {
+                        frame(new DataView(pcmLeft.buffer), 0);
+                        pcmLeftCount = 0;
+                    }
+                }
+                while (position + meta.block <= bytes.length) {
+                    frame(view, position);
+                    position += meta.block;
+                }
+                if (position < bytes.length) {
+                    pcmLeft.set(bytes.subarray(position), 0);
+                    pcmLeftCount = bytes.length - position;
+                }
+            }
+
+            // 全量を検証してから再生するため、上限内の音声は1回の生成にまとめる。
+            try {
+                const response = await timed(fetch(VOICEVOX_BASE_URL +
+                    "/streaming_synthesis?speaker=" + encodeURIComponent(speaker)
+                    + `&segment_length=${BUFFER_SECONDS_LIMIT}&start_offset=0`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(query),
+                    signal: controller.signal
+                }), 60000);
+                ensureActive();
+                if (!response.ok) {
+                    const error = new Error("ストリーミング合成エラー (" + response.status + ")");
+                    error.httpStatus = response.status;
+                    throw error;
+                }
+                if (!response.body?.getReader) throw new Error("ストリーミング受信が利用できません");
+                const lengthString = response.headers?.get?.("content-length");
+                const length = lengthString == null ? null : Number(lengthString);
+                if (length != null && (!Number.isSafeInteger(length) || length < 44
+                    || length > MAX_AUDIO_BYTES)) throw new Error("ストリームのサイズが不正です");
+                reader = response.body.getReader();
+                while (true) {
+                    ensureActive();
+                    const { done, value } = await readStreamChunk();
+                    ensureActive();
+                    if (done) break;
+                    if (!(value instanceof Uint8Array) || value.byteLength > 2 * 1024 * 1024) {
+                        throw new Error("ストリーム受信チャンクが不正です");
+                    }
+                    received += value.length;
+                    if (received > MAX_AUDIO_BYTES || (length != null && received > length)) {
+                        throw new Error("VOICEVOX音声応答が大きすぎます");
+                    }
+                    let offset = 0;
+                    if (headerUsed < 44) {
+                        const count = Math.min(44 - headerUsed, value.length);
+                        header.set(value.subarray(0, count), headerUsed);
+                        headerUsed += count;
+                        offset += count;
+                        if (headerUsed === 44) {
+                            meta = pcmHeader(header, query, length);
+                            if (meta.dataBytes > BUFFER_SECONDS_LIMIT * meta.sampleRate * meta.block) {
+                                exceedsBufferLimit = true;
+                                throw new Error("音声バッファの上限を超えたため通常合成へ切り替えます");
+                            }
+                            context = new AudioContext({ sampleRate: meta.sampleRate });
+                            buffer = context.createBuffer(
+                                meta.channels, meta.dataBytes / meta.block, meta.sampleRate);
+                            channelData = Array.from({ length: meta.channels },
+                                (_, channel) => buffer.getChannelData(channel));
+                        }
+                    }
+                    if (meta && offset < value.length) {
+                        const part = value.subarray(offset);
+                        payloadReceived += part.byteLength;
+                        if (payloadReceived > meta.dataBytes) throw new Error("WAVデータの過剰受信");
+                        acceptPcm(part);
+                    }
+                }
+                if (!meta || received !== meta.fileBytes || payloadReceived !== meta.dataBytes
+                    || (length != null && received !== length) || pcmLeftCount !== 0) {
+                    throw new Error("VOICEVOXストリームの音声末尾が欠損しています");
+                }
+                await scheduleBuffer();
+                await timed(finished, RESPONSE_TOTAL_MS);
+                ensureActive();
+            } finally {
+                await stop();
+            }
+        }
+        return {
+            run, stop,
+            get started() {
+                return playbackState === "started" || (playbackState === "scheduled"
+                    && context !== null && context.currentTime >= firstScheduledAt);
+            },
+            get exceedsBufferLimit() { return exceedsBufferLimit; },
+            get canFallback() {
+                return cleanupSucceeded && cleanupFailure === null
+                    && (playbackState === "idle" || playbackState === "cancelled");
+            }
+        };
+    }
+
+    function lockCleanup(reason) {
+        cleanupFailure ||= new Error("通信の安全な終了を確認できません。拡張機能を再読み込みしてください: "
+            + describeRejection(reason));
+        return cleanupFailure;
+    }
+
+    globalThis.VVRadioStreaming = Object.freeze({
+        supports, invalidate, suppress, createPlayer, pcmHeader, lockCleanup,
+        cleanupStatus, waitForCleanup, bufferSecondsLimit: BUFFER_SECONDS_LIMIT
+    });
+})();
 /**
  * 分割済みのテキストをまとめて合成待ちキューに追加し、合成プロセスを開始する。
  * 1文ずつ別メッセージで受け取ると、短い文では先頭の再生が終わった時点で
@@ -197,8 +774,12 @@ function scheduleOcrWorkerIdleRelease() {
  */
 function enqueueTexts(texts, settings) {
     if (!Array.isArray(texts) || texts.length === 0) return;
+    // 連続する文章のストリーミング切替は無音区間の実機検証が未完了。
+    // 音切れ対策が確立している従来の先読み経路を複数文では優先する。
+    const playbackSettings = texts.length > 1
+        ? { ...settings, synthesisMode: "normal" } : settings;
     for (const text of texts) {
-        textQueue.push({ text, settings });
+        textQueue.push({ text, settings: playbackSettings });
     }
     processSynthesis();
 }
@@ -217,7 +798,35 @@ const MIN_SYNTHESIS_SPLIT_CHARS = 8;
 // 利用者は無音のまま待たされ、文の数だけエラー表示が上書きされ続けるだけになる。
 // 1〜2件なら「その文だけ読めなかった」可能性があるので続行する。
 const MAX_CONSECUTIVE_SYNTHESIS_FAILURES = 3;
+const STREAMING_PREPARATION_CANCEL_WAIT_MS = 1200;
+// 近い音声長は WAV ヘッダーで確かめる。モーラ長の合計と実 WAV には丸め等の差がある。
+const STREAMING_DURATION_MARGIN_SECONDS = 0.5;
 let consecutiveSynthesisFailures = 0;
+
+function safeErrorMessage(error) {
+    try {
+        if (error == null) return String(error);
+        const message = error.message;
+        if (typeof message === "string" && message) return message;
+        return String(error);
+    } catch (ignored) {
+        return "詳細不明のエラー";
+    }
+}
+
+function waitForStreamingPreparation(preparation) {
+    if (!preparation) return Promise.resolve();
+    let timer;
+    const settled = Promise.resolve(preparation.promise).then(() => undefined, () => undefined);
+    const deadline = new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(
+            "ストリーミング準備通信の終了を確認できませんでした")),
+        STREAMING_PREPARATION_CANCEL_WAIT_MS);
+    });
+    return Promise.race([settled, deadline]).catch(error => {
+        throw globalThis.VVRadioStreaming?.lockCleanup?.(error) || error;
+    }).finally(() => clearTimeout(timer));
+}
 
 /**
  * 合成に失敗した文を2つに割る。句読点・閉じ括弧の直後のうち中央にいちばん近い位置で
@@ -252,6 +861,17 @@ function audioClockMs() {
     return globalThis.performance?.now?.() ?? Date.now();
 }
 
+function trackNormalRequest(request) {
+    // ENGINE の /synthesis は接続を切っても演算を継続する。停止の表示はすぐ返し、
+    // 次の音声要求だけを旧通信の完了または既存のタイムアウトまで待たせる。
+    const release = () => {
+        if (pendingNormalRequest === done) pendingNormalRequest = null;
+    };
+    const done = request.then(release, release);
+    pendingNormalRequest = done;
+    return request;
+}
+
 // 文の文字数ではなく、エンジンが返したモーラ長で先の合成負荷を予測する。
 // 短文が複数続いてから長文が来る場合も見る必要があるので、次の1件だけにはしない。
 // WAVとは別の上限で軽いクエリを先読みする。音声が短い場合、WAVの件数上限で
@@ -268,13 +888,14 @@ async function prepareSynthesisWindow(item, generation) {
         const pending = index < 0 ? item : textQueue[index];
         if (!pending.query && !pending.queryError) {
             try {
-                const query = await prepareVoiceQuery(pending.text, pending.settings);
+                const query = await trackNormalRequest(prepareVoiceQuery(pending.text, pending.settings));
                 if (generation !== synthesisGeneration) return false;
                 pending.query = query;
                 pending.durationSec = estimateQueryDurationSec(query, pending.settings.speedScale);
             } catch (error) {
                 if (generation !== synthesisGeneration) return false;
-                pending.queryError = error;
+                // null/undefined の拒否も、先読み済みの失敗としてキューに残す。
+                pending.queryError = error || new Error(safeErrorMessage(error));
             }
         }
         // 失敗は元の合成キューの順番で処理し、分割再試行とエラー通知の契約を保つ。
@@ -314,7 +935,8 @@ function clearPlaybackBufferTimer() {
 }
 
 async function processSynthesis() {
-    if (isSynthesizing || textQueue.length === 0
+    if (isSynthesizing || currentStreamingPlayer || audioQueue.some(item => item.streaming)
+        || textQueue.length === 0
         || audioQueue.length >= MAX_READY_AUDIO_QUEUE
         || readyAudioSeconds() >= MAX_READY_AUDIO_SECONDS) return;
 
@@ -325,11 +947,49 @@ async function processSynthesis() {
     activeSynthesis = { durationSec: null, startedAt: null };
 
     try {
+        if (pendingNormalRequest) await pendingNormalRequest;
+        if (generation !== synthesisGeneration) return;
+        let streamingQuery = null;
+        // 機能照会とクエリ取得も再生準備の一部として扱い、STOP_AUDIOから同じ要求単位の
+        // AbortSignalを渡す。準備段階で止められた旧要求が次の再生と重ならないよう記録する。
+        if (!item.forceNormal && item.settings.synthesisMode === "auto"
+            && globalThis.VVRadioStreaming) {
+            const preparation = { controller: new AbortController(), promise: null };
+            const signal = preparation.controller.signal;
+            preparation.promise = (async () => {
+                const supported = await globalThis.VVRadioStreaming.supports(
+                    item.settings.speakerId, false, { signal });
+                if (!supported) return null;
+                return item.query || await prepareVoiceQuery(item.text, item.settings, signal);
+            })();
+            activeStreamingPreparation = preparation;
+            try {
+                streamingQuery = await preparation.promise;
+            } finally {
+                if (activeStreamingPreparation === preparation) activeStreamingPreparation = null;
+            }
+        }
+        if (generation !== synthesisGeneration) return;
+        if (streamingQuery) {
+            const durationSec = estimateQueryDurationSec(streamingQuery, item.settings.speedScale);
+            const longAudio = durationSec > globalThis.VVRadioStreaming.bufferSecondsLimit + STREAMING_DURATION_MARGIN_SECONDS;
+            if (!longAudio) {
+                audioQueue.push({ streaming: true, query: streamingQuery, settings: item.settings,
+                    text: item.text, durationSec, splitDepth: item.splitDepth || 0, notice: item.notice });
+                activeSynthesis = null;
+                processPlayback();
+                return;
+            }
+            item.query = streamingQuery;
+            item.durationSec = durationSec;
+        }
         if (!await prepareSynthesisWindow(item, generation)) return;
         if (item.queryError) throw item.queryError;
         activeSynthesis = { durationSec: item.durationSec, startedAt: audioClockMs() };
         processPlayback();
-        const { url: blobUrl, durationSec } = await generateVoiceBlob(item.text, item.settings, item.query);
+        if (generation !== synthesisGeneration) return;
+        const audio = generateVoiceBlob(item.text, item.settings, item.query);
+        const { url: blobUrl, durationSec } = await trackNormalRequest(audio);
         // 合成中に stopAll() が走った場合、生成済み Blob を破棄して状態を触らない
         if (generation !== synthesisGeneration) {
             URL.revokeObjectURL(blobUrl);
@@ -351,31 +1011,35 @@ async function processSynthesis() {
         const splitDepth = item.splitDepth || 0;
         // 割った断片が結局どれも読めなかった場合でも、通知は元の1文につき1回に保つ
         // （最大8片ぶんのエラー表示を出さない）。
-        const notice = item.notice || { notified: false };
+        const notice = item.notice || { error: null };
         if (isVoicevoxRetryableError(err) && splitDepth < MAX_SYNTHESIS_SPLIT_DEPTH) {
             const parts = splitSynthesisText(item.text);
             if (parts) {
                 textQueue.unshift(
-                    { text: parts[0], settings: item.settings, splitDepth: splitDepth + 1, notice },
-                    { text: parts[1], settings: item.settings, splitDepth: splitDepth + 1, notice });
+                    { text: parts[0], settings: item.settings, forceNormal: item.forceNormal, splitDepth: splitDepth + 1, notice },
+                    { text: parts[1], settings: item.settings, forceNormal: item.forceNormal, splitDepth: splitDepth + 1, notice });
                 return;
             }
         }
-        if (notice.notified && !isVoicevoxUnreachableError(err)) return;
-        notice.notified = true;
-        consecutiveSynthesisFailures++;
-        // エンジンに届かない・応答が無い失敗では残りの文を合成しない。続けても文の数だけ
-        // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
-        // 到達はできるが毎回同じ理由で拒否される場合も同じなので、連続失敗が続いたら諦める。
-        // 割っても駄目だった文はここで諦め、次の文へ進む（既に合成済みの音声は再生を終える）。
-        if (isVoicevoxUnreachableError(err)
-            || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
-            textQueue = [];
+        const unreachable = isVoicevoxUnreachableError(err);
+        const alreadyReported = notice.error !== null && !unreachable;
+        if (!alreadyReported) {
+            consecutiveSynthesisFailures++;
+            // ENGINE に届かない場合や連続して失敗する場合は、残りの文を諦める。
+            // 既に合成済みの音声は再生を終える。
+            if (unreachable) globalThis.VVRadioStreaming?.invalidate?.();
+            if (unreachable || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
+                textQueue = [];
+            }
+            // HTTP ステータスなど、利用者向けの文言を持つエラーはそのまま伝える。
+            const message = safeErrorMessage(err);
+            notice.error = err?.userFacing ? message : `合成失敗: ${message}`;
         }
-        // 利用者へ見せる文言を持つエラー（HTTPステータス・応答形式）はそのまま伝える。
-        // 内部由来の英語メッセージだけ「合成失敗:」を付けて区別できるようにする。
-        notifyBackground("PLAYBACK_ERROR",
-            { error: err?.userFacing ? err.message : `合成失敗: ${err.message}` });
+        const terminal = !isPlaying && audioQueue.length === 0 && textQueue.length === 0;
+        // 理由の再表示を抑える場合も、キューが空になった時点で SW に要求終了を伝える。
+        if (!alreadyReported || terminal) {
+            notifyBackground("PLAYBACK_ERROR", { error: notice.error, terminal, alreadyReported });
+        }
     } finally {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
         // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。
@@ -541,13 +1205,14 @@ function isSameReading(candidateQuery, originalQuery) {
  * @param {object} queryJson 元のテキストのクエリ
  * @returns {Promise<object>}
  */
-async function preferBracketFreeQuery(text, speaker, queryJson) {
+async function preferBracketFreeQuery(text, speaker, queryJson, signal = null) {
     const candidate = bracketFreeCandidate(text);
     if (!candidate) return queryJson;
     let candidateQuery;
     try {
-        candidateQuery = await requestAudioQuery(candidate, speaker);
+        candidateQuery = await requestAudioQuery(candidate, speaker, signal);
     } catch (error) {
+        if (signal?.aborted) throw error;
         return queryJson;
     }
     return isSameReading(candidateQuery, queryJson) ? candidateQuery : queryJson;
@@ -559,28 +1224,50 @@ async function preferBracketFreeQuery(text, speaker, queryJson) {
  * @param {number} speaker
  * @returns {Promise<object>}
  */
-async function requestAudioQuery(text, speaker) {
-    const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
-    const queryResponse = await fetchWithTimeout(
-        queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
-    if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
-
+async function parseAudioQueryResponse(queryResponse) {
     let queryJson;
     try {
         queryJson = await readJsonResponseWithLimit(queryResponse);
     } catch (error) {
-        // 本文がJSONでない（同じポートを別のプロセスが使っている、エラーページが返る等）。
-        // ここで置き換えないと JSON.parse の英語の内部メッセージがそのまま通知へ出る。
-        // realm をまたいで投げられるので instanceof ではなく name で判定する。
         if (error?.name === "SyntaxError") throw voicevoxUnexpectedResponseError();
         throw error;
     }
-    // 応答の形を確かめてから書き込む。null や配列以外が返ったとき、この後の代入が
-    // TypeError になり「Cannot set properties of null」がそのまま利用者へ出ていた。
     if (!queryJson || typeof queryJson !== "object" || !Array.isArray(queryJson.accent_phrases)) {
         throw voicevoxUnexpectedResponseError();
     }
     return queryJson;
+}
+
+async function requestAudioQuery(text, speaker, signal = null) {
+    const queryUrl = `${VOICEVOX_BASE_URL}/audio_query?speaker=${speaker}&text=${encodeURIComponent(text)}`;
+    let queryResponse;
+    if (signal) {
+        if (signal.aborted) throw new Error("音声クエリ取得が中断されました");
+        const controller = new AbortController();
+        let timedOut = false;
+        const abortFromRequest = () => controller.abort();
+        signal.addEventListener("abort", abortFromRequest, { once: true });
+        const timer = setTimeout(() => { timedOut = true; controller.abort(); }, VOICEVOX_FETCH_TIMEOUT_MS);
+        try {
+            queryResponse = await fetch(queryUrl, { method: "POST", signal: controller.signal });
+            if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
+            return await parseAudioQueryResponse(queryResponse);
+        } catch (error) {
+            if (signal.aborted) throw error;
+            if (timedOut && error?.name === "AbortError") {
+                throw new Error(`VOICEVOXエンジンが応答しません（${Math.round(VOICEVOX_FETCH_TIMEOUT_MS / 1000)}秒）`);
+            }
+            throw error;
+        } finally {
+            clearTimeout(timer);
+            signal.removeEventListener("abort", abortFromRequest);
+            controller.abort();
+        }
+    }
+    queryResponse = await fetchWithTimeout(queryUrl, { method: "POST" }, VOICEVOX_FETCH_TIMEOUT_MS);
+    if (!queryResponse.ok) throw voicevoxHttpError(queryResponse.status);
+
+    return parseAudioQueryResponse(queryResponse);
 }
 
 /**
@@ -588,13 +1275,13 @@ async function requestAudioQuery(text, speaker) {
  * 制限時間つきの fetch（fetchWithTimeout）は constants.js で定義している。
  * @returns {Promise<object>}
  */
-async function prepareVoiceQuery(text, settings) {
+async function prepareVoiceQuery(text, settings, signal = null) {
     const { speakerId, speedScale, pitchScale, intonationScale, volumeScale, pauseLengthScale } = settings;
     // speaker はURLに載るため数値に正規化する（不正値が紛れてもURLを壊さない）
     const speaker = Number(speakerId);
 
-    let queryJson = await requestAudioQuery(text, speaker);
-    queryJson = await preferBracketFreeQuery(text, speaker, queryJson);
+    let queryJson = await requestAudioQuery(text, speaker, signal);
+    queryJson = await preferBracketFreeQuery(text, speaker, queryJson, signal);
 
     queryJson.prePhonemeLength = 0.1 * speedScale;
     queryJson.postPhonemeLength = 0.1 * speedScale;
@@ -634,6 +1321,59 @@ async function generateVoiceBlob(text, settings, preparedQuery = null) {
  */
 async function processPlayback(continuePlayback = false) {
     if (isPlaying || audioQueue.length === 0) return;
+    if (audioQueue[0].streaming) {
+        clearPlaybackBufferTimer();
+        const item = audioQueue.shift();
+        const generation = playbackGeneration;
+        isPlaying = true;
+        const player = globalThis.VVRadioStreaming.createPlayer(
+            item.query, Number(item.settings.speakerId), () => {
+                if (generation === playbackGeneration) notifyBackground("PLAYBACK_STARTED");
+            });
+        currentStreamingPlayer = player;
+        let completed = false;
+        try {
+            await player.run();
+            completed = true; // readerの終了だけではなく最後のAudioBufferの再生完了まで待つ
+        } catch (error) {
+            if (generation !== playbackGeneration) return;
+            const canFallback = player.canFallback === true;
+            if (!canFallback || !player.exceedsBufferLimit) {
+                globalThis.VVRadioStreaming.suppress(item.settings.speakerId);
+            }
+            if (canFallback) {
+                // 未予約、または開始前の予約取消し・Context解放が完了した場合のみ再試行。
+                textQueue.unshift({ text: item.text, settings: item.settings,
+                    forceNormal: true, query: item.query, durationSec: item.durationSec,
+                    splitDepth: item.splitDepth, notice: item.notice });
+            } else {
+                // 再生済み音声を先頭から二重に再生しない。途中復旧は安全性未検証。
+                textQueue = [];
+                for (const ready of audioQueue) if (ready.url) URL.revokeObjectURL(ready.url);
+                audioQueue = [];
+                console.error("Offscreen: ストリーミング再生失敗:", error);
+                notifyBackground("PLAYBACK_ERROR",
+                    { error: "ストリーミング再生を中断しました: " + safeErrorMessage(error), terminal: true });
+            }
+        } finally {
+            // stop()失敗はrun()側のcatchで利用者へ通知済み。finallyから二次例外を
+            // 発生させると再生キューの終了処理を妨げるため、ここでは再送しない。
+            await player.stop().catch(() => {});
+            if (generation === playbackGeneration) {
+                currentStreamingPlayer = null;
+                isPlaying = false;
+                if (completed && textQueue.length === 0 && audioQueue.length === 0
+                    && !isSynthesizing) notifyBackground("PLAYBACK_ENDED");
+                // テストモックや旧拡張との境界で状態APIが存在しない場合は通常経路を維持。
+                // 実プレイヤーの終了失敗時はfailedとなり、後続の音声を開始しない。
+                if ((globalThis.VVRadioStreaming.cleanupStatus?.() || "ready") === "ready") {
+                    processSynthesis();
+                    processPlayback(true);
+                }
+            }
+        }
+        return;
+    }
 
     clearPlaybackBufferTimer();
     processSynthesis();
@@ -692,32 +1432,35 @@ async function processPlayback(continuePlayback = false) {
         processPlayback(completedNormally && audioQueue.length > 0);
     };
 
+    const reportPlaybackError = (message, error) => {
+        if (generation !== playbackGeneration || isCleanedUp) return;
+        try {
+            console.error("Offscreen: Audioエラー:", error);
+            notifyBackground("PLAYBACK_ERROR", { error: message,
+                terminal: !isSynthesizing && audioQueue.length === 0 && textQueue.length === 0 });
+        } finally {
+            cleanup(false);
+        }
+    };
+
     audio.onended = () => cleanup(true);
     audio.onerror = (e) => {
         const errorInfo = audio.error
-            ? `Code: ${audio.error.code}, Message: ${audio.error.message}`
+            ? `Code: ${audio.error.code}, Message: ${safeErrorMessage(audio.error)}`
             : "Details unavailable";
-        console.error(`Offscreen: Audioエラー [${errorInfo}]`, e);
-        notifyBackground("PLAYBACK_ERROR", { error: errorInfo });
-        cleanup(false);
+        reportPlaybackError(errorInfo, e);
     };
 
     try {
         await audio.play();
     } catch (err) {
-        if (generation !== playbackGeneration) return;
-        console.error("Offscreen: play()失敗:", err.name, err.message);
-        notifyBackground("PLAYBACK_ERROR", { error: `${err.name}: ${err.message}` });
-        cleanup(false);
+        reportPlaybackError(safeErrorMessage(err), err);
     }
 }
 
-function stopAll() {
-    // 何も動いていないときの停止（読み上げ開始前の STOP_AUDIO・二度目の停止）では
-    // PLAYBACK_STOPPED を通知しない。開始直前に「停止」が届くと capture.html の
-    // 表示が「停止しました」→「再生中」と往復し、タブのアイコンも一瞬点滅する。
-    const wasActive = isPlaying || isSynthesizing || textQueue.length > 0 || audioQueue.length > 0
-        || currentAudio != null;
+async function stopAll() {
+    // 停止結果は STOP_AUDIO の応答だけで返す。SW が対象要求へ結果を通知する。
+    playbackRequestId = undefined;
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
     clearPlaybackBufferTimer();
@@ -728,6 +1471,24 @@ function stopAll() {
     consecutiveSynthesisFailures = 0;
     // in-flight の再生開始処理を無効化（停止後の AbortError 等を通知しない）
     playbackGeneration++;
+    const stoppingPlayer = currentStreamingPlayer;
+    const playerCleanup = stoppingPlayer ? stoppingPlayer.stop() : Promise.resolve();
+    const stoppingPreparation = activeStreamingPreparation;
+    let preparationAbortError = null;
+    if (stoppingPreparation) {
+        try {
+            stoppingPreparation.controller.abort();
+        } catch (error) {
+            preparationAbortError = error;
+        }
+    }
+    const preparationCleanup = waitForStreamingPreparation(stoppingPreparation).then(() => {
+        if (preparationAbortError) {
+            throw globalThis.VVRadioStreaming?.lockCleanup?.(preparationAbortError)
+                || preparationAbortError;
+        }
+    });
+    currentStreamingPlayer = null;
 
     if (currentAudio) {
         currentAudio.onended = null;
@@ -743,17 +1504,27 @@ function stopAll() {
     }
 
     textQueue = [];
-    audioQueue.forEach(item => URL.revokeObjectURL(item.url));
+    audioQueue.forEach(item => { if (item.url) URL.revokeObjectURL(item.url); });
     audioQueue = [];
 
     isSynthesizing = false;
     isPlaying = false;
 
-    if (wasActive) notifyBackground("PLAYBACK_STOPPED");
+    // 先行stop()がまだ完了していれば、それも含めて待つ。
+    // これにより背景側の STOP_AUDIO → ENQUEUE_TEXTS は後始末完了順になる。
+    return Promise.allSettled([playerCleanup, preparationCleanup])
+        .then(results => {
+            const failed = results.find(result => result.status === "rejected");
+            if (failed) throw failed.reason;
+        })
+        .then(() => globalThis.VVRadioStreaming?.waitForCleanup?.());
 }
 
 function notifyBackground(type, payload = {}) {
     // background 側は応答を返さない通知なので、応答チャネルが閉じたことによる
     // 拒否は無視する（放置すると未処理の Promise 拒否でコンソールが埋まる）。
-    chrome.runtime.sendMessage({ type, target: 'background', ...payload }).catch(() => {});
+    const message = { type, target: 'background', ...payload };
+    if (type.startsWith("PLAYBACK_")) message.requestId = playbackRequestId;
+    if (type === "PLAYBACK_ENDED" || payload.terminal === true) playbackRequestId = undefined;
+    chrome.runtime.sendMessage(message).catch(() => {});
 }

@@ -56,8 +56,10 @@ function normalizeSpeakerList(value) {
 }
 
 // 音声の開始・停止要求を到着順に処理する。複数タブから同時に要求された場合でも、
-// 「宛先切替 → 既存再生停止 → 新規キュー追加」の順序が交差しないようにする。
+// 「既存再生停止 → 宛先切替 → 新規キュー追加」の順序が交差しないようにする。
 let voiceOperationQueue = Promise.resolve();
+const pendingVoiceStarts = new Map();
+const pendingVoiceStops = new Map();
 function enqueueVoiceOperation(operation) {
     const next = voiceOperationQueue.then(operation);
     voiceOperationQueue = next.catch(() => {});
@@ -66,7 +68,7 @@ function enqueueVoiceOperation(operation) {
 
 // Content Scriptからのメッセージを処理するリスナー
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.target && request.target !== 'background') return;
+    if (request?.target && request.target !== 'background') return;
     const security = globalThis.VVRadioBackgroundSecurity;
     if (security) {
         const checked = security.validateRequest(request, sender);
@@ -159,17 +161,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // 新しい読み上げの開始は、そのタブで進行中の範囲OCRを無効化する
             // （古い認識結果が後から届いてこの読み上げを中断しないように）。
             invalidatePendingOcr(sender.tab?.id);
-            // 宛先の保存を完了してから合成を開始し、直後の PLAYBACK_STARTED を取りこぼさない。
-            enqueueVoiceOperation(async () => {
-                await switchPlaybackTabTo(sender.tab?.id ?? null);
-                await handleGenerateVoice(request.text, sendResponse);
-            }).catch((err) => sendResponse({ success: false, error: err.message }));
+            queueVoiceStart(request.text, sender.tab?.id ?? null,
+                sender.frameId === 0 ? sender.documentId : undefined).then(sendResponse);
             return true;
 
         case "STOP_ALL":
             // 停止はそのタブで進行中の範囲OCRも取り消す（完了後に勝手に読み上げを始めない）。
-            invalidatePendingOcr(sender.tab?.id);
-            respondWith(enqueueVoiceOperation(stopOffscreenAudioIfPresent), sendResponse);
+            respondWith(stopAllForTab(sender.tab?.id ?? null), sendResponse);
+            return true;
+
+        case "PLAYBACK_PAGE_HIDDEN":
+            respondWith(Promise.resolve(stopPlaybackForTab(sender.tab.id, sender.documentId)), sendResponse);
+            return true;
+
+        case "PLAYBACK_PAGE_READY":
+            respondWith(stopPlaybackFromPreviousDocument(sender.tab.id, sender.documentId), sendResponse);
             return true;
 
         case "CAPTURE_OCR_REGION": {
@@ -213,24 +219,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }, "OCRエラー通知の送信失敗");
                 return false;
             }
-            // 宛先の保存完了後に読み上げを始め、開始通知の転送先を確実にする。
-            enqueueVoiceOperation(async () => {
-                await switchPlaybackTabTo(tabId);
-                notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
-                await handleGenerateVoice(request.text, (res) => {
-                    if (res && res.success === false) {
-                        notifyTab(tabId, {
-                            type: "OCR_STATUS",
-                            status: "error",
-                            message: `読み上げを開始できませんでした: ${res.error}`
-                        }, "読み上げ開始エラー通知の送信失敗");
-                    }
-                });
-            }).catch((err) => {
-                notifyTab(tabId, {
-                    type: "OCR_STATUS", status: "error",
-                    message: `読み上げを開始できませんでした: ${err.message}`
-                }, "読み上げ開始エラー通知の送信失敗");
+            notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
+            queueVoiceStart(request.text, tabId).then((res) => {
+                if (!res.success) {
+                    notifyTab(tabId, {
+                        type: "OCR_STATUS", status: "error",
+                        message: `読み上げを開始できませんでした: ${res.error}`
+                    }, "読み上げ開始エラー通知の送信失敗");
+                }
             });
             return false;
         }
@@ -238,51 +234,181 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case "PLAYBACK_STARTED":
         case "PLAYBACK_ENDED":
         case "PLAYBACK_ERROR":
-        case "PLAYBACK_STOPPED":
-            // 再生を要求したタブにのみ転送する。全アクティブタブへ配信すると、
-            // 別ウィンドウのアクティブタブのUIまで誤って更新されてしまう。
-            // target を 'tab' に付け替えるのは、拡張機能ページ（capture.html）が
-            // offscreen からの全体ブロードキャスト（target:'background'）と
-            // このタブ宛て転送を区別して二重処理を防げるようにするため。
-            // SW休止から復帰した直後はメモリ上の宛先が失われているため、
-            // storage.session から復元してから転送する（getPlaybackTabId）。
-            getPlaybackTabId().then((tabId) => notifyTab(tabId, request, "再生状態の転送失敗"));
+            // 停止中に発生したイベントで停止結果を上書きしない。
+            enqueueVoiceOperation(() => forwardPlaybackEvent(request)).catch(warn("再生状態の転送失敗"));
             return false;
     }
 
     return false;
 });
 
-async function handleGenerateVoice(text, sendResponse) {
-    try {
-        // 設定の読み出しも try の内側に入れる。ここで例外が出ると応答が返らず、
-        // 要求元は「無反応」のまま待たされてしまう。
-        const result = await chrome.storage.local.get(Object.keys(SETTING_DEFAULTS));
-        const settings = { ...SETTING_DEFAULTS, ...result };
-        const chunks = splitText(text);
-        // 記号・罫線だけの選択など、読める文字が無い場合は無音の合成要求を送らず、
-        // 理由を返す（呼び出し側がトーストに出す）。
-        if (chunks.length === 0) {
-            sendResponse({ success: false, error: "読み上げられる文字がありません" });
-            return;
-        }
+chrome.runtime.onConnect?.addListener(port => {
+    if (!port.name.startsWith("playback-lifetime:") || port.sender?.id !== chrome.runtime.id
+        || port.sender.url !== chrome.runtime.getURL("offscreen.html") || port.sender.tab) return;
+    // Chrome は Offscreen からの Port の sender に documentId を付けない。
+    // URLで送信元を確認し、Chromeが列挙した文書IDと照合する。
+    const documentId = port.name.slice("playback-lifetime:".length);
+    if (!documentId) return;
+    port.onDisconnect.addListener(() => {
+        enqueueVoiceOperation(async () => {
+            const owner = await getPlaybackOwner();
+            if (!owner || owner.offscreenDocumentId !== documentId) return;
+            if (owner.stopFailed) return;
+            // SW 再起動やポート切断だけでは、再生中の Offscreen を失ったと判断しない。
+            const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+            if (contexts.some(context => context.documentId === documentId)) return;
+            await setPlaybackOwner(null);
+            if (!pendingVoiceStarts.has(owner.tabId) && !pendingVoiceStops.has(owner.tabId)) {
+                notifyVoiceRequest(owner, "PLAYBACK_ERROR", {
+                    terminal: true, error: "音声処理画面が閉じました。もう一度読み上げを開始してください。"
+                });
+            }
+        }).catch(warn("音声処理画面の終了確認失敗"));
+    });
+});
 
-        await setupOffscreen();
-        // Offscreen への配信完了を確認してから成功応答を返す（無音失敗の可視化）
-        await sendToOffscreen({ type: 'STOP_AUDIO' });
-
-        // 1文ずつ送ると、短い文では先頭の再生完了時にキューが空になり
-        // 読み上げ終了が早すぎるタイミングで通知される。まとめて渡す。
-        await sendToOffscreen({
-            type: 'ENQUEUE_TEXTS',
-            texts: chunks,
-            settings
-        });
-        sendResponse({ success: true });
-    } catch (err) {
-        console.error("Background: 準備エラー:", err);
-        sendResponse({ success: false, error: err.message });
+async function forwardPlaybackEvent(message) {
+    const owner = await getPlaybackOwner();
+    if (!owner || owner.requestId !== message.requestId || owner.stopFailed) return;
+    if (message.type === "PLAYBACK_ENDED" || message.terminal === true) await setPlaybackOwner(null);
+    if (!pendingVoiceStarts.has(owner.tabId) && !pendingVoiceStops.has(owner.tabId)) {
+        notifyTab(owner.tabId, { ...message, requestId: owner.uiRequestId ?? owner.requestId }, "再生状態の転送失敗");
     }
+}
+
+function notifyVoiceRequest(owner, type, details) {
+    if (owner) notifyTab(owner.tabId, { type, requestId: owner.uiRequestId ?? owner.requestId, ...details });
+}
+
+function queueVoiceStart(text, tabId, documentId) {
+    const start = { tabId, requestId: crypto.randomUUID(), documentId, cancelled: false };
+    pendingVoiceStarts.set(tabId, start);
+    notifyVoiceRequest(start, "PLAYBACK_PREPARING");
+    const isCurrent = () => !start.cancelled && pendingVoiceStarts.get(tabId) === start;
+    const cancelled = { success: true, cancelled: true };
+
+    return enqueueVoiceOperation(async () => {
+        try {
+            if (!isCurrent()) return cancelled;
+            const result = await chrome.storage.local.get(Object.keys(SETTING_DEFAULTS));
+            if (!isCurrent()) return cancelled;
+            const settings = { ...SETTING_DEFAULTS, ...result };
+            const chunks = splitText(text);
+            if (chunks.length === 0) throw new Error("読み上げられる文字がありません");
+
+            if (tabId != null && !start.documentId) {
+                // 子フレームの選択や OCR も、タブのメイン文書の寿命に従う。
+                const frames = await chrome.scripting.executeScript({
+                    target: { tabId, frameIds: [0] }, func: () => true
+                }).catch(() => []);
+                start.documentId = frames?.[0]?.documentId;
+                if (!isCurrent()) return cancelled;
+            }
+
+            await setupOffscreen();
+            if (!isCurrent()) return cancelled;
+            const previous = await getPlaybackOwner();
+            if (!isCurrent()) return cancelled;
+            try {
+                await sendToOffscreen({ type: "STOP_AUDIO" });
+            } catch (err) {
+                const error = await recordVoiceStopFailure(previous, start, err);
+                if (previous?.tabId === tabId && isCurrent()) {
+                    notifyVoiceRequest(start, "PLAYBACK_STOP_FAILED", { error });
+                    return { success: false, error, reported: true };
+                }
+                throw new Error(error);
+            }
+            if (previous) {
+                await setPlaybackOwner(null);
+                if (!pendingVoiceStarts.has(previous.tabId) && !pendingVoiceStops.has(previous.tabId)) {
+                    notifyVoiceRequest(previous, "PLAYBACK_STOPPED");
+                }
+            }
+            if (!isCurrent()) return cancelled;
+
+            // Offscreen が応答前に再生通知を送っても、この要求の宛先を復元できるようにする。
+            const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+            if (!isCurrent()) return cancelled;
+            const offscreenDocumentId = contexts[0]?.documentId;
+            await setPlaybackOwner({ tabId, requestId: start.requestId, documentId: start.documentId,
+                offscreenDocumentId });
+            if (!isCurrent()) return cancelled;
+            await sendToOffscreen({ type: "ENQUEUE_TEXTS", texts: chunks, settings, requestId: start.requestId,
+                offscreenDocumentId });
+            return isCurrent() ? { success: true } : cancelled;
+        } catch (err) {
+            if (playbackOwner?.requestId === start.requestId) await setPlaybackOwner(null);
+            if (!isCurrent()) return cancelled;
+            const error = err?.message || "読み上げを開始できませんでした";
+            const oldVoiceActive = playbackOwner?.tabId === tabId;
+            if (oldVoiceActive) await setPlaybackOwner({ ...playbackOwner, uiRequestId: start.requestId });
+            if (!isCurrent()) return cancelled;
+            notifyVoiceRequest(start, "PLAYBACK_START_FAILED", { error, oldVoiceActive });
+            console.error("Background: 準備エラー:", err);
+            return { success: false, error, reported: tabId != null };
+        } finally {
+            if (pendingVoiceStarts.get(tabId) === start && !start.cancelled) pendingVoiceStarts.delete(tabId);
+        }
+    });
+}
+
+function stopAllForTab(tabId) {
+    invalidatePendingOcr(tabId);
+    return queueVoiceStop(tabId);
+}
+
+async function recordVoiceStopFailure(owner, target, error) {
+    const reason = error?.message || "読み上げを停止できませんでした";
+    if (owner) {
+        const uiRequestId = target?.tabId === owner.tabId ? target.requestId : owner.uiRequestId;
+        await setPlaybackOwner({ ...owner, stopFailed: true, uiRequestId });
+    }
+    return reason;
+}
+
+function queueVoiceStop(tabId, { navigating = false, documentId } = {}) {
+    const start = pendingVoiceStarts.get(tabId);
+    if (documentId && start?.documentId && start.documentId !== documentId) return Promise.resolve();
+    const existing = pendingVoiceStops.get(tabId);
+    if (existing && existing.start === start) {
+        existing.navigating ||= navigating;
+        return existing.operation;
+    }
+    // 初期化中でも、停止の受付以降は取り消した要求を Offscreen に渡さない。
+    if (start) start.cancelled = true;
+    const stop = { start, navigating };
+    pendingVoiceStops.set(tabId, stop);
+    const notifyStop = (owner, type, error) => {
+        const pending = pendingVoiceStarts.get(tabId);
+        if (!stop.navigating && pendingVoiceStops.get(tabId) === stop && (!pending || pending === start)) {
+            notifyVoiceRequest(owner, type, { error });
+        }
+    };
+    const receivedOwner = start || (playbackOwner?.tabId === tabId ? playbackOwner : null);
+    notifyStop(receivedOwner, "PLAYBACK_STOPPING");
+
+    stop.operation = enqueueVoiceOperation(async () => {
+        const owner = await getPlaybackOwner();
+        const ownsOffscreen = owner?.tabId === tabId
+            && (!documentId || !owner.documentId || owner.documentId === documentId);
+        const target = receivedOwner || (ownsOffscreen ? owner : null);
+        try {
+            if (ownsOffscreen) {
+                await stopOffscreenAudioIfPresent();
+                await setPlaybackOwner(null);
+            }
+            notifyStop(target, "PLAYBACK_STOPPED");
+        } catch (err) {
+            const error = await recordVoiceStopFailure(ownsOffscreen ? owner : null, target, err);
+            notifyStop(target, "PLAYBACK_STOP_FAILED", error);
+            throw new Error(error);
+        } finally {
+            if (start && pendingVoiceStarts.get(tabId) === start) pendingVoiceStarts.delete(tabId);
+            if (pendingVoiceStops.get(tabId) === stop) pendingVoiceStops.delete(tabId);
+        }
+    });
+    return stop.operation;
 }
 
 /**

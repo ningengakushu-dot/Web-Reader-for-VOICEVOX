@@ -6,6 +6,9 @@ let isSynthesizing = false;
 let isPlaying = false;
 let currentAudio = null;
 let currentAudioUrl = null;
+let currentStreamingPlayer = null;
+let activeStreamingPreparation = null;
+let pendingNormalRequest = null;
 // 再生中の音声とは別に、完成済み音声をどれだけ先読みするか（件数と合計秒数の両方で制限）。
 // 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が読み上げ終了まで
 // 増え続ける。一方で「次の1件だけ」では、短い文（見出し・箇条書きの1行）の直後に長い文が
@@ -26,12 +29,28 @@ let playbackBufferTimer = null;
 let synthesisGeneration = 0;
 // 再生の世代トークン。stopAll() 直後に古い audio.play() の reject が届いても無視する。
 let playbackGeneration = 0;
+let playbackRequestId;
+let playbackLifetimePort;
+
+function watchPlaybackLifetime(documentId) {
+    if (!playbackRequestId || !documentId || playbackLifetimePort || !chrome.runtime.connect) return;
+    const port = chrome.runtime.connect({ name: "playback-lifetime:" + documentId });
+    playbackLifetimePort = port;
+    port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+        if (playbackLifetimePort !== port) return;
+        playbackLifetimePort = null;
+        // SW の休止後も、再生中の文書に新しい SW を監視役として接続する。
+        setTimeout(() => watchPlaybackLifetime(documentId), 250);
+    });
+}
 
 // メッセージリスナー
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.target !== 'offscreen') return;
+    if (message?.target !== 'offscreen') return;
     // 拡張自身（background）からのメッセージに限る（多層防御）
-    if (sender.id !== chrome.runtime.id) return;
+    if (sender.id !== chrome.runtime.id || sender.tab || sender.documentId
+        || sender.url !== undefined && sender.url !== chrome.runtime.getURL("background-entry.js")) return;
     const security = globalThis.VVRadioOffscreenSecurity;
     if (security) {
         const checked = security.validate(message);
@@ -43,14 +62,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     switch (message.type) {
-        case 'ENQUEUE_TEXTS':
-            enqueueTexts(message.texts, message.settings);
-            sendResponse({ success: true });
+        case 'ENQUEUE_TEXTS': {
+            const enqueue = () => {
+                playbackRequestId = message.requestId;
+                watchPlaybackLifetime(message.offscreenDocumentId);
+                enqueueTexts(message.texts, message.settings);
+                sendResponse({ success: true });
+            };
+            const streaming = globalThis.VVRadioStreaming;
+            const status = streaming?.cleanupStatus?.() || "ready";
+            if (status === "failed") {
+                sendResponse({ success: false,
+                    error: "音声再生の安全な終了を確認できません。拡張機能を再読み込みしてください。" });
+                break;
+            }
+            if (status === "pending") {
+                // STOP_AUDIOを待つ間にもう一度STOPされた要求を復活させない。
+                const generation = playbackGeneration;
+                streaming.waitForCleanup().then(() => {
+                    if (generation !== playbackGeneration) {
+                        sendResponse({ success: false, error: "読み上げ開始前に停止されました" });
+                        return;
+                    }
+                    enqueue();
+                }).catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
+                return true; // 非同期sendResponseのためChromeのメッセージポートを保持
+            }
+            enqueue();
             break;
+        }
         case 'STOP_AUDIO':
-            stopAll();
-            sendResponse({ success: true });
-            break;
+            stopAll().then(() => sendResponse({ success: true }))
+                .catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
+            return true; // AudioContextとreaderの終了が完了するまで成功を返さない
         case 'PREWARM_OCR':
             // 範囲選択中の先読み。横書きは実測で圧倒的に多いので jpn だけ用意する
             // （縦書きが必要になった場合はそのとき生成される）。
