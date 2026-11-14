@@ -63,7 +63,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
                     enqueueTexts(message.texts, message.settings);
                     sendResponse({ success: true });
-                }).catch(error => sendResponse({ success: false, error: error.message }));
+                }).catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
                 return true; // 非同期sendResponseのためChromeのメッセージポートを保持
             }
             enqueueTexts(message.texts, message.settings);
@@ -72,7 +72,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         case 'STOP_AUDIO':
             stopAll().then(() => sendResponse({ success: true }))
-                .catch(error => sendResponse({ success: false, error: error.message }));
+                .catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
             return true; // AudioContextとreaderの終了が完了するまで成功を返さない
         case 'PREWARM_OCR':
             // 範囲選択中の先読み。横書きは実測で圧倒的に多いので jpn だけ用意する

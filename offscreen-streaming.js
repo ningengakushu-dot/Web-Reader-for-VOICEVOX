@@ -142,7 +142,7 @@
             || (channels !== 1 && channels !== 2) || sampleRate < 8000 || sampleRate > 192000
             || block !== channels * 2 || view.getUint32(28, true) !== sampleRate * block
             || view.getUint32(4, true) !== fileBytes - 8
-            || dataBytes > MAX_AUDIO_BYTES - 44 || dataBytes % block !== 0
+            || dataBytes === 0 || dataBytes > MAX_AUDIO_BYTES - 44 || dataBytes % block !== 0
             || sampleRate !== Number(query.outputSamplingRate)
             || channels !== (query.outputStereo ? 2 : 1)
             || (contentLength != null && contentLength !== fileBytes)) {

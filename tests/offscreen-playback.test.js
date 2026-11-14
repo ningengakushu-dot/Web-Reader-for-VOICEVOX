@@ -8,11 +8,19 @@ let listener;
 let audioMode = 'error';
 let normalSynthesisCalls = 0;
 let failNextNormalSynthesis = false;
+let rejectNextQuery = null;
+let revokedUrls = 0;
 const notifications = [];
 
 class MockAudio {
     constructor(url) { this.url = url; this.error = { code: 3, message: 'decode failed' }; }
     play() {
+        if (audioMode === 'reject-null') return Promise.reject(null);
+        if (audioMode === 'reject-undefined') return Promise.reject(undefined);
+        if (audioMode === 'error-and-reject') {
+            this.onerror?.({ type: 'error' });
+            return Promise.reject(undefined);
+        }
         setImmediate(() => {
             if (audioMode === 'error') this.onerror?.({ type: 'error' });
             else this.onended?.();
@@ -34,11 +42,16 @@ const chrome = {
 const context = vm.createContext({
     console, chrome, Audio: MockAudio, AbortController, Uint8Array, DataView,
     setTimeout, clearTimeout, setImmediate, Promise,
-    URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
+    URL: { createObjectURL: () => 'blob:test', revokeObjectURL() { revokedUrls++; } },
     VOICEVOX_BASE_URL: 'http://127.0.0.1:50021', VOICEVOX_FETCH_TIMEOUT_MS: 100,
     VOICEVOX_SYNTHESIS_TIMEOUT_MS: 100, OCR_WORKER_IDLE_RELEASE_MS: 1000,
     OCR_RECOGNIZE_TIMEOUT_MS: 1000,
     fetchWithTimeout: async (url) => {
+        if (url.includes('/audio_query?') && rejectNextQuery) {
+            const { reason } = rejectNextQuery;
+            rejectNextQuery = null;
+            throw reason;
+        }
         if (url.includes('/synthesis?')) {
             normalSynthesisCalls++;
             if (failNextNormalSynthesis) {
@@ -61,13 +74,21 @@ const context = vm.createContext({
 vm.runInContext(source, context, { filename: 'offscreen.js' });
 assert.strictEqual(typeof listener, 'function');
 
-function enqueue(text, mode) {
-    return new Promise((resolve) => {
-        listener({ type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: [text], settings: {
-            speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 1, volumeScale: 1,
-            pauseLengthScale: 1, synthesisMode: mode
-        } }, { id: 'ext-id' }, resolve);
+function request(message) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message.type + ' did not respond')), 500);
+        listener({ ...message, target: 'offscreen' }, { id: 'ext-id' }, response => {
+            clearTimeout(timer);
+            resolve(response);
+        });
     });
+}
+
+function enqueue(text, mode) {
+    return request({ type: 'ENQUEUE_TEXTS', texts: [text], settings: {
+        speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 1, volumeScale: 1,
+        pauseLengthScale: 1, synthesisMode: mode
+    } });
 }
 const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
 
@@ -87,11 +108,47 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     assert.ok(notifications.some((m) => m.type === 'PLAYBACK_ENDED'),
         'normal completion must still emit PLAYBACK_ENDED');
 
+    for (const reason of [null, undefined]) {
+        notifications.length = 0;
+        rejectNextQuery = { reason };
+        const beforeSynthesis = normalSynthesisCalls;
+        assert.strictEqual((await enqueue('normal query rejected')).success, true);
+        await wait();
+        assert.deepStrictEqual(notifications.map(m => m.type), ['PLAYBACK_ERROR']);
+        assert.strictEqual(notifications[0].error, '合成失敗: ' + String(reason));
+        assert.strictEqual(normalSynthesisCalls, beforeSynthesis, 'failed query must not be retried');
+    }
+
+    for (const mode of ['reject-null', 'reject-undefined', 'error-and-reject']) {
+        notifications.length = 0;
+        audioMode = mode;
+        const beforeRevoke = revokedUrls;
+        assert.strictEqual((await enqueue('normal playback rejected')).success, true);
+        await wait();
+        assert.deepStrictEqual(notifications.map(m => m.type), ['PLAYBACK_STARTED', 'PLAYBACK_ERROR']);
+        assert.strictEqual(revokedUrls, beforeRevoke + 1);
+        assert.strictEqual(vm.runInContext('isPlaying || currentAudio !== null || currentAudioUrl !== null',
+            context), false, 'playback failure must clear the current audio');
+    }
+    audioMode = 'ended';
+
+    const realStreaming = context.VVRadioStreaming;
+    for (const reason of [null, undefined]) {
+        context.VVRadioStreaming = {
+            cleanupStatus: () => 'pending',
+            waitForCleanup: () => Promise.reject(reason)
+        };
+        for (const reply of [await enqueue('pending cleanup'), await request({ type: 'STOP_AUDIO' })]) {
+            assert.strictEqual(reply.success, false);
+            assert.strictEqual(reply.error, String(reason));
+        }
+    }
+    context.VVRadioStreaming = realStreaming;
+
     // 既存設定を持たないユーザーには新しい合成方式を適用しない。
     let checks = 0;
     let streamAttempts = 0;
     let streamStarted = false;
-    const realStreaming = context.VVRadioStreaming;
     context.VVRadioStreaming = {
         supports: async () => { checks++; return true; },
         suppress() {},
@@ -232,6 +289,26 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
         } };
         if (pathName !== '/streaming_synthesis') throw new Error('unexpected endpoint: ' + pathName);
         integratedStreamRequests++;
+        if (streamReaderMode === 'empty') {
+            const header = wavBytes.slice(0, 44);
+            const headerView = new DataView(header.buffer);
+            headerView.setUint32(4, 36, true);
+            headerView.setUint32(40, 0, true);
+            let sent = false;
+            return {
+                ok: true,
+                headers: { get: () => '44' },
+                body: { getReader: () => ({
+                    async read() {
+                        if (sent) return { done: true };
+                        sent = true;
+                        return { done: false, value: header };
+                    },
+                    async cancel() {},
+                    releaseLock() {}
+                }) }
+            };
+        }
         if (streamReaderMode === 'null-read') {
             let firstRead = true;
             return {
@@ -373,6 +450,21 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     holdNextRead = false;
     assert.strictEqual((await enqueue('immediate restart after PCM receive', 'normal')).success, true);
     await wait();
+
+    notifications.length = 0;
+    context.VVRadioStreaming.invalidate(1);
+    streamReaderMode = 'empty';
+    const beforeEmpty = normalSynthesisCalls;
+    const beforeEmptyStream = integratedStreamRequests;
+    integratedContext = null;
+    assert.strictEqual((await enqueue('empty stream fallback', 'auto')).success, true);
+    await wait();
+    assert.strictEqual(integratedStreamRequests, beforeEmptyStream + 1);
+    assert.strictEqual(normalSynthesisCalls, beforeEmpty + 1);
+    assert.strictEqual(integratedContext, null, 'empty PCM must be rejected before AudioContext creation');
+    assert.deepStrictEqual(notifications.map(m => m.type), ['PLAYBACK_STARTED', 'PLAYBACK_ENDED'],
+        'only the normal fallback may emit playback events');
+    streamReaderMode = null;
 
     // null読取拒否と同じnull cancel拒否は安全な終了理由として扱う。
     // 通常合成も失敗させ、拒否値を文字列化するエラー通知が一度だけ届くことを確認する。

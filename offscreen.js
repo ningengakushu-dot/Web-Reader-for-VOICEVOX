@@ -63,7 +63,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
                     enqueueTexts(message.texts, message.settings);
                     sendResponse({ success: true });
-                }).catch(error => sendResponse({ success: false, error: error.message }));
+                }).catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
                 return true; // 非同期sendResponseのためChromeのメッセージポートを保持
             }
             enqueueTexts(message.texts, message.settings);
@@ -72,7 +72,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         case 'STOP_AUDIO':
             stopAll().then(() => sendResponse({ success: true }))
-                .catch(error => sendResponse({ success: false, error: error.message }));
+                .catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
             return true; // AudioContextとreaderの終了が完了するまで成功を返さない
         case 'PREWARM_OCR':
             // 範囲選択中の先読み。横書きは実測で圧倒的に多いので jpn だけ用意する
@@ -356,7 +356,7 @@ function scheduleOcrWorkerIdleRelease() {
             || (channels !== 1 && channels !== 2) || sampleRate < 8000 || sampleRate > 192000
             || block !== channels * 2 || view.getUint32(28, true) !== sampleRate * block
             || view.getUint32(4, true) !== fileBytes - 8
-            || dataBytes > MAX_AUDIO_BYTES - 44 || dataBytes % block !== 0
+            || dataBytes === 0 || dataBytes > MAX_AUDIO_BYTES - 44 || dataBytes % block !== 0
             || sampleRate !== Number(query.outputSamplingRate)
             || channels !== (query.outputStereo ? 2 : 1)
             || (contentLength != null && contentLength !== fileBytes)) {
@@ -881,7 +881,8 @@ async function prepareSynthesisWindow(item, generation) {
                 pending.durationSec = estimateQueryDurationSec(query, pending.settings.speedScale);
             } catch (error) {
                 if (generation !== synthesisGeneration) return false;
-                pending.queryError = error;
+                // null/undefined の拒否も、先読み済みの失敗としてキューに残す。
+                pending.queryError = error || new Error(safeErrorMessage(error));
             }
         }
         // 失敗は元の合成キューの順番で処理し、分割再試行とエラー通知の契約を保つ。
@@ -1013,8 +1014,9 @@ async function processSynthesis() {
         }
         // 利用者へ見せる文言を持つエラー（HTTPステータス・応答形式）はそのまま伝える。
         // 内部由来の英語メッセージだけ「合成失敗:」を付けて区別できるようにする。
+        const message = safeErrorMessage(err);
         notifyBackground("PLAYBACK_ERROR",
-            { error: err?.userFacing ? err.message : `合成失敗: ${err.message}` });
+            { error: err?.userFacing ? message : `合成失敗: ${message}` });
     } finally {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
         // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。
@@ -1404,27 +1406,32 @@ async function processPlayback(continuePlayback = false) {
         processPlayback(completedNormally && audioQueue.length > 0);
     };
 
+    const reportPlaybackError = (message, error) => {
+        if (generation !== playbackGeneration || isCleanedUp) return;
+        try {
+            console.error("Offscreen: Audioエラー:", error);
+            notifyBackground("PLAYBACK_ERROR", { error: message });
+        } finally {
+            cleanup(false);
+        }
+    };
+
     audio.onended = () => cleanup(true);
     audio.onerror = (e) => {
         const errorInfo = audio.error
-            ? `Code: ${audio.error.code}, Message: ${audio.error.message}`
+            ? `Code: ${audio.error.code}, Message: ${safeErrorMessage(audio.error)}`
             : "Details unavailable";
-        console.error(`Offscreen: Audioエラー [${errorInfo}]`, e);
-        notifyBackground("PLAYBACK_ERROR", { error: errorInfo });
-        cleanup(false);
+        reportPlaybackError(errorInfo, e);
     };
 
     try {
         await audio.play();
     } catch (err) {
-        if (generation !== playbackGeneration) return;
-        console.error("Offscreen: play()失敗:", err.name, err.message);
-        notifyBackground("PLAYBACK_ERROR", { error: `${err.name}: ${err.message}` });
-        cleanup(false);
+        reportPlaybackError(safeErrorMessage(err), err);
     }
 }
 
-function stopAll() {
+async function stopAll() {
     // 何も動いていないときの停止（読み上げ開始前の STOP_AUDIO・二度目の停止）では
     // PLAYBACK_STOPPED を通知しない。開始直前に「停止」が届くと capture.html の
     // 表示が「停止しました」→「再生中」と往復し、タブのアイコンも一瞬点滅する。

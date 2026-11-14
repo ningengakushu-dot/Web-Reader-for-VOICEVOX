@@ -13,6 +13,11 @@
 - VOICEVOX 0.26.0公式実装のストリームは44-byte固定ヘッダー＋16bit PCMである。
 - 本PRの設計・CIテストだけでは、Chrome Offscreen Documentの実音とCPU・メモリ改善は証明できない。
 
+## 2026-11-14 独立レビュー対応
+
+- 通常合成の先読み、再生、停止と停止待ちの応答で、`null`／`undefined` の拒否をテスト。再生エラーの通知は1回で、再生状態とBlob URLを解放する。
+- PCMが0サンプルのWAVは再生前に拒否。AudioContextを生成せず、通常合成への1回の切替で開始・完了を通知する結合回帰テストを追加。
+
 ## 2026-11-13 回帰確認
 - Node回帰テスト40件、読み上げ負荷検査、`node_modules`を除くJavaScript構文検査218ファイル、静的セキュリティ監査、Offscreen生成バンドル同期を確認。
 - `tools/test-streaming-race-browser.mjs` を Chromium 157.0.8103.52 で実行。実Web Audioクロックが予約時刻をまたぐ同期`abort()`遅延を再現し、停止後のAnalyserNodeに非ゼロPCMがなく、通常合成へ戻れることを確認。HTTP応答は模擬で、拡張機能の実音再生を評価するテストではない。
