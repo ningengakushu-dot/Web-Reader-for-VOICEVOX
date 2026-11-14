@@ -148,7 +148,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
         await stop();
         await new Promise((r) => setTimeout(r, 120));
         assert.equal(playing.length, 1, '停止後に先読み分の再生が始まらない');
-        assert.ok(notifications.some((m) => m.type === 'PLAYBACK_STOPPED'));
+        assert.ok(!notifications.some((m) => m.type === 'PLAYBACK_STOPPED'), 'STOP_AUDIO reports through its response');
         assert.ok(!notifications.some((m) => m.type === 'PLAYBACK_ENDED'));
         synthDelayMs = 0;
         playing.length = 0;

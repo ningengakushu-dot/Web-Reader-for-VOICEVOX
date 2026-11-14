@@ -37,12 +37,7 @@ content.parts.reading = {
 
             try {
                 if (!chrome.runtime?.id) return;
-                chrome.runtime.sendMessage({ type: "SHORTCUT_PRESSED" }, () => {
-                    if (chrome.runtime.lastError) {
-                        console.warn("Web Reader for VOICEVOX: ショートカット通知に失敗:",
-                            chrome.runtime.lastError.message);
-                    }
-                });
+                chrome.runtime.sendMessage({ type: "SHORTCUT_PRESSED" }, () => { void chrome.runtime.lastError; });
             } catch (error) {
                 // 更新・再読み込み直後の古いcontent scriptでは何もしない。
             }
@@ -61,18 +56,14 @@ content.parts.reading = {
 
     requestToggleReading() {
         if (!this.active) return;
-        if (this.isPlaying || this.isPreparingPlayback) {
-            this.stopAll();
-            return;
-        }
+        const revision = this.playbackRevision;
         try {
             if (!chrome.runtime?.id) return;
             // 親ページから子フレームの選択を直接読むと同一オリジン制約に阻まれる。
             // background 経由で配信し、選択を持つフレーム自身に取得させる。
             chrome.runtime.sendMessage({ type: "TOGGLE_READING_REQUEST" }, (response) => {
-                if (!this.active) return;
                 const error = chrome.runtime.lastError?.message || response?.error;
-                if (error) {
+                if (error && this.active && this.playbackRevision === revision) {
                     this.updateUIState('error');
                     this.showPlaybackErrorToast(error);
                 }
@@ -83,10 +74,6 @@ content.parts.reading = {
     },
 
     toggleReading() {
-        if (this.isPlaying || this.isPreparingPlayback) {
-            this.stopAll();
-            return;
-        }
 
         const text = this.getSelectedText();
         if (text) {
@@ -172,43 +159,70 @@ content.parts.reading = {
                     this.showPlaybackErrorToast(request.error);
                     break;
                 case "PLAYBACK_PREPARING":
-                    this.isPreparingPlayback = true;
-                    this.updateUIState('preparing');
-                    break;
                 case "PLAYBACK_STARTED":
-                    this.isPreparingPlayback = false;
-                    this.isPlaying = true;
-                    this.updateUIState('reading');
-                    break;
+                case "PLAYBACK_STOPPING":
                 case "PLAYBACK_ENDED":
                 case "PLAYBACK_STOPPED":
-                    this.isPreparingPlayback = false;
-                    this.isPlaying = false;
-                    this.updateUIState('idle');
-                    break;
+                case "PLAYBACK_START_FAILED":
+                case "PLAYBACK_STOP_FAILED":
                 case "PLAYBACK_ERROR":
-                    console.error("Web Reader for VOICEVOX: 再生エラー:", request.error);
-                    this.isPlaying = false;
-                    this.isPreparingPlayback = false;
-                    this.updateUIState('error');
-                    this.showPlaybackErrorToast(request.error);
+                    if (this.isTopFrame) this.applyPlaybackEvent(request);
                     break;
             }
         };
         chrome.runtime.onMessage.addListener(this.messageListener);
     },
 
+    applyPlaybackEvent(request) {
+        if (request.type === "PLAYBACK_PREPARING") {
+            this.playbackRequestId = request.requestId;
+        } else if (this.playbackRequestId != null && request.requestId !== this.playbackRequestId) {
+            return;
+        }
+        this.playbackRevision++;
+        this.isPreparingPlayback = request.type === "PLAYBACK_PREPARING";
+        this.isPlaying = request.type === "PLAYBACK_STARTED";
+        switch (request.type) {
+            case "PLAYBACK_PREPARING":
+                this.removeOcrToast();
+                this.updateUIState('preparing');
+                break;
+            case "PLAYBACK_STARTED":
+                this.updateUIState('reading');
+                break;
+            case "PLAYBACK_STOPPING":
+                this.removeOcrToast();
+                this.updateUIState('stopping');
+                break;
+            case "PLAYBACK_ENDED":
+            case "PLAYBACK_STOPPED":
+                this.updateUIState('idle');
+                break;
+            case "PLAYBACK_STOP_FAILED":
+                this.updateUIState('error');
+                this.showOcrToast(`停止できませんでした: ${request.error} アイコンで再試行できます。`);
+                this.scheduleOcrToastDismiss(6000);
+                break;
+            case "PLAYBACK_START_FAILED":
+            case "PLAYBACK_ERROR":
+                this.updateUIState('error');
+                this.showPlaybackErrorToast(request.error);
+                break;
+        }
+    },
+
     // バックグラウンド経由でVOICEVOXエンジンの接続確認。
     // VOICEVOX未起動は利用前には起こり得る通常状態なので、拡張機能の警告ログには残さず
     // インジケーターだけで接続できていないことを知らせる。
     checkVoicevoxConnection() {
+        const revision = this.playbackRevision;
         try {
             chrome.runtime.sendMessage({ type: "CHECK_CONNECTION" }, (res) => {
                 if (!this.active) return;
                 // 拡張機能の更新・再読み込み直後に古いcontent scriptから返るlastErrorも
                 // 初期接続確認では想定内。コールバック内で参照して未処理エラー化を防ぐ。
                 if (chrome.runtime.lastError) return;
-                if (!res || !res.success) this.updateUIState('error');
+                if ((!res || !res.success) && this.playbackRevision === revision) this.updateUIState('error');
             });
         } catch (error) {
             // 拡張機能の更新・再読み込み直後は接続確認を打ち切る。
@@ -222,14 +236,16 @@ content.parts.reading = {
         const cleanText = this.cleanMessage(text);
         if (!cleanText) return;
 
+        const revision = this.playbackRevision;
         try {
             chrome.runtime.sendMessage({
                 type: "GENERATE_VOICE",
                 text: cleanText
             }, (response) => {
-                if (!this.active) return;
-                if (chrome.runtime.lastError || !response || !response.success) {
-                    const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
+                const lastError = chrome.runtime.lastError;
+                if (!this.active || this.playbackRevision !== revision || response?.reported) return;
+                if (lastError || !response?.success) {
+                    const reason = lastError?.message || response?.error || "応答なし";
                     console.error("Web Reader for VOICEVOX: 依頼失敗:", reason);
                     this.updateUIState('error');
                     // 「テキストが長すぎる」「Offscreenを用意できない」等の理由を利用者にも見せる
@@ -247,18 +263,6 @@ content.parts.reading = {
         } catch (error) {
             // 拡張機能の更新・再読み込み直後は何もしない。
         }
-    },
-
-    // 再生の完全停止とキューのクリア要求
-    stopAll() {
-        try {
-            chrome.runtime.sendMessage({ type: "STOP_ALL" }, () => { void chrome.runtime.lastError; });
-        } catch (error) {
-            // 拡張機能の更新・再読み込み直後は何もしない。
-        }
-        this.isPlaying = false;
-        this.isPreparingPlayback = false;
-        this.updateUIState('idle');
     },
 
     // メッセージの整形（不要な情報の削除・置換）

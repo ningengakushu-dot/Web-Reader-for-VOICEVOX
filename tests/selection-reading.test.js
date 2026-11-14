@@ -15,15 +15,25 @@ function createHarness({ voiceError } = {}) {
     const pending = [];
     let backgroundListener;
     let stops = 0;
+    let playback;
     const storage = {
         local: { get(_keys, cb) { cb?.({}); }, set(_value, cb) { cb?.(); }, remove(_key, cb) { cb?.(); } },
-        session: { async get() { return {}; }, async set() {}, async remove() {} },
+        session: {
+            async get(key) { return { [key]: playback }; },
+            async set(value) { playback = Object.values(value)[0]; },
+            async remove() { playback = undefined; }
+        },
         onChanged: { addListener() {}, removeListener() {} }
     };
     const chrome = {
         runtime: {
             id: 'test-extension', getURL: (p) => `chrome-extension://test-extension/${p}`,
             getManifest: () => manifest,
+            getContexts: async () => [{ contextType: 'OFFSCREEN_DOCUMENT' }],
+            async sendMessage(message) {
+                if (message.type === 'STOP_AUDIO') stops++;
+                return { success: true };
+            },
             onInstalled: { addListener() {} },
             onMessage: { addListener(fn) { backgroundListener = fn; } }
         },
@@ -85,7 +95,6 @@ function createHarness({ voiceError } = {}) {
                         callback?.(voiceError ? { success: false, error: voiceError } : { success: true });
                         return;
                     }
-                    if (message.type === 'STOP_ALL') { stops++; callback?.({ success: true }); return; }
                     if (message.type === 'CHECK_CONNECTION' || message.type === 'CLAIM_UPDATE_NOTICE') {
                         callback?.({ success: true, shouldShow: false }); return;
                     }
@@ -117,7 +126,7 @@ function createHarness({ voiceError } = {}) {
         frame.reader.indicator.listeners.get('click')({ preventDefault() {} });
         await settle();
     };
-    return { addFrame, voices, injections, deliveries, click, settle, backgroundListener, get stops() { return stops; } };
+    return { addFrame, setPlaying: () => vm.runInContext('setPlaybackOwner({ tabId: 7 })', background), voices, injections, deliveries, click, settle, backgroundListener, get stops() { return stops; } };
 }
 
 (async () => {
@@ -136,7 +145,7 @@ function createHarness({ voiceError } = {}) {
     }, '更新前から開いた子フレームにもmanifestと同じ一式を事前注入する');
 
     // 再生中のアイコンはフォーカス先や選択範囲によらず停止として働く。
-    top.reader.isPlaying = true;
+    await h.setPlaying();
     await h.click(top);
     assert.equal(h.stops, 1);
     assert.equal(h.voices.length, 1);
@@ -146,7 +155,8 @@ function createHarness({ voiceError } = {}) {
         const outer = preparing.addFrame(0, { child: true });
         const focused = preparing.addFrame(1, { selected: '準備中の本文' });
         await preparing.click(outer);
-        for (const frame of [outer, focused]) frame.listener({ type: 'PLAYBACK_PREPARING' });
+        await preparing.setPlaying();
+        outer.listener({ type: 'PLAYBACK_PREPARING' });
         assert.equal(outer.reader.isPlaying, false, 'preparing does not imply audible playback');
         if (stopWithShortcut) {
             focused.documentListeners.get('keydown')({

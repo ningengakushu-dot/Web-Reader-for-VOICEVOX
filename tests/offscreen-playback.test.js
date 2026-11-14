@@ -544,7 +544,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 30));
     assert.strictEqual((await waitingEnqueue).success, true);
     await wait();
     assert.strictEqual(normalSynthesisCalls, beforeStopSynth + 1);
-    assert.ok(notifications.some(m => m.type === 'PLAYBACK_STOPPED'));
+    assert.ok(!notifications.some(m => m.type === 'PLAYBACK_STOPPED'), 'STOP_AUDIO reports through its response');
 
     // close()失敗後はSTOP_AUDIO失敗を返し、通常合成まで禁止する。
     closeBarrier = null;

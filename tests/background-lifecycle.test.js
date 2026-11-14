@@ -79,7 +79,7 @@ const chrome = {
     offscreen: { createDocument: () => { createDocumentCalls++; offscreenExists = true; return Promise.resolve(); } }
 };
 const context = vm.createContext({
-    console, chrome, importScripts() {}, setTimeout, clearTimeout, Promise, Date,
+    console, chrome, crypto: require('node:crypto'), importScripts() {}, setTimeout, clearTimeout, Promise, Date,
     VOICEVOX_BASE_URL: 'http://127.0.0.1:50021', VOICEVOX_FETCH_TIMEOUT_MS: 15000,
     SETTING_DEFAULTS: { speakerId: 1, speedScale: 1, pitchScale: 0, intonationScale: 1, volumeScale: 1, pauseLengthScale: 1 },
     CAPTURE_STORAGE_KEY: 'capture', CAPTURE_MAX_DATAURL_LENGTH: 8 * 1024 * 1024,
@@ -135,13 +135,13 @@ const send = (message, sender) => new Promise((resolve) => {
         await settle();
         offscreenMessages.length = 0;
         const bStarted = send({ type: 'GENERATE_VOICE', text: 'B。' }, { tab: { id: 22 } });
-        const aNavigated = onUpdated(21, { status: 'loading' });
+        const aNavigated = onUpdated(21, { status: 'loading', url: 'https://example.com/new' });
         await Promise.all([bStarted, aNavigated]);
         await settle();
         const types = offscreenMessages.map((m) => m.type);
         assert.equal(types[types.length - 1], 'ENQUEUE_TEXTS',
             `Bの読み上げ開始後に停止が割り込まない: ${types.join(' -> ')}`);
-        assert.equal(sessionData.playback, 22, '再生宛先はタブBのまま');
+        assert.equal(sessionData.playback.tabId, 22, '再生宛先はタブBのまま');
         offscreenMessages.length = 0;
     }
 

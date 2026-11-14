@@ -28,6 +28,7 @@ let playbackBufferTimer = null;
 let synthesisGeneration = 0;
 // 再生の世代トークン。stopAll() 直後に古い audio.play() の reject が届いても無視する。
 let playbackGeneration = 0;
+let playbackRequestId;
 
 // メッセージリスナー
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -46,6 +47,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     switch (message.type) {
         case 'ENQUEUE_TEXTS': {
+            const enqueue = () => {
+                playbackRequestId = message.requestId;
+                enqueueTexts(message.texts, message.settings);
+                sendResponse({ success: true });
+            };
             const streaming = globalThis.VVRadioStreaming;
             const status = streaming?.cleanupStatus?.() || "ready";
             if (status === "failed") {
@@ -61,13 +67,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         sendResponse({ success: false, error: "読み上げ開始前に停止されました" });
                         return;
                     }
-                    enqueueTexts(message.texts, message.settings);
-                    sendResponse({ success: true });
+                    enqueue();
                 }).catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
                 return true; // 非同期sendResponseのためChromeのメッセージポートを保持
             }
-            enqueueTexts(message.texts, message.settings);
-            sendResponse({ success: true });
+            enqueue();
             break;
         }
         case 'STOP_AUDIO':

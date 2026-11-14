@@ -26,6 +26,8 @@ class VVRadioReader {
         this.active = true;
         this.isPlaying = false;
         this.isPreparingPlayback = false;
+        this.playbackRequestId = undefined;
+        this.playbackRevision = 0;
         this.indicator = null;
         // OCRの進捗途絶を検知する見張りタイマー（armOcrStallWatchdog で設定）
         this.ocrStallWatchdog = null;
@@ -36,6 +38,7 @@ class VVRadioReader {
         this.keyboardShortcutListener = null;
         this.messageListener = null;
         this.pageShowListener = null;
+        this.pageHideListener = null;
         // OCR範囲選択オーバーレイへフォーカスを移す前にフォーカスを持っていた要素
         this.ocrPrevFocus = null;
         // 非同期のDOM抽出結果が、後から開始した範囲選択を上書きしないための世代番号。
@@ -68,10 +71,21 @@ class VVRadioReader {
     // isPlaying がそのまま蘇り、最初のクリックが停止扱いで空振りするため、
     // 復帰時に待機状態へ戻す（実際の再生は遷移時に必ず止まっている）。
     setupPageShowReset() {
+        if (this.isTopFrame) {
+            this.pageHideListener = () => {
+                if (!this.active) return;
+                try {
+                    chrome.runtime.sendMessage({ type: "PLAYBACK_PAGE_HIDDEN" }, () => { void chrome.runtime.lastError; });
+                } catch (error) { /* 拡張機能の更新直後 */ }
+            };
+            window.addEventListener("pagehide", this.pageHideListener);
+        }
         this.pageShowListener = (event) => {
             if (!this.active || !event.persisted) return;
             this.isPlaying = false;
             this.isPreparingPlayback = false;
+            this.playbackRequestId = undefined;
+            this.playbackRevision++;
             this.updateUIState('idle');
             this.removeOcrToast();
         };
@@ -115,6 +129,10 @@ class VVRadioReader {
         if (this.pageShowListener) {
             window.removeEventListener("pageshow", this.pageShowListener);
             this.pageShowListener = null;
+        }
+        if (this.pageHideListener) {
+            window.removeEventListener("pagehide", this.pageHideListener);
+            this.pageHideListener = null;
         }
         this.clearOcrToastDismiss();
         if (this.indicatorDragCleanup) {

@@ -15,6 +15,10 @@
 
 ## 2026-11-14 独立レビュー対応
 
+- `493bb1b` で、部分 WAV の受信中に追加した iframe で選択して Alt+Shift+U を押すと、`STOP_ALL` が0回、合成がもう1回発行されることを再現した。OCR 結果画面では停止応答を保留した時点で「停止しました。」と表示した。
+- 修正後は Chromium で、追加・遷移した iframe から停止経路が1回だけ実行され、追加合成が0回で元の通信が閉じた。OCR 結果画面とページ内アイコンは停止中の表示から失敗理由へ切り替わり、再試行で通信が閉じた。タブ切替とメイン文書の再読み込み、Offscreen 初期化待ち、通常合成・複数文・途中で切れた WAV からの通常合成への切替も確認した。HTTP は模擬 ENGINE を使用。
+- 実 ENGINE 0.25.2 と Chromium では、既定の通常合成、自動設定の非対応 ENGINE フォールバック、複数文の通常合成が再生完了まで進んだ。四国めたん ノーマルを使い、順に `/synthesis` が1・1・2回、すべて HTTP 200。ENGINE 0.26.0 のストリーミングと実音の聴感・録音測定は未計測。
+
 - 通常合成の先読み、再生、停止と停止待ちの応答で、`null`／`undefined` の拒否をテスト。再生エラーの通知は1回で、再生状態とBlob URLを解放する。
 - PCMが0サンプルのWAVは再生前に拒否。AudioContextを生成せず、通常合成への1回の切替で開始・完了を通知する結合回帰テストを追加。
 - 音声要求をOffscreenに渡す前に、要求元タブの全フレームへ準備中を通知する。模擬ENGINEが部分WAVを送って待機する間に、Chromiumの実拡張でアイコンとAlt+Shift+Uから停止し、通信が閉じて合成が再発行されないことを確認した。
@@ -54,7 +58,7 @@ $env:OCR_CHROMIUM = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 node tools/test-streaming-race-browser.mjs
 ```
 
-Offscreen 初期化待ちと WAV 受信待ちの停止は、拡張機能を読み込める Playwright 版 Chromium で `node tools/test-streaming-stop-browser.mjs` を実行して確認できる。初期化待ちでは停止後に合成を開始しないこと、受信待ちではページ内アイコン・ショートカット・画面 OCR の停止ボタンで通信が終了することを検証する。別の対応 Chromium を使う場合は `OCR_CHROMIUM` に実行ファイルを指定する。
+Offscreen 初期化待ちと WAV 受信待ちの停止は、拡張機能を読み込める Playwright 版 Chromium で `node tools/test-streaming-stop-browser.mjs` を実行して確認できる。初期化待ちの停止、iframe の追加と遷移、停止失敗と再試行、タブ切替・再読み込み、通常合成へのフォールバックを模擬 ENGINE で検証する。別の対応 Chromium を使う場合は `OCR_CHROMIUM` に実行ファイルを指定する。
 
 ## 現時点の測定欄
 | 指標 | 通常合成 | ストリーミング | 判定 |

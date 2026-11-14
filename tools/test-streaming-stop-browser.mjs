@@ -22,6 +22,7 @@ const engine = {
 let started = 0;
 let closed = 0;
 let normal = 0;
+let streamResponse = 'partial';
 const server = http.createServer((request, response) => {
     const { pathname } = new URL(request.url, 'http://127.0.0.1');
     request.resume();
@@ -34,10 +35,17 @@ const server = http.createServer((request, response) => {
     } else if (pathname === '/streaming_synthesis') {
         started++;
         response.on('close', () => closed++);
+        if (streamResponse === 'truncated') {
+            response.writeHead(200, { 'Content-Type': 'audio/wav' });
+            response.end(wav.subarray(0, 4096));
+            return;
+        }
         response.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length });
         response.write(wav.subarray(0, 4096));
+    } else if (pathname === '/synthesis') {
+        normal++;
+        response.writeHead(200, { 'Content-Type': 'audio/wav' }).end(wav);
     } else {
-        if (pathname === '/synthesis') normal++;
         response.writeHead(404).end();
     }
 });
@@ -65,7 +73,22 @@ try {
     await worker.evaluate(async () => {
         await chrome.storage.local.set({ synthesisMode: 'auto', speakerId: 1 });
         globalThis.stopProbe = [];
-        chrome.runtime.onMessage.addListener(message => { stopProbe.push(message.type); });
+        chrome.runtime.onMessage.addListener(message => {
+            if (message.type !== 'STOP_ALL' || typeof stopAllForTab !== 'function') stopProbe.push(message.type);
+        });
+        // トグルによる停止は SW 内で直接 STOP_ALL と同じ入口を通る。
+        if (typeof stopAllForTab === 'function') {
+            const stop = stopAllForTab;
+            stopAllForTab = tabId => {
+                stopProbe.push('STOP_ALL');
+                return stop(tabId);
+            };
+            const send = notifyTab;
+            notifyTab = (tabId, message, context) => {
+                if (message.type === 'PLAYBACK_STOPPED') stopProbe.push(message.type);
+                return send(tabId, message, context);
+            };
+        }
     });
     const page = await context.newPage();
     await page.goto(`http://127.0.0.1:${port}/probe-page`);
@@ -78,7 +101,7 @@ try {
             func: () => {
                 const button = window.__vvRadioReaderInstance.indicator;
                 const rect = button.getBoundingClientRect();
-                return { preparing: button.classList.contains('preparing'),
+                return { preparing: button.classList.contains('preparing'), stopping: button.classList.contains('stopping'),
                     reading: button.classList.contains('reading'),
                     x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
             }
@@ -90,6 +113,7 @@ try {
         await page.mouse.click(x, y);
     };
     const select = () => page.locator('#sample').evaluate(element => {
+        window.focus();
         const range = document.createRange();
         range.selectNodeContents(element);
         getSelection().removeAllRanges();
@@ -158,7 +182,171 @@ try {
     assert.equal(sent.filter(type => type === 'STOP_ALL').length, 3);
     assert.equal(sent.includes('PLAYBACK_STARTED'), false);
     assert.equal(normal, 0);
-    console.log('Chromium extension: stopped before Offscreen setup and during WAV reception from both pages');
+
+    const lateFrameShortcut = async () => {
+        await worker.evaluate(() => { stopProbe.length = 0; });
+        const startCount = started;
+        const closeCount = closed;
+        const normalCount = normal;
+        await select();
+        await clickIndicator();
+        await waitFor(() => started === startCount + 1, 'original stream should be open');
+        await page.evaluate(() => {
+            const frame = document.createElement('iframe');
+            frame.id = 'late-frame';
+            frame.src = '/probe-page';
+            document.body.append(frame);
+        });
+        const sample = page.frameLocator('#late-frame').locator('#sample');
+        await sample.waitFor();
+        await page.locator('#late-frame').evaluate(frame => { frame.src = '/probe-page?after-navigation'; });
+        await waitFor(() => page.frames().some(frame => frame.url().endsWith('?after-navigation')),
+            'the new child document should commit');
+        assert.equal(closed, closeCount, 'child navigation must preserve the tab playback');
+        await sample.evaluate(element => {
+            window.focus();
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            getSelection().removeAllRanges();
+            getSelection().addRange(range);
+        });
+        assert.equal(await page.frameLocator('#late-frame').locator('#sample').evaluate(() => document.hasFocus()), true);
+        await page.keyboard.press('Alt+Shift+u');
+        await waitFor(() => closed === closeCount + 1, 'shortcut must close the original stream');
+        const counts = {
+            stop: (await events()).filter(type => type === 'STOP_ALL').length,
+            generate: (await events()).filter(type => type === 'GENERATE_VOICE').length,
+            stream: started - startCount
+        };
+        assert.equal(counts.stop, 1, JSON.stringify(counts));
+        await waitFor(async () => !(await indicator()).preparing, 'shortcut must finish stopping');
+        assert.equal((await events()).filter(type => type === 'GENERATE_VOICE').length, 1);
+        assert.equal(started, startCount + 1, 'no replacement streaming request');
+        assert.equal(normal, normalCount, 'no replacement normal request');
+        await page.locator('#late-frame').evaluate(frame => {
+            frame.remove();
+            window.focus();
+        });
+    };
+
+    const delayStop = () =>
+        worker.evaluate(() => {
+            const send = sendToOffscreen;
+            sendToOffscreen = message => {
+                if (message.type !== 'STOP_AUDIO') return send(message);
+                sendToOffscreen = send;
+                return new Promise((resolve, reject) => {
+                    globalThis.rejectStop = () => reject(new Error('停止応答のテストエラー'));
+                });
+            };
+        });
+
+    const rejectedCaptureStop = async () => {
+        const startCount = started;
+        const closeCount = closed;
+        await capture.bringToFront();
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === startCount + 1, 'capture stream should be open');
+        await delayStop();
+        await stopButton.click();
+        await waitFor(() => worker.evaluate(() => typeof globalThis.rejectStop === 'function'),
+            'stop should reach the delayed Offscreen boundary');
+        const whileStopping = await status.textContent();
+        assert.equal(await stopButton.isDisabled(), true);
+        assert.equal(closed, closeCount);
+        await worker.evaluate(() => { rejectStop(); delete globalThis.rejectStop; });
+        assert.match(whileStopping, /停止中/);
+        await waitFor(async () => /停止応答のテストエラー/.test(await status.textContent()),
+            'capture must present the stop failure reason');
+        assert.equal(closed, closeCount);
+        assert.equal(await stopButton.isEnabled(), true);
+        await stopButton.click();
+        await waitFor(() => closed === closeCount + 1, 'retry must close the original stream');
+        await waitFor(async () => (await status.textContent()) === '停止しました。', 'retry must confirm stop');
+    };
+
+    const rejectedIconStop = async () => {
+        await page.bringToFront();
+        const startCount = started;
+        const closeCount = closed;
+        await select();
+        await clickIndicator();
+        await waitFor(() => started === startCount + 1, 'page stream should be open');
+        await delayStop();
+        await clickIndicator();
+        await waitFor(() => worker.evaluate(() => typeof globalThis.rejectStop === 'function'), 'stop is pending');
+        assert.equal((await indicator()).stopping, true);
+        await worker.evaluate(() => { rejectStop(); delete globalThis.rejectStop; });
+        await waitFor(async () => (await indicator()).stopping === false, 'icon must reflect the rejection');
+        const toast = await worker.evaluate(async tabId => {
+            const [frame] = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => window.__vvRadioReaderInstance.ocrToast?.textContent
+            });
+            return frame.result;
+        }, tabId);
+        assert.match(toast, /停止応答のテストエラー/);
+        assert.equal(closed, closeCount);
+        await clickIndicator();
+        await waitFor(() => closed === closeCount + 1, 'icon retry must close the original stream');
+        assert.equal(started, startCount + 1);
+    };
+
+    const switchTabs = async () => {
+        await page.bringToFront();
+        const startCount = started;
+        const closeCount = closed;
+        await select();
+        await clickIndicator();
+        await waitFor(() => started === startCount + 1, 'first tab stream should open');
+        await capture.bringToFront();
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === startCount + 2 && closed === closeCount + 1, 'switch must stop only the old stream');
+        await page.reload();
+        assert.match(await status.textContent(), /準備中/);
+        assert.equal(closed, closeCount + 1);
+        await stopButton.click();
+        await waitFor(() => closed === closeCount + 2, 'second tab must still be able to stop');
+        await waitFor(async () => (await status.textContent()) === '停止しました。', 'second tab has stopped');
+
+        await page.bringToFront();
+        await select();
+        await clickIndicator();
+        await waitFor(() => started === startCount + 3, 'first tab can start again');
+        await page.reload();
+        await waitFor(() => closed === closeCount + 3, 'reloading the owner document must stop playback');
+    };
+
+    const synthesisPaths = async () => {
+        await capture.bringToFront();
+        streamResponse = 'truncated';
+        for (const [mode, text, streams, syntheses] of [
+            ['normal', '通常合成。', 0, 1],
+            ['auto', '最初の文です。次の文です。', 0, 2],
+            ['auto', '切断後に再試行します。', 1, 1]
+        ]) {
+            const startCount = started;
+            const normalCount = normal;
+            await worker.evaluate(mode => chrome.storage.local.set({ synthesisMode: mode }), mode);
+            await capture.locator('#result-text').fill(text);
+            await capture.locator('#speak-btn').click();
+            await waitFor(() => normal === normalCount + syntheses, 'normal synthesis requests should arrive');
+            await waitFor(async () => (await status.textContent()) === '再生が完了しました。', 'playback should finish');
+            assert.equal(started - startCount, streams);
+            assert.equal(normal - normalCount, syntheses);
+        }
+    };
+
+    const regressions = { 'late-frame': lateFrameShortcut, 'capture-rejection': rejectedCaptureStop,
+        'icon-rejection': rejectedIconStop, 'tab-switch': switchTabs, synthesis: synthesisPaths };
+    const selected = process.argv.length > 2 ? process.argv.slice(2) : Object.keys(regressions);
+    for (const name of selected) {
+        await regressions[name]();
+    }
+    const product = await worker.evaluate(async () =>
+        (await navigator.userAgentData.getHighEntropyValues(['fullVersionList'])).fullVersionList
+            .find(brand => brand.brand === 'Chromium')?.version);
+    console.log(`Chromium ${product}: Offscreen setup, partial WAV stop, ${selected.join(', ')}`);
 } finally {
     await context?.close();
     server.closeAllConnections();

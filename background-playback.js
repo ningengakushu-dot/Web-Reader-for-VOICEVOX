@@ -1,92 +1,43 @@
-// 再生状態通知（PLAYBACK_*）の宛先タブ。GENERATE_VOICE を要求したタブの id を記録し、
-// offscreen から届く再生状態を「全アクティブタブ」ではなく要求元タブにのみ転送する。
-// これにより、別ウィンドウ/別タブのアイコンUIが他タブの再生状態で誤更新される問題を防ぐ。
-// Service Worker はメモリ上のこの変数を休止で失うため、storage.session にも退避する。
-// 句点の無い長文（画像OCRの結果等）は1つの長い音声になり、その再生中は SW への
-// 通信が無く約30秒で SW が休止し得る。休止から復帰した SW でも宛先を復元できないと
-// 再生終了通知（PLAYBACK_ENDED）を取りこぼし、インジケーターが点灯したまま固着する。
-let playbackTabId = null;
+// Offscreen に渡した読み上げの宛先と要求ID。SW休止後に届く通知も同じ要求へ戻す。
+let playbackOwner;
+let playbackOwnerLoading;
 
-// 宛先タブIDを更新し、storage.session にも反映する（null はクリア）。
-async function setPlaybackTabId(tabId) {
-    playbackTabId = tabId;
+function getPlaybackOwner() {
+    if (playbackOwner !== undefined) return Promise.resolve(playbackOwner);
+    playbackOwnerLoading ??= chrome.storage.session.get(PLAYBACK_TAB_STORAGE_KEY)
+        .then(stored => {
+            const saved = stored[PLAYBACK_TAB_STORAGE_KEY];
+            // 以前のバージョンから残ったタブIDにも終了通知を返せるようにする。
+            playbackOwner = Number.isInteger(saved) ? { tabId: saved } : saved ?? null;
+            return playbackOwner;
+        }, () => playbackOwner = null);
+    return playbackOwnerLoading;
+}
+
+async function setPlaybackOwner(owner) {
+    playbackOwner = owner;
     try {
-        if (tabId == null) {
-            await chrome.storage.session.remove(PLAYBACK_TAB_STORAGE_KEY);
+        if (owner) {
+            await chrome.storage.session.set({ [PLAYBACK_TAB_STORAGE_KEY]: owner });
         } else {
-            await chrome.storage.session.set({ [PLAYBACK_TAB_STORAGE_KEY]: tabId });
+            await chrome.storage.session.remove(PLAYBACK_TAB_STORAGE_KEY);
         }
     } catch (error) {
-        // メモリ上の宛先は維持し、同じService Workerの生存中は通知を継続する。
         console.warn("Background: 再生タブ状態の保存に失敗:", error.message);
     }
 }
 
-// 宛先タブIDを取得する。メモリ上の値が失われている（SW休止からの復帰直後）場合は
-// storage.session から読み直してメモリへ復元する。
-async function getPlaybackTabId() {
-    if (playbackTabId != null) return playbackTabId;
-    try {
-        const stored = await chrome.storage.session.get(PLAYBACK_TAB_STORAGE_KEY);
-        const tabId = stored[PLAYBACK_TAB_STORAGE_KEY];
-        if (tabId != null) playbackTabId = tabId;
-    } catch (e) {
-        // session 参照に失敗しても従来どおりメモリ値で続行する
-    }
-    return playbackTabId;
-}
-
-/**
- * 再生状態通知の宛先を指定タブへ移す。
- * 前の宛先タブには停止を通知し、そのタブのアイコンが「再生中」のまま
- * 取り残されるのを防ぐ（GENERATE_VOICE と OCR_COMPLETE の共通処理）。
- * @param {number|null} tabId
- */
-async function switchPlaybackTabTo(tabId) {
-    if (tabId == null) return;
-    const prev = await getPlaybackTabId();
-    if (prev != null && prev !== tabId) {
-        notifyPlaybackTab(prev, { type: "PLAYBACK_STOPPED" }, "旧再生タブへの停止通知失敗");
-    }
-    await setPlaybackTabId(tabId);
-}
-
-// offscreen ドキュメントが存在するときだけ再生停止を送る。
-// 存在しなければ再生中でもないので、停止のためだけに生成しない（生成すると
-// 以後ブラウザ終了まで常駐し、SW休止によるメモリ削減効果を打ち消す）。
-// GENERATE_VOICE の「STOP_AUDIO → ENQUEUE_TEXTS」の間に割り込むと積んだ直後の
-// キューが消えて無音になるため、必ず同じ直列キューを通す。
+// 停止のために Offscreen を新規作成しない。存在確認の失敗は停止結果に反映する。
 async function stopOffscreenAudioIfPresent() {
-    let contexts = [];
-    try {
-        contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-    } catch (e) {
-        // 存在確認ができないときは何もしない（再生中でなければ実害なし）
-        return;
-    }
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
     if (contexts.length > 0) await sendToOffscreen({ type: "STOP_AUDIO" });
 }
 
-// 指定タブが再生宛先のままなら、宛先を外して再生を止める（タブ終了・遷移用）。
-// 宛先の照合も直列キューの内側で行う: 別タブの読み上げ開始（switchPlaybackTabTo）が
-// 先にキューへ入っていた場合、その完了後に照合すれば宛先は既に別タブなので、
-// 始まったばかりの読み上げを誤って止めない。
-async function stopPlaybackForTab(tabId) {
-    const start = pendingVoiceStarts.get(tabId);
-    if (start && !start.dispatched) pendingVoiceStarts.delete(tabId);
-    // 事前確認: 再生に無関係なタブの読み込みで直列キューを塞がない
-    if (await getPlaybackTabId() !== tabId) return;
-    return enqueueVoiceOperation(async () => {
-        if (await getPlaybackTabId() !== tabId) return;
-        // 宛先を先にクリアするので、offscreen が返す PLAYBACK_STOPPED は転送先が
-        // 無くなり、遷移先の新しいページのインジケーターを誤って点灯させない。
-        await setPlaybackTabId(null);
-        try {
-            await stopOffscreenAudioIfPresent();
-        } catch (e) {
-            // 送信失敗は無視（offscreen が消えていれば再生も止まっている）
-        }
-    });
+function stopPlaybackForTab(tabId, documentId) {
+    // 遷移したタブの準備だけを取り消す。停止の照合は直列キューでも行うため、
+    // 先にキューへ入った別タブの音声を巻き込まない。
+    if (!pendingVoiceStarts.has(tabId) && playbackOwner !== undefined && playbackOwner?.tabId !== tabId) return;
+    return queueVoiceStop(tabId, { navigating: true, documentId }).catch(() => {});
 }
 
 // タブが閉じられたら、保持している状態（再生宛先・ショートカット重複抑制・OCR要求）を
@@ -98,10 +49,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     stopPlaybackForTab(tabId);
 });
 
-// 再生中のタブが別ページへ遷移／リロードされたら、音声が鳴りっぱなしになるのを防ぐため
-// 再生を停止する。
+// loading だけでは iframe の遷移も拾う。メイン文書の再読み込みは
+// Content Script / capture.html の pagehide で検出する。
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status !== "loading") return;
+    if (changeInfo.status !== "loading" || changeInfo.url === undefined) return;
     stopPlaybackForTab(tabId);
 });
 

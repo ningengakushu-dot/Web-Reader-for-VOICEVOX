@@ -46,6 +46,8 @@
                 type: "ENQUEUE_TEXTS",
                 target: "offscreen",
                 texts,
+                requestId: typeof message.requestId === "string" && message.requestId.length <= 64
+                    ? message.requestId : undefined,
                 settings: sanitizeSettings(message.settings)
             } };
         }

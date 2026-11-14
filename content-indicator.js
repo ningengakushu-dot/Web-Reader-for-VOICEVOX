@@ -200,7 +200,7 @@ content.parts.indicator = {
                 cursor: grabbing; touch-action: none; user-select: none;
             }
             #vvradio-indicator:hover { opacity: 0.8; transform: scale(1.1); }
-            #vvradio-indicator.preparing {
+            #vvradio-indicator.preparing, #vvradio-indicator.stopping {
                 opacity: 1; outline: 2px solid #e39e24; outline-offset: 1px;
             }
             #vvradio-indicator.reading {
@@ -397,9 +397,10 @@ content.parts.indicator = {
     // UIのステータス表示を更新
     updateUIState(state) {
         if (!this.indicator) return;
-        this.indicator.classList.remove("preparing", "reading", "error");
-        if (state === 'preparing') {
-            this.indicator.classList.add("preparing");
+        this.indicator.classList.remove("preparing", "reading", "stopping", "error");
+        this.indicator.setAttribute("aria-busy", String(state === 'preparing' || state === 'stopping'));
+        if (state === 'preparing' || state === 'stopping') {
+            this.indicator.classList.add(state);
         } else if (state === 'reading') {
             this.indicator.classList.add("reading");
         } else if (state === 'error') {

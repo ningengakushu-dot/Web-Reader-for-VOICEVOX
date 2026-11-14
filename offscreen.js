@@ -28,6 +28,7 @@ let playbackBufferTimer = null;
 let synthesisGeneration = 0;
 // 再生の世代トークン。stopAll() 直後に古い audio.play() の reject が届いても無視する。
 let playbackGeneration = 0;
+let playbackRequestId;
 
 // メッセージリスナー
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -46,6 +47,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     switch (message.type) {
         case 'ENQUEUE_TEXTS': {
+            const enqueue = () => {
+                playbackRequestId = message.requestId;
+                enqueueTexts(message.texts, message.settings);
+                sendResponse({ success: true });
+            };
             const streaming = globalThis.VVRadioStreaming;
             const status = streaming?.cleanupStatus?.() || "ready";
             if (status === "failed") {
@@ -61,13 +67,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         sendResponse({ success: false, error: "読み上げ開始前に停止されました" });
                         return;
                     }
-                    enqueueTexts(message.texts, message.settings);
-                    sendResponse({ success: true });
+                    enqueue();
                 }).catch(error => sendResponse({ success: false, error: safeErrorMessage(error) }));
                 return true; // 非同期sendResponseのためChromeのメッセージポートを保持
             }
-            enqueueTexts(message.texts, message.settings);
-            sendResponse({ success: true });
+            enqueue();
             break;
         }
         case 'STOP_AUDIO':
@@ -994,7 +998,8 @@ async function processSynthesis() {
         // 内部由来の英語メッセージだけ「合成失敗:」を付けて区別できるようにする。
         const message = safeErrorMessage(err);
         notifyBackground("PLAYBACK_ERROR",
-            { error: err?.userFacing ? message : `合成失敗: ${message}` });
+            { error: err?.userFacing ? message : `合成失敗: ${message}`,
+                terminal: !isPlaying && audioQueue.length === 0 && textQueue.length === 0 });
     } finally {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
         // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。
@@ -1308,7 +1313,7 @@ async function processPlayback(continuePlayback = false) {
                 audioQueue = [];
                 console.error("Offscreen: ストリーミング再生失敗:", error);
                 notifyBackground("PLAYBACK_ERROR",
-                    { error: "ストリーミング再生を中断しました: " + safeErrorMessage(error) });
+                    { error: "ストリーミング再生を中断しました: " + safeErrorMessage(error), terminal: true });
             }
         } finally {
             // stop()失敗はrun()側のcatchで利用者へ通知済み。finallyから二次例外を
@@ -1391,7 +1396,8 @@ async function processPlayback(continuePlayback = false) {
         if (generation !== playbackGeneration || isCleanedUp) return;
         try {
             console.error("Offscreen: Audioエラー:", error);
-            notifyBackground("PLAYBACK_ERROR", { error: message });
+            notifyBackground("PLAYBACK_ERROR", { error: message,
+                terminal: !isSynthesizing && audioQueue.length === 0 && textQueue.length === 0 });
         } finally {
             cleanup(false);
         }
@@ -1413,11 +1419,7 @@ async function processPlayback(continuePlayback = false) {
 }
 
 async function stopAll() {
-    // 何も動いていないときの停止（読み上げ開始前の STOP_AUDIO・二度目の停止）では
-    // PLAYBACK_STOPPED を通知しない。開始直前に「停止」が届くと capture.html の
-    // 表示が「停止しました」→「再生中」と往復し、タブのアイコンも一瞬点滅する。
-    const wasActive = isPlaying || isSynthesizing || textQueue.length > 0 || audioQueue.length > 0
-        || currentAudio != null || currentStreamingPlayer != null;
+    // 停止結果は STOP_AUDIO の応答だけで返す。SW が対象要求へ結果を通知する。
     // in-flight の合成を無効化（完了しても破棄させる）
     synthesisGeneration++;
     clearPlaybackBufferTimer();
@@ -1474,18 +1476,13 @@ async function stopAll() {
             const failed = results.find(result => result.status === "rejected");
             if (failed) throw failed.reason;
         })
-        .then(() => globalThis.VVRadioStreaming?.waitForCleanup?.())
-        .then(() => {
-            if (wasActive) notifyBackground("PLAYBACK_STOPPED");
-        })
-        .catch(error => {
-            notifyBackground("PLAYBACK_ERROR", { error: safeErrorMessage(error) });
-            throw error;
-        });
+        .then(() => globalThis.VVRadioStreaming?.waitForCleanup?.());
 }
 
 function notifyBackground(type, payload = {}) {
     // background 側は応答を返さない通知なので、応答チャネルが閉じたことによる
     // 拒否は無視する（放置すると未処理の Promise 拒否でコンソールが埋まる）。
-    chrome.runtime.sendMessage({ type, target: 'background', ...payload }).catch(() => {});
+    const message = { type, target: 'background', ...payload };
+    if (type.startsWith("PLAYBACK_")) message.requestId = playbackRequestId;
+    chrome.runtime.sendMessage(message).catch(() => {});
 }
