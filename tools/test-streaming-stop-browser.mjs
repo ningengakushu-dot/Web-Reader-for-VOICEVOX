@@ -96,6 +96,27 @@ try {
         getSelection().addRange(range);
     });
     const events = () => worker.evaluate(() => stopProbe);
+    await worker.evaluate(() => {
+        const setup = setupOffscreen;
+        setupOffscreen = async () => {
+            await new Promise(resolve => { globalThis.releaseSetup = resolve; });
+            setupOffscreen = setup;
+            await setup();
+        };
+    });
+    await select();
+    await clickIndicator();
+    await waitFor(() => worker.evaluate(() => typeof globalThis.releaseSetup === 'function'),
+        'Offscreen setup should be waiting');
+    assert.equal((await indicator()).preparing, true);
+    await clickIndicator();
+    await waitFor(async () => (await events()).includes('STOP_ALL'), 'second click must request a stop');
+    await worker.evaluate(() => releaseSetup());
+    await waitFor(() => worker.evaluate(() => pendingVoiceStarts.size === 0), 'setup cancellation should settle');
+    assert.equal(started, 0);
+    assert.equal((await events()).filter(type => type === 'GENERATE_VOICE').length, 1);
+    await worker.evaluate(() => { stopProbe.length = 0; });
+
     for (const [index, action] of ['icon', 'shortcut'].entries()) {
         await select();
         await clickIndicator();
@@ -115,7 +136,29 @@ try {
         assert.equal(sent.includes('PLAYBACK_STARTED'), false);
         assert.equal(normal, 0);
     }
-    console.log('Chromium extension: icon and shortcut stopped partial WAV requests without re-synthesis');
+
+    const capture = await context.newPage();
+    await capture.goto(new URL('capture.html', worker.url()).href);
+    await capture.locator('#result-text').fill('短い文章です。');
+    const stopButton = capture.locator('#stop-btn');
+    const status = capture.locator('#playback-status');
+    assert.equal(await stopButton.isDisabled(), true);
+    await capture.locator('#speak-btn').click();
+    await waitFor(() => started === 3, 'capture page stream should begin receiving');
+    assert.equal(await stopButton.isEnabled(), true);
+    assert.match(await status.textContent(), /準備中/);
+    await stopButton.click();
+    await waitFor(() => closed === 3, 'capture stop must close the open stream');
+    await waitFor(async () => (await events()).filter(type => type === 'PLAYBACK_STOPPED').length === 3,
+        'capture stop must finish stopping');
+    assert.equal(await stopButton.isDisabled(), true);
+    assert.equal(await status.textContent(), '停止しました。');
+    const sent = await events();
+    assert.equal(sent.filter(type => type === 'GENERATE_VOICE').length, 3);
+    assert.equal(sent.filter(type => type === 'STOP_ALL').length, 3);
+    assert.equal(sent.includes('PLAYBACK_STARTED'), false);
+    assert.equal(normal, 0);
+    console.log('Chromium extension: stopped before Offscreen setup and during WAV reception from both pages');
 } finally {
     await context?.close();
     server.closeAllConnections();

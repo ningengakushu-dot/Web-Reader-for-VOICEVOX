@@ -56,8 +56,9 @@ function normalizeSpeakerList(value) {
 }
 
 // 音声の開始・停止要求を到着順に処理する。複数タブから同時に要求された場合でも、
-// 「宛先切替 → 既存再生停止 → 新規キュー追加」の順序が交差しないようにする。
+// 「既存再生停止 → 宛先切替 → 新規キュー追加」の順序が交差しないようにする。
 let voiceOperationQueue = Promise.resolve();
+const pendingVoiceStarts = new Map();
 function enqueueVoiceOperation(operation) {
     const next = voiceOperationQueue.then(operation);
     voiceOperationQueue = next.catch(() => {});
@@ -159,17 +160,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // 新しい読み上げの開始は、そのタブで進行中の範囲OCRを無効化する
             // （古い認識結果が後から届いてこの読み上げを中断しないように）。
             invalidatePendingOcr(sender.tab?.id);
-            // 宛先の保存を完了してから合成を開始し、直後の PLAYBACK_STARTED を取りこぼさない。
-            enqueueVoiceOperation(async () => {
-                await switchPlaybackTabTo(sender.tab?.id ?? null);
-                await handleGenerateVoice(request.text, sendResponse, sender.tab?.id);
-            }).catch((err) => sendResponse({ success: false, error: err.message }));
+            queueVoiceStart(request.text, sender.tab?.id ?? null).then(sendResponse);
             return true;
 
         case "STOP_ALL":
             // 停止はそのタブで進行中の範囲OCRも取り消す（完了後に勝手に読み上げを始めない）。
             invalidatePendingOcr(sender.tab?.id);
-            respondWith(enqueueVoiceOperation(stopOffscreenAudioIfPresent), sendResponse);
+            respondWith(queueVoiceStop(), sendResponse);
             return true;
 
         case "CAPTURE_OCR_REGION": {
@@ -213,24 +210,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }, "OCRエラー通知の送信失敗");
                 return false;
             }
-            // 宛先の保存完了後に読み上げを始め、開始通知の転送先を確実にする。
-            enqueueVoiceOperation(async () => {
-                await switchPlaybackTabTo(tabId);
-                notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
-                await handleGenerateVoice(request.text, (res) => {
-                    if (res && res.success === false) {
-                        notifyTab(tabId, {
-                            type: "OCR_STATUS",
-                            status: "error",
-                            message: `読み上げを開始できませんでした: ${res.error}`
-                        }, "読み上げ開始エラー通知の送信失敗");
-                    }
-                }, tabId);
-            }).catch((err) => {
-                notifyTab(tabId, {
-                    type: "OCR_STATUS", status: "error",
-                    message: `読み上げを開始できませんでした: ${err.message}`
-                }, "読み上げ開始エラー通知の送信失敗");
+            notifyTab(tabId, { type: "OCR_STATUS", status: "done" });
+            queueVoiceStart(request.text, tabId).then((res) => {
+                if (!res.success) {
+                    notifyTab(tabId, {
+                        type: "OCR_STATUS", status: "error",
+                        message: `読み上げを開始できませんでした: ${res.error}`
+                    }, "読み上げ開始エラー通知の送信失敗");
+                }
             });
             return false;
         }
@@ -246,49 +233,81 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // このタブ宛て転送を区別して二重処理を防げるようにするため。
             // SW休止から復帰した直後はメモリ上の宛先が失われているため、
             // storage.session から復元してから転送する（getPlaybackTabId）。
-            getPlaybackTabId().then((tabId) => notifyTab(tabId, request, "再生状態の転送失敗"));
+            getPlaybackTabId().then((tabId) => notifyPlaybackTab(tabId, request, "再生状態の転送失敗"));
             return false;
     }
 
     return false;
 });
 
-async function handleGenerateVoice(text, sendResponse, tabId) {
-    let preparing = false;
-    try {
-        // 設定の読み出しも try の内側に入れる。ここで例外が出ると応答が返らず、
-        // 要求元は「無反応」のまま待たされてしまう。
-        const result = await chrome.storage.local.get(Object.keys(SETTING_DEFAULTS));
-        const settings = { ...SETTING_DEFAULTS, ...result };
-        const chunks = splitText(text);
-        // 記号・罫線だけの選択など、読める文字が無い場合は無音の合成要求を送らず、
-        // 理由を返す（呼び出し側がトーストに出す）。
-        if (chunks.length === 0) {
-            sendResponse({ success: false, error: "読み上げられる文字がありません" });
-            return;
+function notifyPlaybackTab(tabId, message, context) {
+    // 新しい音声を渡すまでは、Offscreen のイベントは前の音声のもの。
+    const start = pendingVoiceStarts.get(tabId);
+    if (!start || start.dispatched) notifyTab(tabId, message, context);
+}
+
+function queueVoiceStart(text, tabId) {
+    const start = { cancelled: false, dispatched: false };
+    pendingVoiceStarts.set(tabId, start);
+    notifyTab(tabId, { type: "PLAYBACK_PREPARING" });
+    const isCurrent = () => !start.cancelled && pendingVoiceStarts.get(tabId) === start;
+    const cancelled = { success: true, cancelled: true };
+
+    return enqueueVoiceOperation(async () => {
+        try {
+            if (!isCurrent()) return cancelled;
+            const result = await chrome.storage.local.get(Object.keys(SETTING_DEFAULTS));
+            if (!isCurrent()) return cancelled;
+            const settings = { ...SETTING_DEFAULTS, ...result };
+            const chunks = splitText(text);
+            if (chunks.length === 0) throw new Error("読み上げられる文字がありません");
+
+            await setupOffscreen();
+            if (!isCurrent()) return cancelled;
+            await sendToOffscreen({ type: 'STOP_AUDIO' });
+            if (!isCurrent()) return cancelled;
+            // 旧音声の停止後に宛先を切り替え、開始通知の前に保存を完了する。
+            await switchPlaybackTabTo(tabId);
+            if (!isCurrent()) return cancelled;
+
+            // 短い文でキューが先に空になるのを防ぐため、全チャンクをまとめて渡す。
+            start.dispatched = true;
+            await sendToOffscreen({ type: 'ENQUEUE_TEXTS', texts: chunks, settings });
+            return { success: true };
+        } catch (err) {
+            if (!isCurrent()) return cancelled;
+            notifyTab(tabId, { type: "PLAYBACK_STOPPED" });
+            console.error("Background: 準備エラー:", err);
+            return { success: false, error: err?.message || "読み上げを開始できませんでした" };
+        } finally {
+            if (isCurrent()) pendingVoiceStarts.delete(tabId);
         }
+    });
+}
 
-        await setupOffscreen();
-        // Offscreen への配信完了を確認してから成功応答を返す（無音失敗の可視化）
-        await sendToOffscreen({ type: 'STOP_AUDIO' });
-
-        // 旧音声の停止後に通知し、最初のPCMを待つ間も全フレームから停止できるようにする。
-        notifyTab(tabId, { type: "PLAYBACK_PREPARING" });
-        preparing = true;
-
-        // 1文ずつ送ると、短い文では先頭の再生完了時にキューが空になり
-        // 読み上げ終了が早すぎるタイミングで通知される。まとめて渡す。
-        await sendToOffscreen({
-            type: 'ENQUEUE_TEXTS',
-            texts: chunks,
-            settings
-        });
-        sendResponse({ success: true });
-    } catch (err) {
-        if (preparing) notifyTab(tabId, { type: "PLAYBACK_STOPPED" });
-        console.error("Background: 準備エラー:", err);
-        sendResponse({ success: false, error: err.message });
+function queueVoiceStop() {
+    // キューの順序は保ったまま、先行する準備が Offscreen に音声を渡すのを防ぐ。
+    const cancelledStarts = [];
+    for (const [tabId, start] of pendingVoiceStarts) {
+        if (start.dispatched || start.cancelled) continue;
+        start.cancelled = true;
+        cancelledStarts.push([tabId, start]);
     }
+    return enqueueVoiceOperation(async () => {
+        let message = { type: "PLAYBACK_STOPPED" };
+        try {
+            await stopOffscreenAudioIfPresent();
+        } catch (err) {
+            message = { type: "PLAYBACK_ERROR", error: err?.message || "読み上げを停止できませんでした" };
+            throw new Error(message.error);
+        } finally {
+            for (const [tabId, start] of cancelledStarts) {
+                if (pendingVoiceStarts.get(tabId) !== start) continue;
+                pendingVoiceStarts.delete(tabId);
+                notifyTab(tabId, message);
+            }
+        }
+    });
 }
 
 /**

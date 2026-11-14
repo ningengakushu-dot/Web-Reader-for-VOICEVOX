@@ -284,6 +284,7 @@
         const sent = sendRuntimeMessage({ type: "GENERATE_VOICE", text }, (response) => {
             if (chrome.runtime.lastError || !response || !response.success) {
                 const reason = chrome.runtime.lastError?.message || response?.error || "応答なし";
+                setPlaybackActive(false);
                 setPlaybackStatus(`読み上げの開始に失敗しました: ${reason}`, "error");
             }
         });
@@ -292,7 +293,7 @@
 
     stopBtn.addEventListener("click", () => {
         const sent = sendRuntimeMessage({ type: "STOP_ALL" }, () => { void chrome.runtime.lastError; });
-        setPlayingState(false);
+        setPlaybackActive(false);
         setPlaybackStatus(sent ? "停止しました。" : "拡張機能が更新されました。このタブを再読み込みしてください。",
             sent ? "" : "error");
     });
@@ -306,27 +307,31 @@
         if (!request || request.target !== "tab") return;
 
         switch (request.type) {
+            case "PLAYBACK_PREPARING":
+                setPlaybackActive(true);
+                setPlaybackStatus("読み上げを準備中...", "playing");
+                break;
             case "PLAYBACK_STARTED":
-                setPlayingState(true);
+                setPlaybackActive(true);
                 setPlaybackStatus("再生中...", "playing");
                 break;
             case "PLAYBACK_ENDED":
-                setPlayingState(false);
+                setPlaybackActive(false);
                 setPlaybackStatus("再生が完了しました。");
                 break;
             case "PLAYBACK_STOPPED":
-                setPlayingState(false);
+                setPlaybackActive(false);
                 setPlaybackStatus("停止しました。");
                 break;
             case "PLAYBACK_ERROR":
-                setPlayingState(false);
+                setPlaybackActive(false);
                 setPlaybackStatus(`再生エラー: ${request.error || "不明なエラー"}`, "error");
                 break;
         }
     });
 
-    function setPlayingState(playing) {
-        stopBtn.disabled = !playing;
+    function setPlaybackActive(active) {
+        stopBtn.disabled = !active;
     }
 
     function setPlaybackStatus(message, state = "") {

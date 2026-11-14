@@ -54,7 +54,7 @@ $env:OCR_CHROMIUM = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 node tools/test-streaming-race-browser.mjs
 ```
 
-受信待ちの停止は、拡張機能を読み込めるPlaywright版Chromiumを使って `node tools/test-streaming-stop-browser.mjs` で確認できる。別の対応Chromiumを使う場合は `OCR_CHROMIUM` に実行ファイルを指定する。
+Offscreen 初期化待ちと WAV 受信待ちの停止は、拡張機能を読み込める Playwright 版 Chromium で `node tools/test-streaming-stop-browser.mjs` を実行して確認できる。初期化待ちでは停止後に合成を開始しないこと、受信待ちではページ内アイコン・ショートカット・画面 OCR の停止ボタンで通信が終了することを検証する。別の対応 Chromium を使う場合は `OCR_CHROMIUM` に実行ファイルを指定する。
 
 ## 現時点の測定欄
 | 指標 | 通常合成 | ストリーミング | 判定 |

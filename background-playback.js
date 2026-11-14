@@ -46,7 +46,7 @@ async function switchPlaybackTabTo(tabId) {
     if (tabId == null) return;
     const prev = await getPlaybackTabId();
     if (prev != null && prev !== tabId) {
-        notifyTab(prev, { type: "PLAYBACK_STOPPED" }, "旧再生タブへの停止通知失敗");
+        notifyPlaybackTab(prev, { type: "PLAYBACK_STOPPED" }, "旧再生タブへの停止通知失敗");
     }
     await setPlaybackTabId(tabId);
 }
@@ -72,6 +72,8 @@ async function stopOffscreenAudioIfPresent() {
 // 先にキューへ入っていた場合、その完了後に照合すれば宛先は既に別タブなので、
 // 始まったばかりの読み上げを誤って止めない。
 async function stopPlaybackForTab(tabId) {
+    const start = pendingVoiceStarts.get(tabId);
+    if (start && !start.dispatched) pendingVoiceStarts.delete(tabId);
     // 事前確認: 再生に無関係なタブの読み込みで直列キューを塞がない
     if (await getPlaybackTabId() !== tabId) return;
     return enqueueVoiceOperation(async () => {

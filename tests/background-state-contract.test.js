@@ -5,7 +5,7 @@ const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 
-function createHarness(initialSession = {}, rejectEnqueue = false) {
+function createHarness(initialSession = {}, { rejectEnqueue = false, beforeOffscreenReply } = {}) {
     let onMessage;
     const sessionData = { ...initialSession };
     const tabMessages = [];
@@ -31,8 +31,9 @@ function createHarness(initialSession = {}, rejectEnqueue = false) {
             id: 'ext-id', lastError: null,
             getURL: (p) => `chrome-extension://ext-id/${p}`,
             getContexts: () => Promise.resolve([{ contextType: 'OFFSCREEN_DOCUMENT' }]),
-            sendMessage(message) {
+            async sendMessage(message) {
                 if (message.target === 'offscreen') offscreenMessages.push(message);
+                if (beforeOffscreenReply) await beforeOffscreenReply(message);
                 if (rejectEnqueue && message.type === 'ENQUEUE_TEXTS') {
                     return Promise.resolve({ success: false, error: 'injected enqueue failure' });
                 }
@@ -115,12 +116,47 @@ function createHarness(initialSession = {}, rejectEnqueue = false) {
     }
 
     {
-        const h = createHarness({}, true);
+        const h = createHarness({}, { rejectEnqueue: true });
         const response = await h.send({ type: 'GENERATE_VOICE', text: '受付に失敗する文。' },
             { id: 'ext-id', tab: { id: 8 } });
         assert.equal(response.success, false);
         assert.deepEqual(h.tabMessages.map(({ message }) => message.type),
             ['PLAYBACK_PREPARING', 'PLAYBACK_STOPPED'], 'failed enqueue must clear preparation');
+    }
+
+    {
+        let releaseOldStop;
+        let oldStopStarted;
+        const blocked = new Promise(resolve => { oldStopStarted = resolve; });
+        const h = createHarness({ vv_playback_tab_id: 8 }, {
+            beforeOffscreenReply(message) {
+                if (message.type === 'STOP_AUDIO' && !releaseOldStop) {
+                    return new Promise(resolve => {
+                        releaseOldStop = resolve;
+                        oldStopStarted();
+                    });
+                }
+            }
+        });
+        const sender = { id: 'ext-id', tab: { id: 8 } };
+        const first = h.send({ type: 'GENERATE_VOICE', text: '取り消す文。' }, sender);
+        await blocked;
+        await h.send({ type: 'PLAYBACK_STOPPED', target: 'background' }, {
+            id: 'ext-id', url: 'chrome-extension://ext-id/offscreen.html'
+        });
+        assert.deepEqual(h.tabMessages.map(({ message }) => message.type), ['PLAYBACK_PREPARING'],
+            'old playback stop must preserve the preparing state');
+
+        const stop = h.send({ type: 'STOP_ALL' }, sender);
+        const next = h.send({ type: 'GENERATE_VOICE', text: '再開する文。' }, sender);
+        releaseOldStop();
+        assert.equal((await first).cancelled, true);
+        assert.equal((await stop).success, true);
+        assert.equal((await next).success, true);
+        assert.deepEqual(h.offscreenMessages.filter(m => m.type === 'ENQUEUE_TEXTS')
+            .map(m => m.texts.join('')), ['再開する文。'], 'only the new start reaches Offscreen');
+        assert.deepEqual(h.tabMessages.map(({ message }) => message.type),
+            ['PLAYBACK_PREPARING', 'PLAYBACK_PREPARING'], 'old stop must preserve the restarted request');
     }
 
     console.log('background state contract: PASSED');
