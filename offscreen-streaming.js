@@ -435,10 +435,11 @@
                 }
             }
 
+            // 全量を検証してから再生するため、上限内の音声は1回の生成にまとめる。
             try {
                 const response = await timed(fetch(VOICEVOX_BASE_URL +
                     "/streaming_synthesis?speaker=" + encodeURIComponent(speaker)
-                    + "&segment_length=0.3&start_offset=0", {
+                    + `&segment_length=${BUFFER_SECONDS_LIMIT}&start_offset=0`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(query),
@@ -527,6 +528,6 @@
 
     globalThis.VVRadioStreaming = Object.freeze({
         supports, invalidate, suppress, createPlayer, pcmHeader, lockCleanup,
-        cleanupStatus, waitForCleanup
+        cleanupStatus, waitForCleanup, bufferSecondsLimit: BUFFER_SECONDS_LIMIT
     });
 })();

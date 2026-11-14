@@ -8,6 +8,7 @@ let currentAudio = null;
 let currentAudioUrl = null;
 let currentStreamingPlayer = null;
 let activeStreamingPreparation = null;
+let pendingNormalRequest = null;
 // 再生中の音声とは別に、完成済み音声をどれだけ先読みするか（件数と合計秒数の両方で制限）。
 // 全文を再生より速く合成すると、長文では Blob と VOICEVOX の処理負荷が読み上げ終了まで
 // 増え続ける。一方で「次の1件だけ」では、短い文（見出し・箇条書きの1行）の直後に長い文が

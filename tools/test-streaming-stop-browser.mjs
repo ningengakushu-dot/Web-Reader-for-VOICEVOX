@@ -24,6 +24,10 @@ let closed = 0;
 let normal = 0;
 let streamResponse = 'partial';
 let normalStatus = 200;
+let heldNormal;
+let holdNextNormal = false;
+let normalInFlight = 0;
+let peakNormalInFlight = 0;
 const server = http.createServer((request, response) => {
     const { pathname } = new URL(request.url, 'http://127.0.0.1');
     request.resume();
@@ -32,7 +36,10 @@ const server = http.createServer((request, response) => {
         response.end('<!doctype html><p id="sample">短い文章です。</p>');
     } else if (Object.hasOwn(engine, pathname)) {
         response.setHeader('Content-Type', 'application/json');
-        response.end(JSON.stringify(engine[pathname]));
+        const body = pathname === '/audio_query' && new URL(request.url, 'http://127.0.0.1').searchParams.get('text') === '長い音声。'
+            ? { ...engine[pathname], accent_phrases: [{ moras: [{ vowel_length: 7 }] }] }
+            : engine[pathname];
+        response.end(JSON.stringify(body));
     } else if (pathname === '/streaming_synthesis') {
         started++;
         response.on('close', () => closed++);
@@ -51,7 +58,14 @@ const server = http.createServer((request, response) => {
         }
     } else if (pathname === '/synthesis') {
         normal++;
-        response.writeHead(normalStatus, { 'Content-Type': 'audio/wav' }).end(wav);
+        normalInFlight++;
+        peakNormalInFlight = Math.max(peakNormalInFlight, normalInFlight);
+        response.on('close', () => normalInFlight--);
+        const finish = () => response.writeHead(normalStatus, { 'Content-Type': 'audio/wav' }).end(wav);
+        if (holdNextNormal) {
+            holdNextNormal = false;
+            heldNormal = finish;
+        } else finish();
     } else {
         response.writeHead(404).end();
     }
@@ -548,10 +562,52 @@ try {
         }
     };
 
+    const normalRestart = async () => {
+        await capture.bringToFront();
+        await worker.evaluate(() => chrome.storage.local.set({ synthesisMode: 'normal' }));
+        const initial = normal;
+        peakNormalInFlight = 0;
+        holdNextNormal = true;
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => heldNormal, 'old synthesis must reach ENGINE');
+        await stopButton.click();
+        await waitFor(async () => (await status.textContent()) === '停止しました。', 'UI must stop while synthesis is pending');
+        await capture.locator('#speak-btn').click();
+        await waitFor(async () => /準備中/.test(await status.textContent()), 'replacement should be preparing');
+        await stopButton.click();
+        await waitFor(async () => (await status.textContent()) === '停止しました。', 'a queued replacement can also stop');
+        await capture.locator('#speak-btn').click();
+        await waitFor(async () => /準備中/.test(await status.textContent()), 'last replacement should be preparing');
+        await new Promise(resolve => setTimeout(resolve, 250));
+        assert.equal(normal, initial + 1, 'the next synthesis must wait for the uncancellable old request');
+        heldNormal();
+        heldNormal = undefined;
+        await waitFor(async () => (await status.textContent()) === '再生が完了しました。', 'replacement should complete');
+        assert.equal(normal, initial + 2);
+        assert.equal(peakNormalInFlight, 1);
+    };
+
+    const longBypass = async () => {
+        await capture.bringToFront();
+        await worker.evaluate(() => chrome.storage.local.set({ synthesisMode: 'auto' }));
+        streamResponse = 'complete';
+        await capture.locator('#result-text').fill('長い音声。');
+        const before = [started, normal];
+        await capture.locator('#speak-btn').click();
+        await waitFor(async () => (await status.textContent()) === '再生が完了しました。', 'long synthesis should complete');
+        assert.deepEqual([started - before[0], normal - before[1]], [0, 1], 'avoid synthesizing a request known to exceed the buffer twice');
+        await capture.locator('#result-text').fill('短文。');
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === before[0] + 1, 'later short request should still stream');
+        await waitFor(async () => (await status.textContent()) === '再生が完了しました。', 'short stream should complete');
+        assert.equal(normal, before[1] + 1);
+    };
+
     const regressions = { 'late-frame': lateFrameShortcut, 'capture-rejection': rejectedCaptureStop,
         'icon-rejection': rejectedIconStop, 'tab-switch': switchTabs, 'offscreen-destroyed': offscreenDestroyed,
         'worker-restart': restartWorker, 'frame-race': frameRace, 'tab-race': concurrentTabs,
-        'network-stall': networkStall, synthesis: synthesisPaths, 'engine-error': engineFailure };
+        'network-stall': networkStall, 'normal-restart': normalRestart, 'long-bypass': longBypass,
+        synthesis: synthesisPaths, 'engine-error': engineFailure };
     const selected = process.argv.length > 2 ? process.argv.slice(2)
         : Object.keys(regressions).filter(name => name !== 'network-stall');
     for (const name of selected) {

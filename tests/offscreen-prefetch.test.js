@@ -30,6 +30,7 @@ function durationOf(text) {
     return m ? Number(m[1]) : 1;
 }
 let synthDelayMs = 0;
+let holdSynthesis;
 const chrome = {
     runtime: {
         id: 'ext-id',
@@ -49,6 +50,7 @@ const context = vm.createContext({
             return { ok: true, status: 200, text };
         }
         synthesized.push(JSON.parse(options.body).test_text);
+        if (holdSynthesis) await holdSynthesis;
         if (synthDelayMs) await new Promise((r) => setTimeout(r, synthDelayMs));
         return { ok: true, status: 200 };
     },
@@ -151,6 +153,32 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
         assert.ok(!notifications.some((m) => m.type === 'PLAYBACK_STOPPED'), 'STOP_AUDIO reports through its response');
         assert.ok(!notifications.some((m) => m.type === 'PLAYBACK_ENDED'));
         synthDelayMs = 0;
+        playing.length = 0;
+        synthesized.length = 0;
+        notifications.length = 0;
+    }
+
+    // --- 停止しても未完了の通常合成がある間は、再開要求を ENGINE に送らない ---
+    {
+        let reject;
+        holdSynthesis = new Promise((resolve, fail) => { reject = fail; });
+        await enqueue(['1:旧音声']);
+        await settle();
+        assert.deepEqual(synthesized, ['1:旧音声']);
+        assert.equal((await stop()).success, true);
+        await enqueue(['1:取り消す再開']);
+        assert.equal((await stop()).success, true);
+        await enqueue(['1:最後の再開']);
+        await settle();
+        assert.deepEqual(synthesized, ['1:旧音声']);
+        assert.equal(playing.length, 0);
+        holdSynthesis = null;
+        reject(new Error('old synthesis failed after stop'));
+        await settle();
+        assert.deepEqual(synthesized, ['1:旧音声', '1:最後の再開']);
+        assert.equal(playing.length, 1);
+        assert.ok(!notifications.some(message => message.type === 'PLAYBACK_ERROR'));
+        await stop();
         playing.length = 0;
         synthesized.length = 0;
         notifications.length = 0;

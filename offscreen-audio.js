@@ -31,6 +31,8 @@ const MIN_SYNTHESIS_SPLIT_CHARS = 8;
 // 1〜2件なら「その文だけ読めなかった」可能性があるので続行する。
 const MAX_CONSECUTIVE_SYNTHESIS_FAILURES = 3;
 const STREAMING_PREPARATION_CANCEL_WAIT_MS = 1200;
+// 近い音声長は WAV ヘッダーで確かめる。モーラ長の合計と実 WAV には丸め等の差がある。
+const STREAMING_DURATION_MARGIN_SECONDS = 0.5;
 let consecutiveSynthesisFailures = 0;
 
 function safeErrorMessage(error) {
@@ -91,6 +93,17 @@ function audioClockMs() {
     return globalThis.performance?.now?.() ?? Date.now();
 }
 
+function trackNormalRequest(request) {
+    // ENGINE の /synthesis は接続を切っても演算を継続する。停止の表示はすぐ返し、
+    // 次の音声要求だけを旧通信の完了または既存のタイムアウトまで待たせる。
+    const release = () => {
+        if (pendingNormalRequest === done) pendingNormalRequest = null;
+    };
+    const done = request.then(release, release);
+    pendingNormalRequest = done;
+    return request;
+}
+
 // 文の文字数ではなく、エンジンが返したモーラ長で先の合成負荷を予測する。
 // 短文が複数続いてから長文が来る場合も見る必要があるので、次の1件だけにはしない。
 // WAVとは別の上限で軽いクエリを先読みする。音声が短い場合、WAVの件数上限で
@@ -107,7 +120,7 @@ async function prepareSynthesisWindow(item, generation) {
         const pending = index < 0 ? item : textQueue[index];
         if (!pending.query && !pending.queryError) {
             try {
-                const query = await prepareVoiceQuery(pending.text, pending.settings);
+                const query = await trackNormalRequest(prepareVoiceQuery(pending.text, pending.settings));
                 if (generation !== synthesisGeneration) return false;
                 pending.query = query;
                 pending.durationSec = estimateQueryDurationSec(query, pending.settings.speedScale);
@@ -166,6 +179,8 @@ async function processSynthesis() {
     activeSynthesis = { durationSec: null, startedAt: null };
 
     try {
+        if (pendingNormalRequest) await pendingNormalRequest;
+        if (generation !== synthesisGeneration) return;
         let streamingQuery = null;
         // 機能照会とクエリ取得も再生準備の一部として扱い、STOP_AUDIOから同じ要求単位の
         // AbortSignalを渡す。準備段階で止められた旧要求が次の再生と重ならないよう記録する。
@@ -188,19 +203,25 @@ async function processSynthesis() {
         }
         if (generation !== synthesisGeneration) return;
         if (streamingQuery) {
-            if (generation !== synthesisGeneration) return;
-            audioQueue.push({ streaming: true, query: streamingQuery, settings: item.settings,
-                text: item.text, durationSec: estimateQueryDurationSec(streamingQuery, item.settings.speedScale),
-                splitDepth: item.splitDepth || 0, notice: item.notice });
-            activeSynthesis = null;
-            processPlayback();
-            return;
+            const durationSec = estimateQueryDurationSec(streamingQuery, item.settings.speedScale);
+            const longAudio = durationSec > globalThis.VVRadioStreaming.bufferSecondsLimit + STREAMING_DURATION_MARGIN_SECONDS;
+            if (!longAudio) {
+                audioQueue.push({ streaming: true, query: streamingQuery, settings: item.settings,
+                    text: item.text, durationSec, splitDepth: item.splitDepth || 0, notice: item.notice });
+                activeSynthesis = null;
+                processPlayback();
+                return;
+            }
+            item.query = streamingQuery;
+            item.durationSec = durationSec;
         }
         if (!await prepareSynthesisWindow(item, generation)) return;
         if (item.queryError) throw item.queryError;
         activeSynthesis = { durationSec: item.durationSec, startedAt: audioClockMs() };
         processPlayback();
-        const { url: blobUrl, durationSec } = await generateVoiceBlob(item.text, item.settings, item.query);
+        if (generation !== synthesisGeneration) return;
+        const audio = generateVoiceBlob(item.text, item.settings, item.query);
+        const { url: blobUrl, durationSec } = await trackNormalRequest(audio);
         // 合成中に stopAll() が走った場合、生成済み Blob を破棄して状態を触らない
         if (generation !== synthesisGeneration) {
             URL.revokeObjectURL(blobUrl);
