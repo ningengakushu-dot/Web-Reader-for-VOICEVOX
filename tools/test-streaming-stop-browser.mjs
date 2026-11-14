@@ -25,7 +25,7 @@ let normal = 0;
 let streamResponse = 'partial';
 let normalStatus = 200;
 let heldNormal;
-let holdNextNormal = false;
+let holdNormalAt;
 let normalInFlight = 0;
 let peakNormalInFlight = 0;
 const server = http.createServer((request, response) => {
@@ -62,8 +62,7 @@ const server = http.createServer((request, response) => {
         peakNormalInFlight = Math.max(peakNormalInFlight, normalInFlight);
         response.on('close', () => normalInFlight--);
         const finish = () => response.writeHead(normalStatus, { 'Content-Type': 'audio/wav' }).end(wav);
-        if (holdNextNormal) {
-            holdNextNormal = false;
+        if (normal === holdNormalAt) {
             heldNormal = finish;
         } else finish();
     } else {
@@ -567,7 +566,7 @@ try {
         await worker.evaluate(() => chrome.storage.local.set({ synthesisMode: 'normal' }));
         const initial = normal;
         peakNormalInFlight = 0;
-        holdNextNormal = true;
+        holdNormalAt = initial + 1;
         await capture.locator('#speak-btn').click();
         await waitFor(() => heldNormal, 'old synthesis must reach ENGINE');
         await stopButton.click();
@@ -603,11 +602,82 @@ try {
         assert.equal(normal, before[1] + 1);
     };
 
+    const failedSplit = async () => {
+        const sentence = '読み上げの試験です。';
+        await worker.evaluate(() => chrome.storage.local.set({ synthesisMode: 'normal' }));
+        await capture.bringToFront();
+        await capture.locator('#result-text').fill(sentence);
+        await status.evaluate(element => {
+            window.splitFailureDisplays = [];
+            new MutationObserver(() => {
+                if (element.textContent.startsWith('再生エラー:')) {
+                    window.splitFailureDisplays.push(element.textContent);
+                }
+            }).observe(element, { childList: true });
+        });
+        normalStatus = 500;
+        const captureStart = normal;
+        holdNormalAt = captureStart + 3;
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => normal === captureStart + 3, 'original sentence and both fragments should fail');
+        await waitFor(async () => /再生エラー.*500/.test(await status.textContent()), 'first failure must reach capture');
+        assert.equal(await stopButton.isEnabled(), true);
+        heldNormal();
+        heldNormal = undefined;
+        await waitFor(() => stopButton.isDisabled(), 'all failures must clear the capture stop state');
+        assert.match(await status.textContent(), /再生エラー.*500/);
+        assert.equal(await capture.evaluate(() => window.splitFailureDisplays.length), 1);
+        normalStatus = 200;
+        await capture.locator('#speak-btn').click();
+        await waitFor(async () => (await status.textContent()) === '再生が完了しました。', 'capture retry should finish');
+        assert.equal(normal, captureStart + 4);
+
+        await page.bringToFront();
+        await page.locator('#sample').evaluate((element, text) => { element.textContent = text; }, sentence);
+        const toast = (observe = false) => worker.evaluate(async ({ tabId, observe }) => {
+            const [frame] = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: observe => {
+                    const toast = window.__vvRadioReaderInstance.ocrToast;
+                    if (observe) {
+                        globalThis.splitFailureDisplayChanges = 0;
+                        new MutationObserver(() => globalThis.splitFailureDisplayChanges++)
+                            .observe(toast, { childList: true });
+                    }
+                    return { text: toast?.textContent, changes: globalThis.splitFailureDisplayChanges };
+                },
+                args: [observe]
+            });
+            return frame.result;
+        }, { tabId, observe });
+        normalStatus = 500;
+        const pageStart = normal;
+        holdNormalAt = pageStart + 3;
+        await select();
+        await clickIndicator();
+        await waitFor(() => normal === pageStart + 3, 'page synthesis and both fragments should fail');
+        await waitFor(async () => /500/.test((await toast()).text), 'first failure must reach the page');
+        await toast(true);
+        heldNormal();
+        heldNormal = undefined;
+        await waitFor(() => worker.evaluate(async () => !(await getPlaybackOwner())),
+            'all failures must release the service worker playback owner');
+        const displayedError = await toast();
+        assert.match(displayedError.text, /500/);
+        assert.equal(displayedError.changes, 0);
+        normalStatus = 200;
+        await select();
+        await page.keyboard.press('Alt+Shift+u');
+        await waitFor(() => normal === pageStart + 4, 'the first shortcut after failure should retry synthesis');
+        await waitFor(async () => (await indicator()).reading, 'page retry should start playback');
+        await waitFor(() => worker.evaluate(async () => !(await getPlaybackOwner())), 'page retry should finish');
+    };
+
     const regressions = { 'late-frame': lateFrameShortcut, 'capture-rejection': rejectedCaptureStop,
         'icon-rejection': rejectedIconStop, 'tab-switch': switchTabs, 'offscreen-destroyed': offscreenDestroyed,
         'worker-restart': restartWorker, 'frame-race': frameRace, 'tab-race': concurrentTabs,
         'network-stall': networkStall, 'normal-restart': normalRestart, 'long-bypass': longBypass,
-        synthesis: synthesisPaths, 'engine-error': engineFailure };
+        synthesis: synthesisPaths, 'engine-error': engineFailure, 'split-failure': failedSplit };
     const selected = process.argv.length > 2 ? process.argv.slice(2)
         : Object.keys(regressions).filter(name => name !== 'network-stall');
     for (const name of selected) {

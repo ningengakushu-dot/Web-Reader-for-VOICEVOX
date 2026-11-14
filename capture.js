@@ -364,10 +364,14 @@
                 stopBtn.disabled = !request.oldVoiceActive;
                 setPlaybackStatus(`読み上げの開始に失敗しました: ${request.error}`, "error");
                 break;
-            case "PLAYBACK_ERROR":
+            case "PLAYBACK_ERROR": {
                 stopBtn.disabled = request.terminal !== false;
-                setPlaybackStatus(`再生エラー: ${request.error || "不明なエラー"}`, "error");
+                const message = `再生エラー: ${request.error || "不明なエラー"}`;
+                if (!request.alreadyReported || playbackStatus.textContent !== message) {
+                    setPlaybackStatus(message, "error");
+                }
                 break;
+            }
         }
     });
 

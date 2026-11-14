@@ -243,7 +243,7 @@ async function processSynthesis() {
         const splitDepth = item.splitDepth || 0;
         // 割った断片が結局どれも読めなかった場合でも、通知は元の1文につき1回に保つ
         // （最大8片ぶんのエラー表示を出さない）。
-        const notice = item.notice || { notified: false };
+        const notice = item.notice || { error: null };
         if (isVoicevoxRetryableError(err) && splitDepth < MAX_SYNTHESIS_SPLIT_DEPTH) {
             const parts = splitSynthesisText(item.text);
             if (parts) {
@@ -253,24 +253,25 @@ async function processSynthesis() {
                 return;
             }
         }
-        if (notice.notified && !isVoicevoxUnreachableError(err)) return;
-        notice.notified = true;
-        consecutiveSynthesisFailures++;
-        // エンジンに届かない・応答が無い失敗では残りの文を合成しない。続けても文の数だけ
-        // 同じ失敗と PLAYBACK_ERROR 通知（＝タブのエラー表示・SW起動）を繰り返すだけになる。
-        // 到達はできるが毎回同じ理由で拒否される場合も同じなので、連続失敗が続いたら諦める。
-        // 割っても駄目だった文はここで諦め、次の文へ進む（既に合成済みの音声は再生を終える）。
-        if (isVoicevoxUnreachableError(err)) globalThis.VVRadioStreaming?.invalidate?.();
-        if (isVoicevoxUnreachableError(err)
-            || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
-            textQueue = [];
+        const unreachable = isVoicevoxUnreachableError(err);
+        const alreadyReported = notice.error !== null && !unreachable;
+        if (!alreadyReported) {
+            consecutiveSynthesisFailures++;
+            // ENGINE に届かない場合や連続して失敗する場合は、残りの文を諦める。
+            // 既に合成済みの音声は再生を終える。
+            if (unreachable) globalThis.VVRadioStreaming?.invalidate?.();
+            if (unreachable || consecutiveSynthesisFailures >= MAX_CONSECUTIVE_SYNTHESIS_FAILURES) {
+                textQueue = [];
+            }
+            // HTTP ステータスなど、利用者向けの文言を持つエラーはそのまま伝える。
+            const message = safeErrorMessage(err);
+            notice.error = err?.userFacing ? message : `合成失敗: ${message}`;
         }
-        // 利用者へ見せる文言を持つエラー（HTTPステータス・応答形式）はそのまま伝える。
-        // 内部由来の英語メッセージだけ「合成失敗:」を付けて区別できるようにする。
-        const message = safeErrorMessage(err);
-        notifyBackground("PLAYBACK_ERROR",
-            { error: err?.userFacing ? message : `合成失敗: ${message}`,
-                terminal: !isPlaying && audioQueue.length === 0 && textQueue.length === 0 });
+        const terminal = !isPlaying && audioQueue.length === 0 && textQueue.length === 0;
+        // 理由の再表示を抑える場合も、キューが空になった時点で SW に要求終了を伝える。
+        if (!alreadyReported || terminal) {
+            notifyBackground("PLAYBACK_ERROR", { error: notice.error, terminal, alreadyReported });
+        }
     } finally {
         // 現在の世代のみが合成フラグの解除と次処理の継続を行える。
         // stale な世代では stopAll() が既に状態をリセット済みのため何もしない。

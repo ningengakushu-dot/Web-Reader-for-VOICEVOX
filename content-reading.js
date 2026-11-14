@@ -206,7 +206,7 @@ content.parts.reading = {
             case "PLAYBACK_START_FAILED":
             case "PLAYBACK_ERROR":
                 this.updateUIState('error');
-                this.showPlaybackErrorToast(request.error);
+                if (!request.alreadyReported) this.showPlaybackErrorToast(request.error);
                 break;
         }
     },
