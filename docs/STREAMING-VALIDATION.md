@@ -17,6 +17,7 @@
 
 - 通常合成の先読み、再生、停止と停止待ちの応答で、`null`／`undefined` の拒否をテスト。再生エラーの通知は1回で、再生状態とBlob URLを解放する。
 - PCMが0サンプルのWAVは再生前に拒否。AudioContextを生成せず、通常合成への1回の切替で開始・完了を通知する結合回帰テストを追加。
+- 音声要求をOffscreenに渡す前に、要求元タブの全フレームへ準備中を通知する。模擬ENGINEが部分WAVを送って待機する間に、Chromiumの実拡張でアイコンとAlt+Shift+Uから停止し、通信が閉じて合成が再発行されないことを確認した。
 - 再レビューの指摘を受け、Chromiumで最初の再生予約直後に320 msの処理遅延を注入し、全PCMが1回で予約されることを確認するテストを追加。同じ話者で6秒の音声が通常合成へ切り替わった直後に、短文のストリーミングが完走することも結合テストで確認する。
 
 ## 2026-11-13 回帰確認
@@ -52,6 +53,8 @@
 $env:OCR_CHROMIUM = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 node tools/test-streaming-race-browser.mjs
 ```
+
+受信待ちの停止は、拡張機能を読み込めるPlaywright版Chromiumを使って `node tools/test-streaming-stop-browser.mjs` で確認できる。別の対応Chromiumを使う場合は `OCR_CHROMIUM` に実行ファイルを指定する。
 
 ## 現時点の測定欄
 | 指標 | 通常合成 | ストリーミング | 判定 |

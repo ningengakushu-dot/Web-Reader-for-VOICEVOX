@@ -5,7 +5,7 @@ const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 
-function createHarness(initialSession = {}) {
+function createHarness(initialSession = {}, rejectEnqueue = false) {
     let onMessage;
     const sessionData = { ...initialSession };
     const tabMessages = [];
@@ -33,6 +33,9 @@ function createHarness(initialSession = {}) {
             getContexts: () => Promise.resolve([{ contextType: 'OFFSCREEN_DOCUMENT' }]),
             sendMessage(message) {
                 if (message.target === 'offscreen') offscreenMessages.push(message);
+                if (rejectEnqueue && message.type === 'ENQUEUE_TEXTS') {
+                    return Promise.resolve({ success: false, error: 'injected enqueue failure' });
+                }
                 return Promise.resolve({ success: true });
             },
             onInstalled: { addListener() {} },
@@ -107,6 +110,17 @@ function createHarness(initialSession = {}) {
             tabId === 7 && message.type === 'PLAYBACK_STOPPED'),
         '旧再生タブへ停止通知を送る');
         assert.deepEqual(h.offscreenMessages.map((message) => message.type), ['STOP_AUDIO', 'ENQUEUE_TEXTS']);
+        assert.deepEqual(h.tabMessages.filter(({ message }) => message.type === 'PLAYBACK_PREPARING')
+            .map(({ tabId }) => tabId), [8], 'preparation is only announced to the requesting tab');
+    }
+
+    {
+        const h = createHarness({}, true);
+        const response = await h.send({ type: 'GENERATE_VOICE', text: '受付に失敗する文。' },
+            { id: 'ext-id', tab: { id: 8 } });
+        assert.equal(response.success, false);
+        assert.deepEqual(h.tabMessages.map(({ message }) => message.type),
+            ['PLAYBACK_PREPARING', 'PLAYBACK_STOPPED'], 'failed enqueue must clear preparation');
     }
 
     console.log('background state contract: PASSED');

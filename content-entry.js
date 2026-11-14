@@ -25,6 +25,7 @@ class VVRadioReader {
     constructor() {
         this.active = true;
         this.isPlaying = false;
+        this.isPreparingPlayback = false;
         this.indicator = null;
         // OCRの進捗途絶を検知する見張りタイマー（armOcrStallWatchdog で設定）
         this.ocrStallWatchdog = null;
@@ -70,6 +71,7 @@ class VVRadioReader {
         this.pageShowListener = (event) => {
             if (!this.active || !event.persisted) return;
             this.isPlaying = false;
+            this.isPreparingPlayback = false;
             this.updateUIState('idle');
             this.removeOcrToast();
         };

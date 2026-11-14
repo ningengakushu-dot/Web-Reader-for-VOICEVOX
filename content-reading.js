@@ -61,7 +61,7 @@ content.parts.reading = {
 
     requestToggleReading() {
         if (!this.active) return;
-        if (this.isPlaying) {
+        if (this.isPlaying || this.isPreparingPlayback) {
             this.stopAll();
             return;
         }
@@ -83,7 +83,7 @@ content.parts.reading = {
     },
 
     toggleReading() {
-        if (this.isPlaying) {
+        if (this.isPlaying || this.isPreparingPlayback) {
             this.stopAll();
             return;
         }
@@ -171,18 +171,25 @@ content.parts.reading = {
                     this.updateUIState('error');
                     this.showPlaybackErrorToast(request.error);
                     break;
+                case "PLAYBACK_PREPARING":
+                    this.isPreparingPlayback = true;
+                    this.updateUIState('preparing');
+                    break;
                 case "PLAYBACK_STARTED":
+                    this.isPreparingPlayback = false;
                     this.isPlaying = true;
                     this.updateUIState('reading');
                     break;
                 case "PLAYBACK_ENDED":
                 case "PLAYBACK_STOPPED":
+                    this.isPreparingPlayback = false;
                     this.isPlaying = false;
                     this.updateUIState('idle');
                     break;
                 case "PLAYBACK_ERROR":
                     console.error("Web Reader for VOICEVOX: 再生エラー:", request.error);
                     this.isPlaying = false;
+                    this.isPreparingPlayback = false;
                     this.updateUIState('error');
                     this.showPlaybackErrorToast(request.error);
                     break;
@@ -250,6 +257,7 @@ content.parts.reading = {
             // 拡張機能の更新・再読み込み直後は何もしない。
         }
         this.isPlaying = false;
+        this.isPreparingPlayback = false;
         this.updateUIState('idle');
     },
 

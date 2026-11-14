@@ -162,7 +162,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // 宛先の保存を完了してから合成を開始し、直後の PLAYBACK_STARTED を取りこぼさない。
             enqueueVoiceOperation(async () => {
                 await switchPlaybackTabTo(sender.tab?.id ?? null);
-                await handleGenerateVoice(request.text, sendResponse);
+                await handleGenerateVoice(request.text, sendResponse, sender.tab?.id);
             }).catch((err) => sendResponse({ success: false, error: err.message }));
             return true;
 
@@ -225,7 +225,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                             message: `読み上げを開始できませんでした: ${res.error}`
                         }, "読み上げ開始エラー通知の送信失敗");
                     }
-                });
+                }, tabId);
             }).catch((err) => {
                 notifyTab(tabId, {
                     type: "OCR_STATUS", status: "error",
@@ -253,7 +253,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
 });
 
-async function handleGenerateVoice(text, sendResponse) {
+async function handleGenerateVoice(text, sendResponse, tabId) {
+    let preparing = false;
     try {
         // 設定の読み出しも try の内側に入れる。ここで例外が出ると応答が返らず、
         // 要求元は「無反応」のまま待たされてしまう。
@@ -271,6 +272,10 @@ async function handleGenerateVoice(text, sendResponse) {
         // Offscreen への配信完了を確認してから成功応答を返す（無音失敗の可視化）
         await sendToOffscreen({ type: 'STOP_AUDIO' });
 
+        // 旧音声の停止後に通知し、最初のPCMを待つ間も全フレームから停止できるようにする。
+        notifyTab(tabId, { type: "PLAYBACK_PREPARING" });
+        preparing = true;
+
         // 1文ずつ送ると、短い文では先頭の再生完了時にキューが空になり
         // 読み上げ終了が早すぎるタイミングで通知される。まとめて渡す。
         await sendToOffscreen({
@@ -280,6 +285,7 @@ async function handleGenerateVoice(text, sendResponse) {
         });
         sendResponse({ success: true });
     } catch (err) {
+        if (preparing) notifyTab(tabId, { type: "PLAYBACK_STOPPED" });
         console.error("Background: 準備エラー:", err);
         sendResponse({ success: false, error: err.message });
     }

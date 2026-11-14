@@ -141,6 +141,29 @@ function createHarness({ voiceError } = {}) {
     assert.equal(h.stops, 1);
     assert.equal(h.voices.length, 1);
 
+    for (const stopWithShortcut of [false, true]) {
+        const preparing = createHarness();
+        const outer = preparing.addFrame(0, { child: true });
+        const focused = preparing.addFrame(1, { selected: '準備中の本文' });
+        await preparing.click(outer);
+        for (const frame of [outer, focused]) frame.listener({ type: 'PLAYBACK_PREPARING' });
+        assert.equal(outer.reader.isPlaying, false, 'preparing does not imply audible playback');
+        if (stopWithShortcut) {
+            focused.documentListeners.get('keydown')({
+                altKey: true, shiftKey: true, code: 'KeyU', isTrusted: true,
+                preventDefault() {}, stopPropagation() {}
+            });
+            await preparing.settle();
+        } else {
+            await preparing.click(outer);
+        }
+        assert.equal(preparing.stops, 1);
+        assert.equal(preparing.voices.length, 1, 'preparing toggle must not regenerate speech');
+        for (const frame of [outer, focused]) frame.listener({ type: 'PLAYBACK_STOPPED' });
+        await preparing.click(outer);
+        assert.equal(preparing.voices.length, 2, 'a new request can start after stop');
+    }
+
     const plain = createHarness();
     const plainTop = plain.addFrame(0, { selected: '通常ページの本文' });
     await plain.click(plainTop);
