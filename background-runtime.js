@@ -175,7 +175,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
 
         case "PLAYBACK_PAGE_READY":
-            respondWith(stopPlaybackFromPreviousDocument(sender.tab.id, sender.documentId), sendResponse);
+            respondWith(stopPlaybackFromPreviousDocument(sender.tab.id, sender.documentId, sender.url), sendResponse);
             return true;
 
         case "CAPTURE_OCR_REGION": {

@@ -130,6 +130,11 @@ Chrome 157 の画面表示あり隔離プロファイル、実 ENGINE 0.26.0 CPU
 
 この2件では通常合成と5秒ストリーミングの CPU 時間は同程度で、通常合成の開始が53〜58 ms早かった。88文字の OCR 結果で報告された CPU ピークの改善は確認できていない。
 
+## 2026-11-21 画面 OCR の再読み込み時の停止
+
+- Chrome 119・158 の隔離プロファイルと模擬 ENGINE で、画面 OCR の結果タブからの `PLAYBACK_PAGE_HIDDEN` を抑止して再読み込みした。通常合成の再生中と部分 WAV の受信中の両方で旧要求が終了し、ストリーミング通信も閉じた。新しい文書で開始・停止でき、遅れて届いた旧文書の初期化通知でも新しい音声を停止しなかった。
+- Chrome は拡張機能自身の `capture.html` へのスクリプト注入を許可しない。拡張ページのトップ文書は `runtime.getContexts()` のタブ ID・フレーム ID・文書 ID で照合する。Web ページは従来の文書 ID 照合で停止する。ブラウザ回帰は `node tools/test-streaming-stop-browser.mjs tab-switch capture-reload` で実行できる。
+
 ## 残る手動確認
 
 1. 普段利用する Chrome プロファイルで拡張を読み込み、ENGINE 0.26.0 と `streaming_talk` の話者を選ぶ。普段の Web ページと OCR 結果画面で、開始・停止・再開、別タブへの切替、実キーボードの Alt+Shift+U を確認する。

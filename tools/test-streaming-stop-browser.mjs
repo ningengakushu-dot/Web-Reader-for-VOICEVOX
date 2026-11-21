@@ -24,6 +24,7 @@ let closed = 0;
 let normal = 0;
 let streamResponse = 'partial';
 let normalStatus = 200;
+let normalWav = wav;
 let heldNormal;
 let holdNormalAt;
 let normalInFlight = 0;
@@ -61,7 +62,7 @@ const server = http.createServer((request, response) => {
         normalInFlight++;
         peakNormalInFlight = Math.max(peakNormalInFlight, normalInFlight);
         response.on('close', () => normalInFlight--);
-        const finish = () => response.writeHead(normalStatus, { 'Content-Type': 'audio/wav' }).end(wav);
+        const finish = () => response.writeHead(normalStatus, { 'Content-Type': 'audio/wav' }).end(normalWav);
         if (normal === holdNormalAt) {
             heldNormal = finish;
         } else finish();
@@ -362,6 +363,56 @@ try {
         }));
         await page.reload();
         await waitFor(() => closed === closeCount + 3, 'replacement document must stop playback without pagehide');
+    };
+
+    const reloadCapture = async () => {
+        await capture.bringToFront();
+        await capture.goto(new URL('capture.html?cid=reload-regression', worker.url()).href);
+        const longWav = Buffer.alloc(44 + 12 * (wav.length - 44));
+        wav.copy(longWav, 0, 0, 44);
+        longWav.writeUInt32LE(longWav.length - 8, 4);
+        longWav.writeUInt32LE(longWav.length - 44, 40);
+        let previousOwner;
+        for (const mode of ['normal', 'auto']) {
+            await worker.evaluate(mode => chrome.storage.local.set({ synthesisMode: mode }), mode);
+            streamResponse = 'partial';
+            normalWav = longWav;
+            const startCount = started;
+            const closeCount = closed;
+            await capture.locator('#result-text').fill('再読み込みの試験です。');
+            await capture.locator('#speak-btn').click();
+            await waitFor(async () => (await status.textContent()).includes(mode === 'normal' ? '再生中' : '準備中'),
+                'capture must own the request before reload');
+            if (mode === 'auto') {
+                await waitFor(() => started === startCount + 1, 'the old document must have an open stream');
+            }
+            previousOwner = await worker.evaluate(() => getPlaybackOwner());
+            await capture.evaluate(() => {
+                const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+                chrome.runtime.sendMessage = (message, ...args) => {
+                    if (message.type !== 'PLAYBACK_PAGE_HIDDEN') return send(message, ...args);
+                };
+            });
+            await capture.reload();
+            await waitFor(() => worker.evaluate(async () => !(await getPlaybackOwner())),
+                `capture reload must stop ${mode} without pagehide`, 4000);
+            assert.equal(await stopButton.isDisabled(), true);
+            if (mode === 'auto') await waitFor(() => closed === closeCount + 1, 'reload must close the old stream');
+        }
+        normalWav = wav;
+        await capture.locator('#result-text').fill('再読み込み後の試験です。');
+        const startCount = started;
+        await capture.locator('#speak-btn').click();
+        await waitFor(() => started === startCount + 1, 'the new capture document must be able to start');
+        const current = await worker.evaluate(async ({ previousOwner, url }) => {
+            await stopPlaybackFromPreviousDocument(previousOwner.tabId, previousOwner.documentId, url);
+            return getPlaybackOwner();
+        }, { previousOwner, url: capture.url() });
+        assert.equal(current.tabId, previousOwner.tabId);
+        assert.notEqual(current.documentId, previousOwner.documentId);
+        await stopButton.click();
+        await waitFor(async () => (await status.textContent()) === '停止しました。',
+            'the new capture document must be able to stop');
     };
 
     const offscreenDestroyed = async () => {
@@ -674,7 +725,8 @@ try {
     };
 
     const regressions = { 'late-frame': lateFrameShortcut, 'capture-rejection': rejectedCaptureStop,
-        'icon-rejection': rejectedIconStop, 'tab-switch': switchTabs, 'offscreen-destroyed': offscreenDestroyed,
+        'icon-rejection': rejectedIconStop, 'tab-switch': switchTabs, 'capture-reload': reloadCapture,
+        'offscreen-destroyed': offscreenDestroyed,
         'worker-restart': restartWorker, 'frame-race': frameRace, 'tab-race': concurrentTabs,
         'network-stall': networkStall, 'normal-restart': normalRestart, 'long-bypass': longBypass,
         synthesis: synthesisPaths, 'engine-error': engineFailure, 'split-failure': failedSplit };

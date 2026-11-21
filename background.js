@@ -612,16 +612,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 // pagehide のメッセージは再読み込みで応答ポートごと消えることがある。
 // 新しいメイン文書の初期化時にも、古い文書の要求だけを終了する。
-async function stopPlaybackFromPreviousDocument(tabId, documentId) {
+async function stopPlaybackFromPreviousDocument(tabId, documentId, senderUrl) {
     const pending = pendingVoiceStarts.get(tabId);
     const owner = await getPlaybackOwner();
     const oldDocument = pending?.documentId || (owner?.tabId === tabId ? owner.documentId : null);
     if (!oldDocument || oldDocument === documentId) return;
     // 遅れて届いた旧文書の READY が、新しい文書の音声を止めないようにする。
-    const frames = await chrome.scripting.executeScript({
-        target: { tabId, documentIds: [documentId] }, func: () => true
-    }).catch(() => []);
-    const [frame] = frames;
+    // Chrome は capture.html へのスクリプト注入を許可しない。拡張ページは稼働中のコンテキストで照合する。
+    const [frame] = senderUrl?.startsWith(chrome.runtime.getURL(""))
+        ? await chrome.runtime.getContexts({
+            contextTypes: ["TAB"], tabIds: [tabId], frameIds: [0], documentIds: [documentId]
+        }).catch(() => [])
+        : await chrome.scripting.executeScript({
+            target: { tabId, documentIds: [documentId] }, func: () => true
+        }).catch(() => []);
     if (frame?.frameId === 0 && frame.documentId === documentId) await stopPlaybackForTab(tabId, oldDocument);
 }
 
@@ -860,7 +864,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
 
         case "PLAYBACK_PAGE_READY":
-            respondWith(stopPlaybackFromPreviousDocument(sender.tab.id, sender.documentId), sendResponse);
+            respondWith(stopPlaybackFromPreviousDocument(sender.tab.id, sender.documentId, sender.url), sendResponse);
             return true;
 
         case "CAPTURE_OCR_REGION": {
