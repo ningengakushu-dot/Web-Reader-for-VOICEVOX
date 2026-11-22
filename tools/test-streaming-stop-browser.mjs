@@ -402,6 +402,7 @@ try {
         normalWav = wav;
         await capture.locator('#result-text').fill('再読み込み後の試験です。');
         const startCount = started;
+        const closeCount = closed;
         await capture.locator('#speak-btn').click();
         await waitFor(() => started === startCount + 1, 'the new capture document must be able to start');
         const current = await worker.evaluate(async ({ previousOwner, url }) => {
@@ -413,6 +414,7 @@ try {
         await stopButton.click();
         await waitFor(async () => (await status.textContent()) === '停止しました。',
             'the new capture document must be able to stop');
+        await waitFor(() => closed === closeCount + 1, 'the new capture stream must close before the next case');
     };
 
     const offscreenDestroyed = async () => {

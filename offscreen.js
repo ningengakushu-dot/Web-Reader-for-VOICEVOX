@@ -625,7 +625,8 @@ function scheduleOcrWorkerIdleRelease() {
                     finishResolve();
                 };
 
-                firstScheduledAt = context.currentTime + 0.05;
+                // 予約の取消しに必要な余裕を残し、全量受信後の待ち時間を抑える。
+                firstScheduledAt = context.currentTime + 0.025;
                 try {
                     source.start(firstScheduledAt);
                 } catch (error) {
