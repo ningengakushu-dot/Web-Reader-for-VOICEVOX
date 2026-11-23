@@ -1,15 +1,18 @@
 # Chrome ウェブストア提出手順（v1.2.1 → v1.4.4）
 
-ストアで公開中のバージョンは **v1.2.1**。今回の提出は5世代分（v1.3.0 / v1.3.1 / v1.4.0 / v1.4.3 / v1.4.4）
+2026-11-23 に確認した [ストア公開版](https://chromewebstore.google.com/detail/web-reader-for-voicevox/ilcfondcjhaalpcghnhcejioopcbhhla) は **v1.2.1**。今回の提出は5世代分（v1.3.0 / v1.3.1 / v1.4.0 / v1.4.3 / v1.4.4）
 をまとめて出すことになるため、通常のパッチ更新より審査が厚くなる前提で準備する。
 
 ダッシュボードへ貼り付ける文面は、この文書と [CHROME_WEB_STORE_DASHBOARD_INFO.md](CHROME_WEB_STORE_DASHBOARD_INFO.md) に用意してある。
+
+PR #39 を含む候補 `ba47778` は Surface Pro 7 で、読み上げと停止・再開、OCR 結果タブの再読み込み時の停止を確認済み。通常合成の長文とストリーミングの短文の聴感確認が残っている。PR は Draft。[実機検証の記録](STREAMING-VALIDATION.md#2026-11-23-surface-pro-7-の検証報告)
 
 ---
 
 ## 0. 提出前の必須確認
 
-- [ ] [実機確認チェックリスト](#実機確認チェックリスト1211--144-特化) を消化した
+- [ ] [実機確認チェックリスト](#実機確認チェックリスト121--144-特化) を消化した
+- [ ] PR #39 を含める場合は、[音声を聞く確認](STREAMING-VALIDATION.md#残る手動確認) を完了した
 - [ ] `git log` で `develop` が想定どおりの状態にある
 - [ ] `main` へ統合した（統合はユーザーの明示指示が必要）
 - [ ] `manifest.json` の `version` が `1.4.4`（`options.html` の表示バージョンと一致しているか）
@@ -20,7 +23,7 @@
 powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
-`dist\web-reader-for-voicevox-1.4.4.zip`（約 27.8MB）ができる。
+公開対象として確定した `main` のコミットから実行すると、`dist\web-reader-for-voicevox-1.4.4.zip`（約 27.8MB）ができる。
 リポジトリのフォルダをそのまま zip にしないこと（掲載用の素材や作業ファイルが混入し、
 「機能と無関係なリソース」として審査で指摘される）。
 
@@ -69,7 +72,7 @@ v1.2.1 時点のものは選択読み上げしか写っていないため差し�
 
 `CHROME_WEB_STORE_DASHBOARD_INFO.md` の
 「**v1.2.1 → v1.4.4（今回の提出用・累積）**」の日本語をそのまま使う。
-v1.4.4 単体の文面ではないので注意（既存ユーザーには5世代分がまとめて届くため）。
+PR #39 を含める場合は、同じ文書の「PR #39 を含む場合の追記」も加える。
 
 ## 3. 審査で見られる点
 
@@ -174,11 +177,11 @@ v1.4.4 単体の文面ではないので注意（既存ユーザーには5世代
       （拡張機能ページで `navigator.clipboard` が拒否される場合は、文字列が選択状態になり
       「Ctrl+C でコピー」に変わることを確認する。権限追加はしない）
 - [ ] Windows 以外では接続表示だけが出て、手順は表示されない
-- [ ] VOICEVOX 未起動時のページ内トーストは v1.4.4 公開版から変わっていない
+- [ ] VOICEVOX 未起動時は、ページ内トーストに VOICEVOX の起動を案内するメッセージが表示される
 
 ### ストア審査に向けた確認
 
-- [ ] `manifest.json` の permissions / host_permissions が公開版から増えていない
+- [ ] `manifest.json` の権限を提出版と公開版で比較し、追加のホスト権限に対するChromeの表示と、既存ユーザーの更新手順を確認する。リポジトリの v1.2.1 と比較すると、v1.4.4 は `host_permissions` に `<all_urls>` を追加している。用途は [権限の使用理由](CHROME_WEB_STORE_DASHBOARD_INFO.md#2-権限の使用理由-permission-justification) を参照
 - [ ] 掲載文と拡張機能内の案内に、ファイルをダウンロードさせる導線が無い
 - [ ] 案内の主語が「すでにインストール済みの VOICEVOX」であり、VOICEVOX 公式サイトの案内と矛盾しない
 
