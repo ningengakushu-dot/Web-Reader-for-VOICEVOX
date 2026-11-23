@@ -46,6 +46,17 @@ function load(file, chrome) {
 
     assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_STARTED', target: 'background' }, tabSender).ok, false);
     assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_STARTED', target: 'background' }, offscreenSender).ok, true);
+    assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_STARTED', target: 'background' },
+        { ...offscreenSender, tab: tabSender.tab }).ok, false, 'an extension tab is not an Offscreen Document');
+    const child = { ...tabSender, frameId: 3, documentId: 'child-document' };
+    for (const type of ['PLAYBACK_PAGE_HIDDEN', 'PLAYBACK_PAGE_READY', 'TOGGLE_READING_REQUEST', 'PLAYBACK_STOP_FAILED', 'GET_PLAYBACK_STATE']) {
+        assert.strictEqual(bg.validateRequest({ type, tabId: 2, frameId: 0 }, child).ok, false);
+    }
+    for (const type of ['GENERATE_VOICE', 'STOP_ALL']) {
+        assert.strictEqual(bg.validateRequest({ type, text: '本文' }, { ...child, id: 'other' }).ok, false);
+    }
+    assert.strictEqual(bg.validateRequest({ type: 'PLAYBACK_PAGE_HIDDEN' },
+        { ...tabSender, documentId: 'main-document' }).ok, true);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_PROGRESS', target: 'background', tabId: 1, progress: Infinity }, offscreenSender).ok, false);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_PROGRESS', target: 'background', tabId: 1, progress: 0.5 }, offscreenSender).ok, true);
     assert.strictEqual(bg.validateRequest({ type: 'OCR_COMPLETE', target: 'background', tabId: 1, error: {} }, offscreenSender).ok, false);
@@ -69,6 +80,16 @@ function load(file, chrome) {
     assert.strictEqual(result.message.settings.pitchScale, -0.15);
     assert.strictEqual(result.message.settings.volumeScale, 1);
     assert.strictEqual(Object.prototype.hasOwnProperty.call(result.message.settings, 'injected'), false);
+    assert.strictEqual(result.message.settings.synthesisMode, 'normal',
+        'missing mode from old clients must keep the legacy synthesizer');
+    assert.strictEqual(off.validate({
+        type: 'ENQUEUE_TEXTS', texts: ['abc'], settings: { synthesisMode: 'auto' }
+    }).message.settings.synthesisMode, 'auto',
+    'streaming requires an explicit opt-in');
+    assert.strictEqual(off.validate({
+        type: 'ENQUEUE_TEXTS', texts: ['abc'], settings: { synthesisMode: 'unexpected' }
+    }).message.settings.synthesisMode, 'normal',
+    'malformed modes must not enable streaming');
 
     assert.strictEqual(off.validate({
         type: 'ENQUEUE_TEXTS', target: 'offscreen', texts: ['a'.repeat(200001)], settings: {}

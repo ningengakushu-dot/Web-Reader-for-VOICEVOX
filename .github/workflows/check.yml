@@ -149,6 +149,9 @@ jobs:
       - name: 音声再生終了状態の回帰検査
         run: node tests/offscreen-playback.test.js
 
+      - name: ストリーミング対応判定・PCMサンプル・再生順序検査
+        run: node tests/offscreen-streaming.test.js
+
       - name: OCR要求キュー上限の回帰検査
         run: node tests/offscreen-queue.test.js
 

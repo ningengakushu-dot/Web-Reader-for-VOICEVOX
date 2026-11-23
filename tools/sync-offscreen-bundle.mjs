@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const parts = ['offscreen-entry.js', 'offscreen-ocr.js', 'offscreen-audio.js'];
+const parts = ['offscreen-entry.js', 'offscreen-ocr.js', 'offscreen-streaming.js', 'offscreen-audio.js'];
 const expected = parts.map((file) => readFileSync(join(root, file), 'utf8')).join('');
 const bundlePath = join(root, 'offscreen.js');
 if (process.argv.includes('--check')) {

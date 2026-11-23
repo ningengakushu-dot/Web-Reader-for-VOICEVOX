@@ -493,9 +493,15 @@ async function handleShortcutRequest(tabId, source) {
     await dispatchToggleReading(tabId);
 }
 
-// アイコンとショートカットの双方で、選択があるフレーム自身に取得・読み上げさせる。
+// 準備・再生中のタブでは、選択フレームを探す前に停止を受け付ける。
 async function dispatchToggleReading(tabId) {
     if (tabId == null) return;
+    const owner = playbackOwner === undefined ? await getPlaybackOwner() : playbackOwner;
+    if (pendingVoiceStarts.has(tabId) || pendingVoiceStops.has(tabId) || owner?.tabId === tabId) {
+        // 失敗理由は同じ要求への PLAYBACK_STOP_FAILED でトップフレームに返す。
+        await stopAllForTab(tabId).catch(() => {});
+        return;
+    }
     // TOGGLE_READING は全フレームへ配信され、フォーカスを持つフレームのみが処理する。
     // 未注入のフレーム（フォーカス中の子フレーム等）が取りこぼされないよう、
     // 送信前に全フレームへ content.js を事前注入する。
@@ -506,6 +512,8 @@ async function dispatchToggleReading(tabId) {
         console.warn("Background: 選択読み上げ用 Content Script 事前注入失敗:", err.message);
     }
 
+    // 注入待ちに別経路から新しい読み上げが始まった場合は、その要求を優先する。
+    if (pendingVoiceStarts.has(tabId) || playbackOwner?.tabId === tabId) return;
     await sendMessageWithInjection(
         tabId,
         { type: "TOGGLE_READING" },
@@ -514,8 +522,13 @@ async function dispatchToggleReading(tabId) {
 }
 
 // ショートカットキーが押された時の処理
-chrome.commands.onCommand.addListener((command) => {
+chrome.commands.onCommand.addListener((command, tab) => {
     if (command !== "toggle-reading" && command !== "capture-ocr-reading") return;
+    if (tab?.id != null) {
+        if (command === "toggle-reading") handleShortcutRequest(tab.id, "commands.onCommand");
+        else startCaptureOcr(tab);
+        return;
+    }
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
         if (chrome.runtime.lastError) {
             console.warn("Background: アクティブタブの取得に失敗:", chrome.runtime.lastError.message);

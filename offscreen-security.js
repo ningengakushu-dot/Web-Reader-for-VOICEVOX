@@ -23,6 +23,8 @@
         for (const [key, [min, max]] of Object.entries(ranges)) {
             result[key] = clamp(Number(source[key]), min, max, defaults[key]);
         }
+        // 未設定・不正値は従来方式へ。ストリーミングは明示的に選ばれた場合だけ有効。
+        result.synthesisMode = source.synthesisMode === 'auto' ? 'auto' : 'normal';
         return result;
     }
 
@@ -44,6 +46,10 @@
                 type: "ENQUEUE_TEXTS",
                 target: "offscreen",
                 texts,
+                requestId: typeof message.requestId === "string" && message.requestId.length <= 64
+                    ? message.requestId : undefined,
+                offscreenDocumentId: typeof message.offscreenDocumentId === "string" && message.offscreenDocumentId.length <= 64
+                    ? message.offscreenDocumentId : undefined,
                 settings: sanitizeSettings(message.settings)
             } };
         }

@@ -34,12 +34,12 @@
         }
 
         if (request.target === "background") {
-            if (sender.url !== chrome.runtime.getURL("offscreen.html")) {
+            if (sender.tab || sender.url !== chrome.runtime.getURL("offscreen.html")) {
                 return { ok: false, error: "許可されていない通知元です" };
             }
             const offscreenTypes = new Set([
                 "OCR_PROGRESS", "OCR_COMPLETE", "PLAYBACK_STARTED", "PLAYBACK_ENDED",
-                "PLAYBACK_ERROR", "PLAYBACK_STOPPED"
+                "PLAYBACK_ERROR"
             ]);
             if (!offscreenTypes.has(request.type)) {
                 return { ok: false, error: "不明な通知です" };
@@ -76,6 +76,10 @@
                     return { ok: false, error: "エラー情報が大きすぎます" };
                 }
             }
+            if (request.type.startsWith("PLAYBACK_") && request.requestId != null
+                && (typeof request.requestId !== "string" || request.requestId.length > 64)) {
+                return { ok: false, error: "再生要求IDが不正です" };
+            }
             if (request.type === "PLAYBACK_ERROR"
                 && (typeof request.error !== "string" || request.error.length > 2000)) {
                 return { ok: false, error: "再生エラー情報が不正です" };
@@ -85,10 +89,16 @@
 
         const allowed = new Set([
             "CLAIM_UPDATE_NOTICE", "SHORTCUT_PRESSED", "OPEN_OPTIONS", "CHECK_CONNECTION",
-            "GET_SPEAKERS", "GET_SPEAKER_ICON", "GENERATE_VOICE", "STOP_ALL",
+            "GET_SPEAKERS", "GET_SPEAKER_ICON", "GENERATE_VOICE", "STOP_ALL", "PLAYBACK_PAGE_HIDDEN", "PLAYBACK_PAGE_READY",
             "CAPTURE_OCR_REGION", "TOGGLE_READING_REQUEST", "SELECTION_REQUIRED", "SELECTION_READING_ERROR"
         ]);
         if (!allowed.has(request.type)) return { ok: false, error: "不明な要求です" };
+
+        if (["PLAYBACK_PAGE_HIDDEN", "PLAYBACK_PAGE_READY"].includes(request.type)
+            && (!isTabSender(sender) || sender.frameId !== 0 || typeof sender.documentId !== "string"
+                || !sender.documentId)) {
+            return { ok: false, error: "メイン文書を確認できません" };
+        }
 
         if (["CLAIM_UPDATE_NOTICE", "SHORTCUT_PRESSED", "CAPTURE_OCR_REGION",
             "TOGGLE_READING_REQUEST", "SELECTION_REQUIRED", "SELECTION_READING_ERROR"].includes(request.type)
