@@ -166,7 +166,8 @@ speaker.addEventListener("change", () => {
     setStyles(speakers[speaker.selectedIndex], null);
     saveSettings();
 });
-for (const input of [style, speed, volume]) input.addEventListener("change", saveSettings);
+style.addEventListener("change", saveSettings);
+for (const input of [speed, volume]) input.addEventListener("input", saveSettings);
 document.addEventListener("keydown", (event) => {
     if (event.isComposing || event.keyCode === 229 || event.repeat) return;
     if (event.key === "Enter" && event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {

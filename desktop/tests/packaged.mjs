@@ -160,9 +160,13 @@ try {
         await page.selectOption("#speaker", { index: 0 });
         const styleCount = await page.locator("#style option").count();
         await page.selectOption("#style", { index: Math.min(1, styleCount - 1) });
+        await page.fill("#speed", "");
+        const countBefore = await app.evaluate(() => global.readerQA.chunks.length);
+        await page.keyboard.press("Control+Enter");
+        assert.equal(await page.locator("#speed").evaluate(input => input.validity.valueMissing), true);
+        assert.equal(await app.evaluate(() => global.readerQA.chunks.length), countBefore);
         await page.fill("#speed", "1.25");
         await page.fill("#volume", "65");
-        await page.locator("#volume").press("Tab");
         const ids = ["speaker", "style", "speed", "volume"];
         const values = () => Promise.all(ids.map(id => page.inputValue("#" + id)));
         const selected = await values();
