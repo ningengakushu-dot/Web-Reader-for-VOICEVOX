@@ -66,16 +66,10 @@ function onState({ state, index, total, error }) {
     }
 }
 
-// A run can have several pending units sharing one signal. Send cancellation
-// once while the old run still owns the outstanding requests.
-const cancelledSignals = new WeakSet();
+// The producer has one outstanding engine call. Cancel it before a new run starts.
 async function synthesize(chunk, settings, signal) {
     signal.throwIfAborted();
-    const cancel = () => {
-        if (cancelledSignals.has(signal)) return;
-        cancelledSignals.add(signal);
-        window.reader.cancel();
-    };
+    const cancel = () => window.reader.cancel();
     signal.addEventListener("abort", cancel, { once: true });
     try {
         const result = await window.reader.synthesize(chunk, settings);
@@ -90,6 +84,7 @@ async function synthesize(chunk, settings, signal) {
 const player = createPlayer({
     synthesize,
     onState,
+    readingCost: window.speechCost,
     onTiming: (detail) => document.dispatchEvent(new CustomEvent("reader-timing", { detail, bubbles: true }))
 });
 

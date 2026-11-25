@@ -6,6 +6,8 @@ WebページのテキストをVOICEVOXの声で読み上げる無料のChrome拡
 
 Chrome 119以降に対応しています。読み上げるには、PCに[VOICEVOX](https://voicevox.hiroshiba.jp/)をインストールして起動してください。
 
+Windows で文章を貼り付けて読み上げるには、単体で起動できる [Windows 版の利用手順](desktop/README.md) を参照してください。
+
 ![Web Reader for VOICEVOXの機能紹介](images/Web-Reader-for-VOICEVOX_version_1xx_1280.jpg)
 
 ## 使い方

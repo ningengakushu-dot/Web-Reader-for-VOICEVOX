@@ -1,0 +1,31 @@
+name: windows-reader
+on:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'desktop/**'
+      - 'background-speech.js'
+      - '.github/workflows/windows-reader.yml'
+permissions:
+  contents: read
+jobs:
+  windows-reader:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:packaged -- --offline-only
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-local-reader-x64
+          path: desktop/dist/*.zip
+          if-no-files-found: error
+          retention-days: 14

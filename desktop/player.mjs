@@ -102,7 +102,7 @@ export function createPlayer({
         const item = run.ready.shift();
         run.readySeconds -= item.seconds;
         run.readyBytes -= item.blob.size;
-        const clip = {url: URL.createObjectURL(item.blob), audio: null};
+        const clip = {url: URL.createObjectURL(item.blob), audio: null, index: item.index};
         run.clip = clip;
         const live = () => current === run && run.clip === clip;
         const playbackError = () => {
@@ -112,10 +112,11 @@ export function createPlayer({
             const audio = createAudio(clip.url);
             clip.audio = audio;
             let started = false;
+            // Include intentional rebuffering before play(), exclude media-device latency.
+            const synthesisWaitMs = run.lastEnd == null || continuous ? 0 : performance.now() - run.lastEnd;
             audio.onplaying = () => {
                 if (!live() || started) return;
                 started = true;
-                const synthesisWaitMs = run.lastEnd == null ? 0 : Math.max(0, item.readyAt - run.lastEnd);
                 onTiming({event: "playing", index: item.index, at: performance.now(), synthesisWaitMs});
                 report(run, "playing", item.index);
             };
@@ -155,7 +156,7 @@ export function createPlayer({
                 const blob = new Blob([bytes], {type: "audio/wav"});
                 run.synthesisRate = (readyAt - run.synthesisStarted) / 1000 / seconds;
                 run.secondsPerUnit = seconds / run.costs[index];
-                run.ready.push({index, readyAt, seconds, blob});
+                run.ready.push({index, seconds, blob});
                 run.readySeconds += seconds;
                 run.readyBytes += blob.size;
                 run.next++;
@@ -191,7 +192,7 @@ export function createPlayer({
     function stop() {
         const run = current;
         if (!run) return;
-        const index = run.ready[0]?.index ?? run.next;
+        const index = run.clip?.index ?? run.ready[0]?.index ?? run.next;
         release(run);
         report(run, "stopped", Math.min(index, run.chunks.length - 1));
     }
