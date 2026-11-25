@@ -1,13 +1,20 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const defaults = { styleId: 3, speed: 1, volume: 1 };
+const defaults = { styleId: 3, speed: 1, volume: 1, pitch: 0, intonation: 1, pause: 1 };
+
+function inRange(value, min, max) {
+    return Number.isFinite(value) && value >= min && value <= max;
+}
 
 function preferences(value) {
-    if (!value || !Number.isSafeInteger(value.styleId) || value.styleId < 0 || value.styleId > 1000000 ||
-        !Number.isFinite(value.speed) || value.speed < 0.5 || value.speed > 2 ||
-        !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 1) return null;
-    return { styleId: value.styleId, speed: value.speed, volume: value.volume };
+    if (!value) return null;
+    // Earlier desktop profiles contain just styleId, speed and volume.
+    const { styleId, speed, volume, pitch = defaults.pitch, intonation = defaults.intonation, pause = defaults.pause } = value;
+    if (!Number.isSafeInteger(styleId) || !inRange(styleId, 0, 1000000) ||
+        !inRange(speed, 0.5, 2) || !inRange(volume, 0, 2) ||
+        !inRange(pitch, -0.15, 0.15) || !inRange(intonation, 0, 2) || !inRange(pause, 0, 2)) return null;
+    return { styleId, speed, volume, pitch, intonation, pause };
 }
 
 function load(directory) {
@@ -35,4 +42,4 @@ function save(directory, value) {
     }
 }
 
-module.exports = { load, save };
+module.exports = { load, save, preferences };

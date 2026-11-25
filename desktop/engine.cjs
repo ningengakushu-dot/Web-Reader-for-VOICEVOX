@@ -1,6 +1,7 @@
 "use strict";
 
 const http = require("node:http");
+const { preferences } = require("./settings.cjs");
 
 const JSON_LIMIT = 4 * 1024 * 1024;
 const WAV_LIMIT = 16 * 1024 * 1024;
@@ -24,6 +25,7 @@ async function request(path, { method, body, limit, timeout, signal }) {
             req.end(body);
         });
         try {
+            if (method === "POST" && response.statusCode >= 500 && response.statusCode < 600) throw new Error("retryable");
             if (response.statusCode !== 200 || Number(response.headers["content-length"]) > limit) {
                 throw new Error("synthesis");
             }
@@ -39,6 +41,7 @@ async function request(path, { method, body, limit, timeout, signal }) {
             response.destroy();
         }
     } catch (error) {
+        if (error.message === "retryable") throw error;
         if (!signal?.aborted && (deadline.aborted || ["ECONNREFUSED", "ECONNRESET", "EPIPE",
             "ENETUNREACH", "EHOSTUNREACH", "ETIMEDOUT"].includes(error.code))) {
             throw new Error("offline");
@@ -81,21 +84,64 @@ async function speakers(signal) {
     return result;
 }
 
-async function synthesize(text, settings, signal) {
-    const { styleId, speed, volume } = settings ?? {};
-    if (typeof text !== "string" || text.length > 1200 || Array.from(text).length > 600 ||
-        !/[\p{L}\p{N}]/u.test(text) || /[\p{Cc}\p{Cs}]/u.test(text) ||
-        !validStyleId(styleId) || !Number.isFinite(speed) || speed < 0.5 || speed > 2 ||
-        !Number.isFinite(volume) || volume < 0 || volume > 1) {
-        throw new Error("invalid");
-    }
+async function audioQuery(text, styleId, signal) {
     const params = new URLSearchParams({ speaker: String(styleId), text });
     const query = parseJson(await request(`/audio_query?${params}`, {
         method: "POST", limit: JSON_LIMIT, timeout: 15000, signal
     }));
     if (!query || !Array.isArray(query.accent_phrases)) throw new Error("synthesis");
+    return query;
+}
+
+function readingSignature(query) {
+    const sounds = [];
+    const boundaries = [];
+    for (const phrase of query.accent_phrases) {
+        if (!Array.isArray(phrase?.moras)) return null;
+        for (const mora of phrase.moras) {
+            if (!mora?.vowel && !mora?.text) return null;
+            sounds.push(String(mora.consonant || "") + String(mora.vowel || mora.text));
+        }
+        boundaries.push(sounds.length);
+    }
+    return sounds.length ? {phonemes: sounds.join(" "), boundaries} : null;
+}
+
+async function prepareQuery(text, styleId, signal) {
+    const original = await audioQuery(text, styleId, signal);
+    const candidate = text.replace(/[」』）)｣〉》】〕]\s*[「『（(｢〈《【〔]/g, "、")
+        .replace(/[「」『』（）()｢｣〈〉《》【】〔〕]/g, "");
+    if (!candidate || candidate === text) return original;
+    // VOICEVOX can read an abbreviation or a date differently without its
+    // brackets. Only merged phrases with the same phonemes can lose the pause.
+    let alternative;
+    try {
+        alternative = await audioQuery(candidate, styleId, signal);
+    } catch (error) {
+        if (signal?.aborted) throw error;
+        return original;
+    }
+    const before = readingSignature(original);
+    const after = readingSignature(alternative);
+    if (!before || !after || before.phonemes !== after.phonemes) return original;
+    const boundaries = new Set(before.boundaries);
+    return after.boundaries.every(at => boundaries.has(at)) ? alternative : original;
+}
+
+async function synthesize(text, settings, signal) {
+    const selected = preferences(settings);
+    if (typeof text !== "string" || text.length > 1200 || Array.from(text).length > 600 ||
+        !/[\p{L}\p{N}]/u.test(text) || /[\p{Cc}\p{Cs}]/u.test(text) ||
+        !selected) {
+        throw new Error("invalid");
+    }
+    const { styleId, speed, pitch, intonation, volume, pause } = selected;
+    const query = await prepareQuery(text, styleId, signal);
     query.speedScale = speed;
+    query.pitchScale = pitch;
+    query.intonationScale = intonation;
     query.volumeScale = volume;
+    query.pauseLengthScale = pause;
     query.prePhonemeLength = query.postPhonemeLength = 0.1 * speed;
     let body;
     try {

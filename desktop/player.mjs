@@ -2,6 +2,22 @@ const MAX_READY_SECONDS = 45;
 const MAX_READY_ITEMS = 256;
 const MAX_LOOKAHEAD_ITEMS = 1024;
 const MAX_READY_BYTES = 64 * 1024 * 1024;
+const MAX_SPLIT_DEPTH = 3;
+
+// Match the extension's bounded recovery for engine 5xx (e.g. too many accent phrases).
+function splitRejectedText(text) {
+    const chars = Array.from(text);
+    if (chars.length < 8) return null;
+    const middle = Math.floor(chars.length / 2);
+    let cut = 0;
+    for (let i = 1; i < chars.length; i++) {
+        if (/[。．！？!?、，,」』）)]/.test(chars[i - 1])
+            && (!cut || Math.abs(i - middle) < Math.abs(cut - middle))) cut = i;
+    }
+    cut ||= middle;
+    const parts = [chars.slice(0, cut).join("").trim(), chars.slice(cut).join("").trim()];
+    return parts.every(part => /[\p{L}\p{N}]/u.test(part)) ? parts : null;
+}
 
 // VOICEVOX returns PCM WAVE. Walk the RIFF chunks rather than assuming a
 // 44-byte header (e.g. LIST may precede data).
@@ -34,15 +50,19 @@ function startupDeficit(run, now) {
     let deficit = 0;
     const rate = run.synthesisRate * 1.2;
     const horizon = MAX_READY_SECONDS / Math.max(0.1, 1 - rate);
+    const elapsed = run.synthesisStarted == null ? 0 : (now - run.synthesisStarted) / 1000;
     for (let i = run.next; i < run.chunks.length && i < run.next + MAX_LOOKAHEAD_ITEMS; i++) {
-        const seconds = run.costs[i] * run.secondsPerUnit;
-        synthesis += seconds * rate;
+        const seconds = run.chunks[i].cost * run.secondsPerUnit;
+        synthesis += Math.max(0, seconds * rate - (i === run.next ? elapsed : 0));
         deficit = Math.max(deficit, synthesis - audio);
         audio += seconds;
         if (audio >= horizon) break;
     }
-    const elapsed = run.synthesisStarted == null ? 0 : (now - run.synthesisStarted) / 1000;
-    return Math.max(0, deficit + 0.1 - elapsed - run.readySeconds);
+    const wait = Math.max(0, deficit + 0.1 - run.readySeconds);
+    const remaining = Math.max(0, run.chunks[run.next].cost * run.secondsPerUnit * rate - elapsed);
+    // When later units cause the shortfall, the in-flight result must arrive
+    // before we can make up the deficit. Its completion will retry playback.
+    return wait > remaining + 0.001 ? Infinity : wait;
 }
 
 export function createPlayer({
@@ -53,7 +73,7 @@ export function createPlayer({
     let closed = false;
 
     function report(run, state, index, error) {
-        onState({state, index, total: run.chunks.length, error});
+        onState({state, index, total: run.total, error});
     }
 
     function releaseClip(run) {
@@ -67,7 +87,7 @@ export function createPlayer({
             audio.removeAttribute("src");
             audio.load();
         }
-        URL.revokeObjectURL(clip.url);
+        if (clip.url) URL.revokeObjectURL(clip.url);
     }
 
     function release(run) {
@@ -90,25 +110,30 @@ export function createPlayer({
     }
 
     function playNext(run, continuous = false) {
-        if (current !== run || run.clip || !run.ready.length) return;
+        if (current !== run || run.clip) return;
+        if (!run.ready.length) {
+            if (run.failure) fail(run, run.failure.index, run.failure.error);
+            return;
+        }
         clearTimeout(run.timer);
-        if (!continuous && !full(run) && run.next < run.chunks.length) {
+        if (!continuous && !run.failure && !full(run) && run.next < run.chunks.length) {
             const wait = startupDeficit(run, performance.now());
             if (wait > 0.001) {
-                run.timer = setTimeout(() => playNext(run), Math.min(wait * 1000, 60000));
+                if (Number.isFinite(wait)) run.timer = setTimeout(() => playNext(run), Math.min(wait * 1000, 60000));
                 return;
             }
         }
         const item = run.ready.shift();
         run.readySeconds -= item.seconds;
         run.readyBytes -= item.blob.size;
-        const clip = {url: URL.createObjectURL(item.blob), audio: null, index: item.index};
+        const clip = {url: null, audio: null, index: item.index};
         run.clip = clip;
         const live = () => current === run && run.clip === clip;
         const playbackError = () => {
-            if (live()) fail(run, item.index, new Error("音声を再生できません。Windowsの出力デバイスを確認してください。"));
+            if (live()) fail(run, item.index, new Error("playback"));
         };
         try {
+            clip.url = URL.createObjectURL(item.blob);
             const audio = createAudio(clip.url);
             clip.audio = audio;
             let started = false;
@@ -125,13 +150,13 @@ export function createPlayer({
                 run.lastEnd = performance.now();
                 onTiming({event: "ended", index: item.index, at: run.lastEnd});
                 releaseClip(run);
-                if (item.index + 1 === run.chunks.length) {
+                if (run.ready.length || run.failure) {
+                    playNext(run, true);
+                } else if (run.next === run.chunks.length) {
                     release(run);
                     report(run, "finished", item.index);
-                } else if (run.ready.length) {
-                    playNext(run, true);
                 } else {
-                    report(run, "preparing", item.index + 1);
+                    report(run, "preparing", run.chunks[run.next].index);
                 }
             };
             audio.onerror = playbackError;
@@ -142,20 +167,36 @@ export function createPlayer({
         void produce(run);
     }
 
+    function unit(text, index, depth = 0) {
+        return {text, index, depth, cost: Math.max(1, readingCost(text))};
+    }
+
     async function produce(run) {
-        if (run.producing || current !== run) return;
+        if (run.producing || run.failure || current !== run) return;
         run.producing = true;
+        let index;
         try {
             while (current === run && run.next < run.chunks.length && !full(run)) {
-                const index = run.next;
+                const chunk = run.chunks[run.next];
+                const {text, depth, cost} = chunk;
+                index = chunk.index;
                 run.synthesisStarted = performance.now();
-                const bytes = await synthesize(run.chunks[index], run.settings, run.controller.signal);
+                let bytes;
+                try {
+                    bytes = await synthesize(text, run.settings, run.controller.signal);
+                } catch (error) {
+                    if (current !== run) return;
+                    const parts = error.message === "retryable" && depth < MAX_SPLIT_DEPTH && splitRejectedText(text);
+                    if (!parts) throw error;
+                    run.chunks.splice(run.next, 1, ...parts.map(part => unit(part, index, depth + 1)));
+                    continue;
+                }
                 if (current !== run) return;
                 const seconds = wavSeconds(bytes);
                 const readyAt = performance.now();
                 const blob = new Blob([bytes], {type: "audio/wav"});
                 run.synthesisRate = (readyAt - run.synthesisStarted) / 1000 / seconds;
-                run.secondsPerUnit = seconds / run.costs[index];
+                run.secondsPerUnit = seconds / cost;
                 run.ready.push({index, seconds, blob});
                 run.readySeconds += seconds;
                 run.readyBytes += blob.size;
@@ -165,7 +206,11 @@ export function createPlayer({
                 playNext(run);
             }
         } catch (error) {
-            fail(run, run.next, error);
+            if (current !== run) return;
+            // The engine can fail several units ahead of the listener. Drain only
+            // the earlier WAVs, then report the first unit we could not read.
+            run.failure = {index, error};
+            playNext(run);
         } finally {
             run.producing = false;
         }
@@ -175,8 +220,8 @@ export function createPlayer({
         if (closed) return;
         if (current) release(current);
         const run = {
-            chunks: chunks.slice(), settings: {...settings}, controller: new AbortController(),
-            costs: chunks.map((text) => Math.max(1, readingCost(text))),
+            chunks: chunks.map((text, index) => unit(text, index)), total: chunks.length,
+            settings: {...settings}, controller: new AbortController(), failure: null,
             ready: [], readySeconds: 0, readyBytes: 0, next: 0, clip: null, lastEnd: null,
             producing: false, synthesisStarted: null, timer: null
         };
@@ -192,9 +237,9 @@ export function createPlayer({
     function stop() {
         const run = current;
         if (!run) return;
-        const index = run.clip?.index ?? run.ready[0]?.index ?? run.next;
+        const index = run.clip?.index ?? run.ready[0]?.index ?? run.chunks[run.next]?.index ?? run.total - 1;
         release(run);
-        report(run, "stopped", Math.min(index, run.chunks.length - 1));
+        report(run, "stopped", index);
     }
 
     function close() {

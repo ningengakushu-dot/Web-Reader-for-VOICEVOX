@@ -42,12 +42,13 @@ test("voice settings are applied to the same style and WAV bytes are isolated", 
             res.end("RIFF0000WAVE1234");
         }
     });
-    const wav = await synthesize(sample, settings);
+    const wav = await synthesize(sample, {...settings, pitch: -0.15, intonation: 0.4, pause: 0, volume: 2});
     assert.deepEqual(paths.map(url => url.pathname), ["/audio_query", "/synthesis"]);
     assert.deepEqual(paths.map(url => url.searchParams.get("speaker")), ["3", "3"]);
     assert.equal(paths[0].searchParams.get("text"), sample);
     assert.deepEqual(bodies, [{
-        accent_phrases: [], outputSamplingRate: 24000, speedScale: 1.5, volumeScale: 0.7,
+        accent_phrases: [], outputSamplingRate: 24000, speedScale: 1.5, volumeScale: 2,
+        pitchScale: -0.15, intonationScale: 0.4, pauseLengthScale: 0,
         prePhonemeLength: 0.1 * 1.5, postPhonemeLength: 0.1 * 1.5
     }]);
     assert.equal(wav.buffer.byteLength, wav.byteLength);
@@ -70,7 +71,8 @@ test("invalid input is rejected before contacting the engine", async t => {
         await assert.rejects(synthesize(text, settings), { message: "invalid" });
     }
     for (const values of [{ styleId: -1 }, { styleId: "1" }, { speed: NaN }, { speed: 2.1 },
-        { volume: -1 }, { volume: Infinity }]) {
+        { volume: -1 }, { volume: Infinity }, { volume: 2.1 }, { pitch: -0.16 }, { pitch: 0.16 },
+        { intonation: -0.1 }, { intonation: 2.1 }, { pause: -1 }, { pause: 2.1 }]) {
         await assert.rejects(synthesize("声", { ...settings, ...values }), { message: "invalid" });
     }
     assert.equal(spy.mock.callCount(), 0);
@@ -122,4 +124,48 @@ test("a refused connection is reported as offline", async t => {
     const original = http.request;
     t.mock.method(http, "request", (options, cb) => original({ ...options, port }, cb));
     await assert.rejects(speakers(), { message: "offline" });
+});
+
+test("only HTTP 5xx from a required query or synthesis asks the player to split", async t => {
+    const replies = [500, 422, 200, 503, 200, 404];
+    await mockEngine(t, (_, res) => {
+        res.statusCode = replies.shift();
+        res.end('{"accent_phrases":[]}');
+    });
+    for (const message of ["retryable", "synthesis", "retryable", "synthesis"]) {
+        await assert.rejects(synthesize("長い文章を読む。", settings), {message});
+    }
+    assert.equal(replies.length, 0);
+});
+
+test("bracket candidates keep phonemes and existing accent boundaries, and preserve adjacent quotes", async t => {
+    const phrase = (...vowels) => ({moras: vowels.map(vowel => ({vowel}))});
+    const original = [phrase("a"), phrase("i", "U")];
+    const candidates = [
+        [phrase("a", "i", "U")],  // removing a boundary is allowed
+        [phrase("a", "i", "u")],  // de-voicing changed
+        [phrase("a", "i"), phrase("U")], // same phonemes but a new boundary
+        null // optional query failed
+    ];
+    const requested = [], chosen = [];
+    await mockEngine(t, async (req, res) => {
+        const url = new URL(req.url, "http://localhost");
+        if (url.pathname === "/audio_query") {
+            const text = url.searchParams.get("text");
+            requested.push(text);
+            const candidate = text === "はい、そうです";
+            const phrases = candidate ? candidates.shift() : original;
+            if (!phrases) res.statusCode = 500;
+            res.end(JSON.stringify({accent_phrases: phrases, kana: candidate ? "candidate" : "original"}));
+            return;
+        }
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        chosen.push(JSON.parse(body).kana);
+        res.end("RIFF0000WAVE1234");
+    });
+    const originalText = "「はい」「そうです」";
+    for (let i = 0; i < 4; i++) await synthesize(originalText, settings);
+    assert.deepEqual(requested, Array.from({length: 4}, () => [originalText, "はい、そうです"]).flat());
+    assert.deepEqual(chosen, ["candidate", "original", "original", "original"]);
 });
