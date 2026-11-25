@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; media-src blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VOICEVOX リーダー</title>
+    <link rel="stylesheet" href="./style.css">
+    <script defer src="./background-speech.js"></script>
+    <script type="module" src="./renderer.mjs"></script>
+</head>
+<body>
+    <main>
+        <header>
+            <h1><span class="sound-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>VOICEVOX リーダー</h1>
+            <div class="engine">
+                <span id="connection" role="status">接続を確認中…</span>
+                <button type="button" id="reconnect" disabled>再接続</button>
+            </div>
+        </header>
+        <section class="editor" aria-labelledby="text-label">
+            <label id="text-label" for="text">本文</label>
+            <textarea id="text" placeholder="読み上げたい文章を入力、または貼り付けてください。" autofocus autocomplete="off" spellcheck="false"></textarea>
+        </section>
+        <fieldset>
+            <legend>読み上げ設定</legend>
+            <div class="fields">
+                <label>話者<select id="speaker" disabled></select></label>
+                <label>スタイル<select id="style" disabled></select></label>
+                <label>話速（倍）<input id="speed" type="number" min="0.5" max="2" step="0.05" value="1" disabled></label>
+                <label>音量（％）<input id="volume" type="number" min="0" max="100" step="1" value="100" disabled></label>
+            </div>
+            <span id="settings-notice" role="status"></span>
+        </fieldset>
+        <footer>
+            <div class="actions">
+                <button type="button" id="read" aria-keyshortcuts="Control+Enter" disabled>読み上げ <kbd>Ctrl+Enter</kbd></button>
+                <button type="button" id="stop" aria-keyshortcuts="Escape" disabled>停止 <kbd>Esc</kbd></button>
+            </div>
+            <span id="status" role="status" data-state="stopped">停止</span>
+        </footer>
+    </main>
+</body>
+</html>

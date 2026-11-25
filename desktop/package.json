@@ -1,0 +1,17 @@
+{
+  "name": "voicevox-local-reader",
+  "productName": "VOICEVOX Local Reader",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.*",
+    "build": "node build.mjs",
+    "test:packaged": "node tests/packaged.mjs"
+  },
+  "devDependencies": {
+    "electron": "45.5.0",
+    "playwright-core": "1.65.1"
+  }
+}

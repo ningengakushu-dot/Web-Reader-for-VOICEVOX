@@ -1,0 +1,80 @@
+:root {
+    color-scheme: light;
+    color: #192c30;
+    background: #f5f7f6;
+    font: 16px/1.5 "Yu Gothic UI", "Meiryo", sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main {
+    max-width: 72rem;
+    min-height: 100vh;
+    margin: auto;
+    padding: clamp(16px, 4vw, 40px);
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+header, footer, .engine, .actions, h1, .sound-mark {
+    display: flex;
+    align-items: center;
+}
+header, footer { justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+h1 { gap: 11px; margin: 0; font-size: 1.4rem; letter-spacing: .01em; }
+.sound-mark {
+    justify-content: center;
+    gap: 3px;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: #0a665b;
+}
+.sound-mark i { width: 3px; height: 10px; border-radius: 3px; background: white; }
+.sound-mark i:nth-child(2) { height: 21px; }
+.sound-mark i:nth-child(3) { height: 15px; }
+.engine { gap: 10px; font-size: .88rem; color: #43595a; }
+.editor { display: flex; flex-direction: column; flex: 1; gap: 8px; }
+#text-label, legend { font-weight: 650; }
+textarea, select, input, button {
+    font: inherit;
+    color: inherit;
+    background: white;
+    border: 1px solid #869a97;
+    border-radius: 6px;
+}
+textarea {
+    flex: 1;
+    width: 100%;
+    min-height: 10rem;
+    resize: vertical;
+    padding: 16px 18px;
+    font-size: 1.1rem;
+    line-height: 1.8;
+}
+textarea::placeholder { color: #647574; }
+fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
+legend { margin-bottom: 8px; padding: 0; }
+.fields {
+    display: grid;
+    grid-template-columns: minmax(9rem, 1.5fr) minmax(9rem, 1.5fr) repeat(2, minmax(6rem, 1fr));
+    gap: 12px;
+}
+.fields label { font-size: .88rem; color: #405655; }
+select, input { display: block; width: 100%; margin-top: 4px; padding: 7px 9px; font-size: 1rem; }
+button { padding: 8px 14px; font-weight: 600; cursor: pointer; }
+button:enabled:hover { background: #e7eeeb; }
+#reconnect { padding: 4px 10px; }
+#read { background: #0a665b; border-color: #0a665b; color: white; }
+#read:enabled:hover { background: #074e46; }
+:disabled { opacity: .55; cursor: default; }
+:focus-visible { outline: 3px solid #177dca; outline-offset: 3px; }
+.actions { gap: 10px; }
+kbd { margin-left: 4px; font: .76rem "Segoe UI", sans-serif; }
+footer { border-top: 1px solid #c9d6d2; padding-top: 16px; }
+#status { font-weight: 600; }
+#status[data-state="playing"] { color: #085c4e; }
+#status[data-state="error"], #settings-notice, #connection[data-state="offline"] { color: #9c322a; }
+@media (max-width: 640px) {
+    .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    main { gap: 14px; }
+}
