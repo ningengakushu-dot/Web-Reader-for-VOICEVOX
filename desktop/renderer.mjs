@@ -6,13 +6,20 @@ const speaker = byId("speaker");
 const style = byId("style");
 const speed = byId("speed");
 const volume = byId("volume");
+const pitch = byId("pitch");
+const intonation = byId("intonation");
+const pause = byId("pause");
+const voiceDetails = byId("voice-details");
+const numericSettings = [speed, volume, pitch, intonation, pause];
+const settingsInputs = [speaker, style, ...numericSettings];
 const read = byId("read");
 const stop = byId("stop");
 const reconnect = byId("reconnect");
 const connection = byId("connection");
 const status = byId("status");
+const announcement = byId("announcement");
 const settingsNotice = byId("settings-notice");
-const offlineMessage = "VOICEVOXを起動して再接続してください";
+const offlineMessage = "VOICEVOXを起動して再接続してください。";
 const maxInputLength = 100_000;
 
 let speakers = [];
@@ -20,22 +27,30 @@ let preferredStyleId = 3;
 let connecting = false;
 let closed = false;
 let active = false;
+let playbackStarted = false;
 let saveRevision = 0;
+let composing = false;
 
 function refreshControls() {
     const connected = speakers.length > 0;
-    read.disabled = !connected || connecting || active;
-    stop.disabled = !active;
-    reconnect.disabled = connecting || active;
-    for (const input of [speaker, style, speed, volume]) {
-        input.disabled = !connected || connecting || active;
-    }
+    const busy = connecting || active;
+    // Action buttons remain focusable when their availability changes.
+    read.setAttribute("aria-disabled", String(!connected || busy));
+    stop.setAttribute("aria-disabled", String(!active));
+    reconnect.setAttribute("aria-disabled", String(busy));
+    const settingsUnavailable = !connected || busy;
+    // Ctrl+Enter also works from settings. Move focus before disabling its field.
+    if (settingsUnavailable && settingsInputs.includes(document.activeElement)) (active ? stop : text).focus();
+    for (const input of settingsInputs) input.disabled = settingsUnavailable;
 }
 
-function showState(state, message) {
+function showState(state, message, notification = message) {
+    text.removeAttribute("aria-invalid");
     status.dataset.state = state;
     status.textContent = message;
+    if (notification !== null) announcement.textContent = notification;
     active = state === "preparing" || state === "playing";
+    if (!active) playbackStarted = false;
     refreshControls();
 }
 
@@ -51,16 +66,24 @@ function onState({ state, index, total, error }) {
     if (closed) return;
     const position = `（${index + 1} / ${total}）`;
     switch (state) {
-        case "preparing": showState(state, "準備中" + position); break;
-        case "playing": showState(state, "再生中" + position); break;
+        // Keep the current position available without speaking over every clip.
+        case "preparing":
+            showState(state, "準備中" + position, active ? null : "読み上げを準備しています。");
+            break;
+        case "playing":
+            showState(state, "再生中" + position, playbackStarted ? null : "読み上げを開始しました。");
+            playbackStarted = true;
+            break;
         case "stopped": showState(state, "停止"); break;
         case "finished": showState(state, "読み上げ完了"); break;
         case "error":
             if (error?.message === "offline") {
                 showDisconnected();
-                showState(state, offlineMessage);
+                showState(state, `読み上げを中断しました${position}。${offlineMessage}`);
+            } else if (error?.message === "playback") {
+                showState(state, `音声を再生できませんでした${position}。Windowsの音声出力先を確認して、もう一度読み上げてください。`);
             } else {
-                showState(state, "エラー" + position + "　音声を読み上げられませんでした。再度お試しください。");
+                showState(state, `音声を合成できませんでした${position}。もう一度読み上げてください。`);
             }
             break;
     }
@@ -89,26 +112,43 @@ const player = createPlayer({
 });
 
 function selectedSettings() {
-    return { styleId: Number(style.value), speed: speed.valueAsNumber, volume: volume.valueAsNumber / 100 };
+    return {
+        styleId: Number(style.value),
+        speed: speed.valueAsNumber,
+        volume: volume.valueAsNumber / 100,
+        pitch: pitch.valueAsNumber,
+        intonation: intonation.valueAsNumber,
+        pause: pause.valueAsNumber
+    };
+}
+
+function showInputError(message) {
+    showState("error", message);
+    text.setAttribute("aria-invalid", "true");
+    text.focus();
 }
 
 function readFromStart() {
-    if (read.disabled) return;
-    if (!speed.reportValidity() || !volume.reportValidity()) return;
+    if (closed || !speakers.length || connecting || active) return;
+    const invalidSetting = numericSettings.find((input) => !input.validity.valid);
+    if (invalidSetting) {
+        if (voiceDetails.contains(invalidSetting)) voiceDetails.open = true;
+        invalidSetting.reportValidity();
+        return;
+    }
     if (text.value.length > maxInputLength) {
-        showState("error", "本文が長すぎます。10万文字以内に分けてください。");
+        showInputError("本文が長すぎます。10万文字以内に分けてください。");
         return;
     }
     const chunks = window.splitText(text.value);
     if (!chunks.length) {
-        showState("error", "読み上げる文字を本文に入力してください。");
-        text.focus();
+        showInputError("読み上げる文字を本文に入力してください。");
         return;
     }
     // At the cap the shared splitter replaces the last chunk with a spoken
     // truncation notice. Keep the whole input editable and ask for a shorter part.
     if (chunks.length >= SPEECH_MAX_CHUNKS) {
-        showState("error", "読み上げ単位が多すぎます。本文を分けてください。");
+        showInputError("読み上げ単位が多すぎます。本文を分けてください。");
         return;
     }
     player.start(chunks, selectedSettings());
@@ -124,6 +164,7 @@ async function connect() {
     connecting = true;
     connection.dataset.state = "connecting";
     connection.textContent = "接続を確認中…";
+    announcement.textContent = "VOICEVOXへの接続を確認しています。";
     refreshControls();
     try {
         const result = await window.reader.speakers();
@@ -136,7 +177,7 @@ async function connect() {
         setStyles(selected, preferredStyleId);
         connection.dataset.state = "connected";
         connection.textContent = "VOICEVOX 接続済み";
-        showState("stopped", "停止");
+        showState("stopped", "停止", "VOICEVOXに接続しました。読み上げできます。");
     } catch (error) {
         if (closed) return;
         showDisconnected();
@@ -148,7 +189,7 @@ async function connect() {
 }
 
 async function saveSettings() {
-    if (!speed.checkValidity() || !volume.checkValidity() || !style.value) return;
+    if (!style.value || numericSettings.some((input) => !input.validity.valid)) return;
     const settings = selectedSettings();
     preferredStyleId = settings.styleId;
     const revision = ++saveRevision;
@@ -160,16 +201,22 @@ async function saveSettings() {
 }
 
 read.addEventListener("click", readFromStart);
-stop.addEventListener("click", () => player.stop());
+stop.addEventListener("click", () => { if (active) player.stop(); });
 reconnect.addEventListener("click", connect);
+text.addEventListener("input", () => {
+    if (text.hasAttribute("aria-invalid")) showState("stopped", "停止", "");
+});
 speaker.addEventListener("change", () => {
     setStyles(speakers[speaker.selectedIndex], null);
     saveSettings();
 });
 style.addEventListener("change", saveSettings);
-for (const input of [speed, volume]) input.addEventListener("input", saveSettings);
+for (const input of numericSettings) input.addEventListener("input", saveSettings);
+document.addEventListener("compositionstart", () => { composing = true; });
+document.addEventListener("compositionend", () => { composing = false; });
+document.addEventListener("focusout", () => { composing = false; });
 document.addEventListener("keydown", (event) => {
-    if (event.isComposing || event.keyCode === 229 || event.repeat) return;
+    if (event.defaultPrevented || composing || event.isComposing || event.keyCode === 229 || event.repeat) return;
     if (event.key === "Enter" && event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
         event.preventDefault();
         readFromStart();
@@ -183,12 +230,16 @@ window.addEventListener("pagehide", () => {
     player.close();
 }, { once: true });
 
+if (document.activeElement === document.body) text.focus();
 try {
     const settings = await window.reader.getSettings();
     if (settings) {
         preferredStyleId = settings.styleId ?? preferredStyleId;
         speed.value = String(settings.speed ?? 1);
         volume.value = String(Math.round((settings.volume ?? 1) * 100));
+        pitch.value = String(settings.pitch ?? 0);
+        intonation.value = String(settings.intonation ?? 1);
+        pause.value = String(settings.pause ?? 1);
     }
 } catch {
     settingsNotice.textContent = "保存済みの設定を読み込めませんでした。";

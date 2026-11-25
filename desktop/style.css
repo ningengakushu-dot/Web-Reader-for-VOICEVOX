@@ -10,7 +10,7 @@ main {
     max-width: 72rem;
     min-height: 100vh;
     margin: auto;
-    padding: clamp(16px, 4vw, 40px);
+    padding: clamp(1rem, 4vw, 2.5rem);
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -22,6 +22,7 @@ header, footer, .engine, .actions, h1, .sound-mark {
 header, footer { justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 h1 { gap: 11px; margin: 0; font-size: 1.4rem; letter-spacing: .01em; }
 .sound-mark {
+    flex: none;
     justify-content: center;
     gap: 3px;
     width: 36px;
@@ -32,14 +33,14 @@ h1 { gap: 11px; margin: 0; font-size: 1.4rem; letter-spacing: .01em; }
 .sound-mark i { width: 3px; height: 10px; border-radius: 3px; background: white; }
 .sound-mark i:nth-child(2) { height: 21px; }
 .sound-mark i:nth-child(3) { height: 15px; }
-.engine { gap: 10px; font-size: .88rem; color: #43595a; }
+.engine { flex-wrap: wrap; gap: 10px; color: #43595a; }
 .editor { display: flex; flex-direction: column; flex: 1; gap: 8px; }
 #text-label, legend { font-weight: 650; }
 textarea, select, input, button {
     font: inherit;
     color: inherit;
     background: white;
-    border: 1px solid #869a97;
+    border: 1px solid #657b78;
     border-radius: 6px;
 }
 textarea {
@@ -52,29 +53,57 @@ textarea {
     line-height: 1.8;
 }
 textarea::placeholder { color: #647574; }
+textarea[aria-invalid="true"], input:user-invalid { border-color: #9c322a; }
 fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
 legend { margin-bottom: 8px; padding: 0; }
 .fields {
     display: grid;
-    grid-template-columns: minmax(9rem, 1.5fr) minmax(9rem, 1.5fr) repeat(2, minmax(6rem, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1.5fr)) repeat(2, minmax(0, 1fr));
     gap: 12px;
 }
-.fields label { font-size: .88rem; color: #405655; }
+.fields label { min-width: 0; color: #405655; }
+details { margin-top: 10px; }
+summary { width: fit-content; padding: 6px 0; cursor: pointer; font-weight: 600; }
+.voice-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 4px; }
 select, input { display: block; width: 100%; margin-top: 4px; padding: 7px 9px; font-size: 1rem; }
-button { padding: 8px 14px; font-weight: 600; cursor: pointer; }
-button:enabled:hover { background: #e7eeeb; }
-#reconnect { padding: 4px 10px; }
+button { min-height: 2.5rem; padding: 8px 14px; font-weight: 600; cursor: pointer; }
+button[aria-disabled="false"]:hover { background: #e7eeeb; }
 #read { background: #0a665b; border-color: #0a665b; color: white; }
-#read:enabled:hover { background: #074e46; }
-:disabled { opacity: .55; cursor: default; }
-:focus-visible { outline: 3px solid #177dca; outline-offset: 3px; }
-.actions { gap: 10px; }
+#read[aria-disabled="false"]:hover { background: #074e46; }
+:disabled, [aria-disabled="true"], #read[aria-disabled="true"] {
+    background: #edf1f0;
+    border-color: #879895;
+    color: #546665;
+    cursor: default;
+}
+:focus-visible { outline: 3px solid #0d5793; outline-offset: 3px; }
+.actions { flex-wrap: wrap; gap: 10px; }
 kbd { margin-left: 4px; font: .76rem "Segoe UI", sans-serif; }
 footer { border-top: 1px solid #c9d6d2; padding-top: 16px; }
-#status { font-weight: 600; }
+#status { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
 #status[data-state="playing"] { color: #085c4e; }
 #status[data-state="error"], #settings-notice, #connection[data-state="offline"] { color: #9c322a; }
-@media (max-width: 640px) {
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+@media (max-width: 40rem) {
     .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     main { gap: 14px; }
+}
+@media (max-width: 22rem) {
+    .fields { grid-template-columns: minmax(0, 1fr); }
+}
+@media (forced-colors: active) {
+    .sound-mark { border: 1px solid CanvasText; }
+    .sound-mark i { background: CanvasText; }
+    #read { border-color: ButtonText; }
+    :disabled, [aria-disabled="true"], #read[aria-disabled="true"] { color: GrayText; border-color: GrayText; }
+    :focus-visible { outline-color: Highlight; }
 }

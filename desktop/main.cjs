@@ -32,13 +32,35 @@ app.whenReady().then(async () => {
             headers: { "Content-Type": assets[asset], "Cache-Control": "no-store" }
         });
     });
-    Menu.setApplicationMenu(null);
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{
+        label: "表示(&V)",
+        submenu: [
+            { role: "zoomIn", label: "拡大" },
+            { role: "zoomOut", label: "縮小" },
+            { role: "resetZoom", label: "実際のサイズ" }
+        ]
+    }]));
     const win = new BrowserWindow({
         title: "VOICEVOX Local Reader", width: 900, height: 740, minWidth: 580, minHeight: 540,
         webPreferences: { session: local, preload: path.join(__dirname, "preload.cjs"),
             sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false, backgroundThrottling: false }
     });
     const wc = win.webContents;
+    wc.on("context-menu", (_event, { isEditable, editFlags }) => {
+        if (!isEditable) return;
+        // Native roles act on the focused editor. The app never reads clipboard contents.
+        const menu = Menu.buildFromTemplate([
+            { role: "undo", label: "元に戻す", enabled: editFlags.canUndo },
+            { role: "redo", label: "やり直し", enabled: editFlags.canRedo },
+            { type: "separator" },
+            { role: "cut", label: "切り取り", enabled: editFlags.canCut },
+            { role: "copy", label: "コピー", enabled: editFlags.canCopy },
+            { role: "paste", label: "貼り付け", enabled: editFlags.canPaste },
+            { type: "separator" },
+            { role: "selectAll", label: "すべて選択", enabled: editFlags.canSelectAll }
+        ]);
+        menu.popup({ window: win });
+    });
     const directory = app.getPath("userData");
     let audio, connection;
     const trusted = (event) => !wc.isDestroyed() && event.sender === wc &&
@@ -59,7 +81,7 @@ app.whenReady().then(async () => {
         try {
             return { ok: true, value: await fn() };
         } catch (error) {
-            return { ok: false, error: ["offline", "invalid"].includes(error.message) ? error.message : "synthesis" };
+            return { ok: false, error: ["offline", "invalid", "retryable"].includes(error.message) ? error.message : "synthesis" };
         }
     }
     ipcMain.handle("speakers", (event) => {
