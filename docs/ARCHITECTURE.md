@@ -81,6 +81,8 @@ Content Script は物理分割後も、再注入時の stale instance 置換、b
 
 ## パッケージと CI
 
+Windows 版は `desktop/` の独立した Electron アプリで、拡張と `background-speech.js` の正本を共有する。Windows の配布 ZIP に同梱する資材は `desktop/build.mjs` で選び、`windows-reader` CI で展開した EXE の起動を検査する。[Windows 版の設計・起動手順](../desktop/README.md) · [実機での再生・停止・遅延測定](WINDOWS-READER-VALIDATION.md)
+
 Chrome Web Store 提出物は `tools/pack.ps1` の許可リスト方式で生成する。実行時ファイルを追加しても、この一覧に無ければ CI 上のソースが正常でも配布 ZIP では欠落するため、依存追加とパッケージ変更を同じ変更単位で扱う。互換バンドル `background.js` / `offscreen.js` と旧 `content.js` は提出物に含めず、実際に Chrome が読む責務別ファイルだけを同梱する。
 
 `.github/workflows/check.yml` は構文、主要回帰テスト、静的セキュリティ監査、manifest/HTML の参照整合性、リモートコード禁止、パッケージ対象の存在を確認する。`.github/workflows/architecture-contract.yml` は高リスクな状態遷移、Content Script の寿命/プライバシー/注入順、生成バンドルの同期を確認する。`CodeQL` と `build-release-candidate` を含む全チェック成功を `develop` 向け PR の完了条件とする。
